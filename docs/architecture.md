@@ -1,6 +1,6 @@
 # File Peeker v1 Architecture
 
-Status: design only; not implemented.
+Status: compilable skeleton; functional behavior is not implemented.
 
 ## Goal
 
@@ -18,8 +18,9 @@ flowchart LR
 ```
 
 V1 is local, macOS-only, read-only, and one-to-one: each `BrowserClient` owns one
-dedicated host process. Remote connections and the native Swift UI are future
-work.
+dedicated host process. Remote connections are future work. A native SwiftUI
+shell exists to validate project generation and bindings, but its functional UI
+remains future work.
 
 ## Components
 
@@ -73,9 +74,9 @@ impl DirectoryListing {
 }
 ```
 
-These signatures are illustrative, not implemented code. They define the
-behavior shared by the native Rust facade and UniFFI API, not their exact
-generated syntax.
+These signatures define the implemented skeleton API shared by the native Rust
+facade and UniFFI bindings. The methods currently return a typed
+`NotImplemented` error.
 
 `start_listing` begins the operation and returns a listing object.
 `next_entry` asynchronously waits for one result:
@@ -135,7 +136,9 @@ navigation.
 
 ### Native Swift UI
 
-A native macOS UI written in Swift is a planned peer of the Rust TUI. It will:
+A native macOS UI written in Swift is a planned peer of the Rust TUI. Its
+current empty shell validates XcodeGen and UniFFI compilation. The functional UI
+will:
 
 - Use the same compiled Rust client library as the TUI.
 - Call the client through UniFFI-generated Swift bindings.
@@ -147,9 +150,8 @@ A native macOS UI written in Swift is a planned peer of the Rust TUI. It will:
 - Keep its Xcode project definition in an XcodeGen `project.yml` file.
 
 It will not implement the host protocol, manage sockets, or start the host
-itself. Those responsibilities remain inside the shared client. The Swift UI is
-not part of v1, so its screens, framework choice, and user interactions are not
-specified yet.
+itself. Those responsibilities remain inside the shared client. The skeleton
+uses SwiftUI, but screens and user interactions are not specified yet.
 
 XcodeGen is the source of truth for project structure and build settings. The
 generated `.xcodeproj` is an output, not a manually maintained project
@@ -490,7 +492,6 @@ does not expose parent navigation in v1.
 - Reconnection and sharing one host between multiple clients.
 - Non-UTF-8 paths.
 - Remote transport, authentication, encryption, and allowed roots.
-- Native Swift UI implementation and interaction design.
-- UniFFI artifact generation and packaging for Swift.
-- XcodeGen project definition and generated Xcode project.
+- Native Swift UI behavior and interaction design beyond the compilation shell.
+- Distributable UniFFI/XCFramework packaging for Swift.
 - Linux and Windows support.

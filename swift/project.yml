@@ -1,0 +1,41 @@
+name: FilePeeker
+
+options:
+  bundleIdPrefix: dev.filepeeker
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "6.0"
+
+targets:
+  FilePeeker:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: App
+      - path: Generated
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.filepeeker.FilePeeker
+        PRODUCT_NAME: FilePeeker
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_CFBundleDisplayName: File Peeker
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/Generated"
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/../target/release"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lfile_peeker_client"
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - "-Xcc"
+          - "-fmodule-map-file=$(SRCROOT)/Generated/FilePeekerClientFFI.modulemap"
+    scheme:
+      gatherCoverageData: false
+

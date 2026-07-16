@@ -1,6 +1,7 @@
 # File Peeker Protocol v1
 
-Status: design only; not implemented.
+Status: shared message types exist in the compilable skeleton; framing,
+transport, and handlers are not implemented.
 
 This is the private local protocol between the shared client library and its
 dedicated host. UIs do not implement this protocol. Both the Rust TUI and a

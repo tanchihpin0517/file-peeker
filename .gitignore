@@ -1,0 +1,8 @@
+/target/
+/artifacts/
+/swift/Generated/
+/swift/*.xcodeproj/
+/swift/DerivedData/
+*.xcresult
+.DS_Store
+

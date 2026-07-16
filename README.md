@@ -3,8 +3,12 @@
 File Peeker is a planned Finder-like file browser written in Rust. Its
 filesystem logic can run locally at first and on another machine in the future.
 
-This repository currently contains **documentation only**. There is no working
-application or Rust workspace yet.
+This repository contains the compilable **v1 project skeleton**. The Rust
+workspace, UniFFI Swift bindings, Ratatui binary, host binary, and XcodeGen
+SwiftUI shell are wired together, but filesystem browsing and process/transport
+behavior are intentionally not implemented yet. The user-facing app shells run
+without starting those unfinished services; direct operational API calls return
+a typed `NotImplemented` error.
 
 ## Design
 
@@ -50,10 +54,10 @@ changes, remote connections, reconnection, or a host shared by multiple clients.
 Metadata is available through the host and client for development and testing,
 but is not shown in the terminal UI.
 
-The native Swift UI is part of the project architecture but is not implemented
-in v1.
+The native SwiftUI target currently provides only a compilation and binding
+integration shell. Its functional UI remains outside v1.
 
-## Planned technology
+## Technology
 
 - Rust for the host and shared client library.
 - [Ratatui](https://ratatui.rs/) for the first terminal UI.
@@ -67,4 +71,30 @@ in v1.
 - [Architecture](docs/architecture.md)
 - [Protocol](docs/protocol.md)
 
-The documents describe planned behavior, not an existing implementation.
+## Build and verify
+
+Requirements are Rust, Swift/Xcode, and XcodeGen on macOS.
+
+```text
+make check          # Rust formatting, Clippy, and tests
+make runnable-test  # Run the empty terminal application successfully
+make bindings       # Build Rust and generate Swift bindings
+make client-integration-test
+                    # Compile, link, and test generated Swift types and an async call
+make xcode-build    # Generate and compile the SwiftUI project
+make verify         # Run the complete verification sequence
+```
+
+Generated Swift bindings, native build products, DerivedData, and the generated
+`.xcodeproj` are build artifacts and are not committed.
+
+The documents specify the intended functional behavior beyond the empty
+skeleton.
+
+## License
+
+Licensed under the Apache License, Version 2.0. Contributors retain copyright
+in their contributions while licensing them under Apache-2.0. See
+[LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Copyright 2026 Chih-Pin Tan.
