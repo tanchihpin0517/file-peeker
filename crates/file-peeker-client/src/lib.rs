@@ -1,18 +1,22 @@
 //! UI-independent File Peeker client API.
 //!
-//! This crate defines the native Rust and `UniFFI` surfaces for v1. All
-//! operational methods deliberately return [`ClientError::NotImplemented`]
-//! until host lifecycle and filesystem behavior are implemented.
+//! This crate defines the native Rust and `UniFFI` surfaces for v1. Local server
+//! startup is implemented; filesystem operations remain placeholders.
 
 use std::sync::Arc;
 
 use thiserror::Error;
 
+mod listing;
+#[allow(dead_code)]
+mod remote_server_install;
+mod startup;
+
 uniffi::setup_scaffolding!();
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct ClientConfig {
-    pub host_executable_path: String,
+    pub server_executable_path: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -46,10 +50,10 @@ pub enum ClientError {
     NotImplemented { operation: String },
     #[error("invalid path: {message}")]
     InvalidPath { message: String },
-    #[error("failed to start host: {message}")]
-    HostStart { message: String },
-    #[error("host process exited: {message}")]
-    HostExited { message: String },
+    #[error("failed to start server: {message}")]
+    ServerStart { message: String },
+    #[error("server process exited: {message}")]
+    ServerExited { message: String },
     #[error("connection closed: {message}")]
     ConnectionClosed { message: String },
     #[error("protocol error: {message}")]
@@ -69,32 +73,41 @@ impl ClientError {
 
 #[derive(Debug, uniffi::Object)]
 pub struct BrowserClient {
-    _private: (),
+    lifecycle: startup::LifecycleHandle,
 }
 
-#[uniffi::export]
+impl Drop for BrowserClient {
+    fn drop(&mut self) {
+        self.lifecycle.shutdown();
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
 impl BrowserClient {
-    /// Creates a client and starts its dedicated host.
+    /// Creates a client and starts its dedicated server.
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::NotImplemented`] in the empty v1 skeleton.
+    /// Returns a typed startup, process, connection, or protocol error.
     #[uniffi::constructor(name = "start")]
-    #[allow(clippy::unused_async)]
     pub async fn start(config: ClientConfig) -> Result<Arc<Self>, ClientError> {
-        let _ = config;
-        Err(ClientError::not_implemented("BrowserClient.start"))
+        let lifecycle = startup::start_local(config).await?;
+        Ok(Arc::new(Self { lifecycle }))
     }
 
     /// Starts a pull-based directory listing operation.
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::NotImplemented`] in the empty v1 skeleton.
-    #[allow(clippy::unused_async)]
+    /// Returns a typed path, connection, protocol, or filesystem error.
     pub async fn start_listing(&self, path: String) -> Result<Arc<DirectoryListing>, ClientError> {
-        let _ = path;
-        Err(ClientError::not_implemented("BrowserClient.start_listing"))
+        if self.lifecycle.is_closed() {
+            return Err(ClientError::ConnectionClosed {
+                message: "server is no longer running".into(),
+            });
+        }
+        let state = listing::start(self.lifecycle.socket_path().to_path_buf(), path).await?;
+        Ok(Arc::new(DirectoryListing { state }))
     }
 
     /// Retrieves metadata for one path.
@@ -111,19 +124,18 @@ impl BrowserClient {
 
 #[derive(Debug, uniffi::Object)]
 pub struct DirectoryListing {
-    _private: (),
+    state: Arc<listing::ListingState>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl DirectoryListing {
     /// Waits for the next directory entry or successful completion.
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::NotImplemented`] in the empty v1 skeleton.
-    #[allow(clippy::unused_async)]
+    /// Returns the next streamed entry or `None` when listing is complete.
     pub async fn next_entry(&self) -> Result<Option<DirectoryEntry>, ClientError> {
-        Err(ClientError::not_implemented("DirectoryListing.next_entry"))
+        listing::next(&self.state).await
     }
 }
 
@@ -144,18 +156,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_fails_safely_until_implemented() {
+    async fn start_rejects_an_empty_server_executable() {
         let error = BrowserClient::start(ClientConfig {
-            host_executable_path: "/tmp/file-peeker-host".into(),
+            server_executable_path: String::new(),
         })
         .await
-        .expect_err("the skeleton must not claim startup succeeded");
+        .expect_err("an empty executable must fail");
 
-        assert_eq!(
-            error,
-            ClientError::NotImplemented {
-                operation: "BrowserClient.start".into()
-            }
-        );
+        assert!(matches!(error, ClientError::ServerStart { .. }));
+    }
+
+    #[tokio::test]
+    async fn start_reports_an_early_server_exit() {
+        let error = BrowserClient::start(ClientConfig {
+            server_executable_path: "/usr/bin/false".into(),
+        })
+        .await
+        .expect_err("a process that exits immediately must fail startup");
+
+        assert!(matches!(error, ClientError::ServerExited { .. }));
     }
 }

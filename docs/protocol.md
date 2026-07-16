@@ -1,21 +1,21 @@
 # File Peeker Protocol v1
 
-Status: shared message types exist in the compilable skeleton; framing,
-transport, and handlers are not implemented.
+Status: NDJSON framing, the local Unix transport, control and operation
+handshakes, and directory listing are implemented. Metadata remains pending.
 
 This is the private local protocol between the shared client library and its
-dedicated host. UIs do not implement this protocol. Both the Rust TUI and a
+dedicated server. UIs do not implement this protocol. Both the Rust TUI and a
 future native Swift UI use the same client library and its UI-independent
 interface. Swift reaches that interface through UniFFI-generated bindings;
-UniFFI is not part of the host wire protocol.
+UniFFI is not part of the server wire protocol.
 
-Each `BrowserClient` owns one host. They use one long-lived control connection
+Each `BrowserClient` owns one server. They use one long-lived control connection
 and one connection per filesystem operation. Each operation connection carries
 exactly one request, so messages do not need request IDs or multiplexing.
 
 ## Transport
 
-The host listens on one private Unix domain stream socket and accepts the
+The server listens on one private Unix domain stream socket and accepts the
 owning client's control and operation connections. Each message is one UTF-8
 JSON object followed by a newline (NDJSON).
 
@@ -26,7 +26,7 @@ JSON object followed by a newline (NDJSON).
 - Extra JSON fields are ignored for forward compatibility.
 
 Paths are absolute UTF-8 strings in v1. The client converts relative input
-against its current directory before sending it. The host rejects relative
+against its current directory before sending it. The server rejects relative
 paths. Supporting non-UTF-8 Unix paths is deferred.
 
 ## Connection roles
@@ -45,7 +45,7 @@ Operation connection:
 {"type":"hello","version":1,"role":"operation"}
 ```
 
-The host accepts the version:
+The server accepts the version:
 
 ```json
 {"type":"hello_ok","version":1}
@@ -61,16 +61,16 @@ No other message may be sent before `hello_ok`.
 
 Exactly one control connection exists. It stays open for the lifetime of
 `BrowserClient` and carries no filesystem operations in v1. If it closes, the
-host closes all operation connections and exits.
+server closes all operation connections and exits.
 
 Each operation connection sends exactly one `list` or `get_metadata` request
 after `hello_ok`, receives that operation's responses, and then closes. Multiple
 operation connections may be active at once.
 
-The control connection must be established first. The host rejects operation
+The control connection must be established first. The server rejects operation
 connections received before the control connection or after it has closed.
 
-The host is dedicated to one client and its socket is placed in a private
+The server is dedicated to one client and its socket is placed in a private
 owner-only directory. Therefore every accepted connection implicitly belongs
 to that client; no session token is used.
 
@@ -82,7 +82,7 @@ Request:
 {"type":"list","path":"/tmp/example"}
 ```
 
-The host sends one `entry` for every direct child:
+The server sends one `entry` for every direct child:
 
 ```json
 {"type":"entry","path":"/tmp/example/docs","name":"docs","kind":"directory","navigable":true}
@@ -103,7 +103,7 @@ Failure:
 ```
 
 An empty directory produces only `done`. A failure can occur after some
-entries; those entries remain valid. The host flushes entries promptly so the
+entries; those entries remain valid. The server flushes entries promptly so the
 UI can display them before the whole directory has been read.
 
 `kind` is one of:
@@ -167,7 +167,7 @@ errors close the connection because continuing could misread the stream.
 - An operation `error` is returned to the caller.
 - Losing an operation connection fails only that operation.
 - Closing an operation connection cancels that operation.
-- Losing the control connection or host process invalidates the client and all
+- Losing the control connection or server process invalidates the client and all
   active operations.
 
 Closing the control connection is the shutdown mechanism. There is no separate

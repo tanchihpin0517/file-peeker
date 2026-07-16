@@ -1,6 +1,6 @@
-//! Private wire types for the File Peeker host protocol.
+//! Private wire types for the File Peeker server protocol.
 //!
-//! The protocol is specified now so the host and client can compile against the
+//! The protocol is specified now so the server and client can compile against the
 //! same contract. Encoding, decoding, framing, and transport are intentionally
 //! not implemented in the v1 skeleton.
 
@@ -49,7 +49,7 @@ pub enum ClientMessage {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum HostMessage {
+pub enum ServerMessage {
     HelloOk {
         version: u32,
     },

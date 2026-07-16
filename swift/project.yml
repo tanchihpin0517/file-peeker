@@ -19,6 +19,8 @@ targets:
     sources:
       - path: App
       - path: Generated
+      - path: Resources
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.filepeeker.FilePeeker
@@ -38,4 +40,3 @@ targets:
           - "-fmodule-map-file=$(SRCROOT)/Generated/FilePeekerClientFFI.modulemap"
     scheme:
       gatherCoverageData: false
-

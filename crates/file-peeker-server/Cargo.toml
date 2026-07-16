@@ -1,14 +1,19 @@
 [package]
-name = "file-peeker-host"
+name = "file-peeker-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-file-peeker-protocol = { path = "../file-peeker-protocol" }
+clap.workspace = true
+file-peeker-protocol = { version = "=0.1.0", path = "../file-peeker-protocol" }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

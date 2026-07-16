@@ -7,7 +7,7 @@ ARTIFACTS_DIR := $(ROOT)/artifacts
 RUST_DYLIB := $(ROOT)/target/release/libfile_peeker_client.dylib
 RUST_STATICLIB := $(ROOT)/target/release/libfile_peeker_client.a
 
-.PHONY: all check fmt cargo-check clippy rust-test runnable-test rust-library bindings client-integration-test xcode-project xcode-build verify clean-generated
+.PHONY: all check fmt cargo-check clippy rust-test local-server-test runnable-test rust-library server-resource bindings client-integration-test xcode-project xcode-build verify clean-generated
 
 all: check
 
@@ -25,8 +25,9 @@ clippy:
 rust-test:
 	cargo test --workspace
 
-runnable-test:
-	cargo run -p file-peeker-tui --bin file-peeker
+local-server-test: ; scripts/test-local-client-server.sh
+
+runnable-test: ; scripts/test-local-tui.sh
 
 rust-library:
 	cargo build -p file-peeker-client --release
@@ -40,7 +41,7 @@ bindings: rust-library
 	test -f "$(GENERATED_DIR)/FilePeekerClientFFI.h"
 	test -f "$(GENERATED_DIR)/FilePeekerClientFFI.modulemap"
 
-client-integration-test: bindings
+client-integration-test: bindings server-resource
 	mkdir -p "$(ARTIFACTS_DIR)"
 	swiftc -parse-as-library \
 		-module-name FilePeekerClientIntegrationTests \
@@ -54,7 +55,9 @@ client-integration-test: bindings
 		-o "$(ARTIFACTS_DIR)/file-peeker-client-integration-tests"
 	DYLD_LIBRARY_PATH="$(ROOT)/target/release" "$(ARTIFACTS_DIR)/file-peeker-client-integration-tests"
 
-xcode-project: bindings
+server-resource: ; scripts/bundle-swift-server.sh
+
+xcode-project: bindings server-resource
 	cd "$(SWIFT_DIR)" && xcodegen generate
 
 xcode-build: xcode-project
@@ -66,7 +69,6 @@ xcode-build: xcode-project
 		CODE_SIGNING_ALLOWED=NO \
 		build
 
-verify: check runnable-test client-integration-test xcode-build
+verify: check local-server-test runnable-test client-integration-test xcode-build
 
-clean-generated:
-	rm -rf "$(GENERATED_DIR)" "$(ARTIFACTS_DIR)" "$(SWIFT_DIR)/FilePeeker.xcodeproj" "$(SWIFT_DIR)/DerivedData"
+clean-generated: ; rm -rf "$(GENERATED_DIR)" "$(ARTIFACTS_DIR)" "$(SWIFT_DIR)/Resources" "$(SWIFT_DIR)/FilePeeker.xcodeproj" "$(SWIFT_DIR)/DerivedData"
