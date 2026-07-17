@@ -11,6 +11,7 @@ mod install;
 mod listing;
 mod opener;
 mod startup;
+mod tree;
 
 uniffi::setup_scaffolding!();
 
@@ -39,6 +40,15 @@ pub struct DirectoryEntry {
     pub name: String,
     pub kind: EntryKind,
     pub navigable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct DirectoryTreeRow {
+    pub entry: DirectoryEntry,
+    pub parent_path: Option<String>,
+    pub depth: u32,
+    pub expanded: bool,
+    pub error_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -81,6 +91,7 @@ impl ClientError {
 pub struct BrowserClient {
     lifecycle: startup::LifecycleHandle,
     mode: ClientMode,
+    tree: Arc<std::sync::Mutex<tree::DirectoryTree>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,7 +126,11 @@ impl BrowserClient {
     pub async fn start(config: ClientConfig) -> Result<Arc<Self>, ClientError> {
         let mode = ClientMode::from(&config.target);
         let lifecycle = startup::start(config).await?;
-        Ok(Arc::new(Self { lifecycle, mode }))
+        Ok(Arc::new(Self {
+            lifecycle,
+            mode,
+            tree: Arc::new(std::sync::Mutex::new(tree::DirectoryTree::default())),
+        }))
     }
 
     /// Starts a pull-based directory listing operation.
@@ -131,6 +146,61 @@ impl BrowserClient {
         }
         let state = listing::start(self.lifecycle.socket_path().to_path_buf(), path).await?;
         Ok(Arc::new(DirectoryListing { state }))
+    }
+
+    /// Replaces the active tree root and returns its direct entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed path, connection, protocol, or filesystem error.
+    pub async fn load_tree(&self, path: String) -> Result<Vec<DirectoryTreeRow>, ClientError> {
+        self.ensure_open()?;
+        let generation = lock_tree(&self.tree).begin_root(path.clone());
+        let entries = listing::collect(self.lifecycle.socket_path().to_path_buf(), path).await?;
+        Ok(lock_tree(&self.tree).finish_root(generation, entries))
+    }
+
+    /// Freshly loads and expands one visible directory in the active tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-path error for an unknown or non-navigable row, or a
+    /// connection, protocol, or filesystem error when listing the directory fails.
+    pub async fn expand_tree(&self, path: String) -> Result<Vec<DirectoryTreeRow>, ClientError> {
+        self.ensure_open()?;
+        let (generation, revision) = match lock_tree(&self.tree).prepare_expand(&path)? {
+            tree::ExpandAction::Ready(rows) => return Ok(rows),
+            tree::ExpandAction::Load {
+                generation,
+                revision,
+            } => (generation, revision),
+        };
+        match listing::collect(self.lifecycle.socket_path().to_path_buf(), path.clone()).await {
+            Ok(entries) => {
+                Ok(lock_tree(&self.tree).finish_expand(generation, revision, &path, entries))
+            }
+            Err(error) => {
+                lock_tree(&self.tree).fail_expand(generation, revision, &path, &error);
+                Err(error)
+            }
+        }
+    }
+
+    /// Collapses a visible directory and discards all of its descendants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-path error for an unknown or non-navigable row.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn collapse_tree(&self, path: String) -> Result<Vec<DirectoryTreeRow>, ClientError> {
+        self.ensure_open()?;
+        lock_tree(&self.tree).collapse(&path)
+    }
+
+    /// Returns the flattened visible snapshot of the active directory tree.
+    #[must_use]
+    pub fn tree_rows(&self) -> Vec<DirectoryTreeRow> {
+        lock_tree(&self.tree).rows()
     }
 
     /// Returns the server process's current working directory.
@@ -183,6 +253,22 @@ impl BrowserClient {
         let _ = path;
         Err(ClientError::not_implemented("BrowserClient.metadata"))
     }
+
+    fn ensure_open(&self) -> Result<(), ClientError> {
+        if self.lifecycle.is_closed() {
+            return Err(ClientError::ConnectionClosed {
+                message: "server is no longer running".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn lock_tree(
+    tree: &std::sync::Mutex<tree::DirectoryTree>,
+) -> std::sync::MutexGuard<'_, tree::DirectoryTree> {
+    tree.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Debug, uniffi::Object)]

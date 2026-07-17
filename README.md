@@ -5,8 +5,8 @@ filesystem logic can run locally at first and on another machine in the future.
 
 This repository contains a minimal functional local browser and an SSH client
 diagnostic. The shared client starts and supervises a dedicated server over a
-private Unix socket, streams directory entries, and is used by both Ratatui and
-SwiftUI frontends.
+private Unix socket, maintains the visible directory tree, and is used by both
+Ratatui and SwiftUI frontends.
 
 ## Design
 
@@ -48,7 +48,7 @@ V1 is a local, macOS-only, read-only browser. It:
 - Allow entering child directories and directory symlinks.
 - Open non-directory entries with the macOS default application.
 
-V1 will not include parent navigation, sorting, previews, search, filesystem
+V1 will not include parent navigation, file previews, search, filesystem
 changes, remote UI navigation, reconnection, or a server shared by multiple clients.
 Metadata is available through the server and client for development and testing,
 but is not shown in the terminal UI.

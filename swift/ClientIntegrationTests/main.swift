@@ -36,6 +36,16 @@ struct ClientIntegrationTests {
         require(entry.kind == .directory, "DirectoryEntry did not preserve kind")
         require(entry.navigable, "DirectoryEntry did not preserve navigable")
 
+        let row = DirectoryTreeRow(
+            entry: entry,
+            parentPath: "/tmp/example",
+            depth: 1,
+            expanded: false,
+            errorMessage: nil
+        )
+        require(row.entry == entry, "DirectoryTreeRow did not preserve its entry")
+        require(row.depth == 1, "DirectoryTreeRow did not preserve depth")
+
         let metadata = FileMetadata(
             path: "/tmp/example/docs",
             kind: .directory,
@@ -95,6 +105,10 @@ struct ClientIntegrationTests {
             let expectedName = "visible-from-swift.txt"
             let file = directory.appendingPathComponent(expectedName)
             try Data().write(to: file)
+            let nested = directory.appendingPathComponent("nested", isDirectory: true)
+            try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
+            let nestedFile = nested.appendingPathComponent("child.txt")
+            try Data().write(to: nestedFile)
 
             let client = try await BrowserClient.start(
                 config: ClientConfig(
@@ -112,17 +126,45 @@ struct ClientIntegrationTests {
                 "real server current root did not match its working directory"
             )
 
-            let listing = try await client.startListing(path: directory.path)
-            var names: [String] = []
-            while let entry = try await listing.nextEntry() {
-                names.append(entry.name)
-            }
+            let rootRows = try await client.loadTree(path: directory.path)
+            let names = rootRows.map(\.entry.name)
 
             require(
                 names.contains(expectedName),
                 "real server listing did not return the test file"
             )
-            print("PASS real server startup and listing from Swift")
+            let firstExpandedRows = try await client.expandTree(path: nested.path)
+            let firstNestedNames = firstExpandedRows
+                .filter { $0.parentPath == nested.path }
+                .map(\.entry.name)
+            require(
+                firstNestedNames == [nestedFile.lastPathComponent],
+                "first shared-tree expansion returned unexpected contents"
+            )
+
+            let collapsedRows = try client.collapseTree(path: nested.path)
+            require(
+                collapsedRows.allSatisfy { $0.parentPath != nested.path },
+                "collapse did not discard nested rows"
+            )
+
+            let addedLater = nested.appendingPathComponent("added-later.txt")
+            try Data().write(to: addedLater)
+            let secondExpandedRows = try await client.expandTree(path: nested.path)
+            let secondNestedNames = Set(
+                secondExpandedRows
+                    .filter { $0.parentPath == nested.path }
+                    .map(\.entry.name)
+            )
+            require(
+                secondNestedNames == [nestedFile.lastPathComponent, addedLater.lastPathComponent],
+                "second shared-tree expansion did not reload fresh contents"
+            )
+            require(
+                client.treeRows() == secondExpandedRows,
+                "treeRows did not return the current shared-tree snapshot"
+            )
+            print("PASS shared client tree load, collapse, and fresh re-expansion from Swift")
         } catch {
             fail("real server startup and listing failed: \(error)")
         }

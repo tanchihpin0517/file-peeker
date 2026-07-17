@@ -37,7 +37,7 @@ flowchart LR
 | Component | Responsibility | Communicates with |
 | --- | --- | --- |
 | UI | Presents entries, accepts navigation, and displays loading or error state | Public client API only |
-| Client | Starts and owns a server, normalizes paths, performs handshakes, maps protocol data to UI-safe types, and supervises shutdown | UI through Rust/UniFFI; server through private sockets |
+| Client | Starts and owns a server, maintains the active visible directory tree, normalizes paths, performs handshakes, maps protocol data to UI-safe types, and supervises shutdown | UI through Rust/UniFFI; server through private sockets |
 | Server | Reads the filesystem and streams results | Client through the private wire protocol; local filesystem through OS APIs |
 
 The UI never opens a socket or encodes protocol messages. The server never
@@ -81,6 +81,23 @@ impl BrowserClient {
         path: String,
     ) -> Result<Arc<DirectoryListing>, ClientError>;
 
+    pub async fn load_tree(
+        &self,
+        path: String,
+    ) -> Result<Vec<DirectoryTreeRow>, ClientError>;
+
+    pub async fn expand_tree(
+        &self,
+        path: String,
+    ) -> Result<Vec<DirectoryTreeRow>, ClientError>;
+
+    pub fn collapse_tree(
+        &self,
+        path: String,
+    ) -> Result<Vec<DirectoryTreeRow>, ClientError>;
+
+    pub fn tree_rows(&self) -> Vec<DirectoryTreeRow>;
+
     pub async fn current_root(&self) -> Result<String, ClientError>;
 
     pub async fn close(&self) -> Result<(), ClientError>;
@@ -98,6 +115,10 @@ impl BrowserClient {
 | --- | --- | --- |
 | `start` | Starts a local server or SSH transport, opens the control connection, negotiates protocol v1, and returns an owning client | Implemented |
 | `start_listing` | Normalizes the supplied path, opens one operation connection, and returns a pull-based listing | Implemented |
+| `load_tree` | Replaces the active tree root, collects its direct entries, and returns the complete visible snapshot | Implemented |
+| `expand_tree` | Freshly lists one visible directory, inserts its children, and returns the complete visible snapshot | Implemented |
+| `collapse_tree` | Removes all recursive descendants of one visible directory and returns the complete visible snapshot | Implemented |
+| `tree_rows` | Returns the current complete visible tree snapshot | Implemented |
 | `current_root` | Returns the server process's absolute current working directory | Implemented |
 | `close` | Closes control, waits for the owned server/SSH process, and cleans up private endpoints | Implemented; idempotent |
 | `open` | Opens a path with the macOS default application for local clients; succeeds without action for SSH clients | Implemented |
@@ -109,6 +130,12 @@ non-UTF-8 path is rejected. The normalized absolute path is sent to the server.
 
 Dropping the last `BrowserClient` also initiates shutdown. Calls that begin
 after the lifecycle has closed return `ConnectionClosed`.
+
+Each `BrowserClient` owns one active directory tree. `DirectoryTreeRow` carries
+the entry, parent path, depth, expansion state, and optional listing error.
+Collapsing discards descendants, so every later expansion performs a fresh
+listing. Root generations and per-directory revisions prevent stale operations
+from modifying a newer root or repopulating a collapsed directory.
 
 ### DirectoryListing
 
@@ -206,10 +233,10 @@ let client = try await BrowserClient.start(
     )
 )
 
-let listing = try await client.startListing(path: path)
-while let entry = try await listing.nextEntry() {
-    // Update UI state.
-}
+let rows = try await client.loadTree(path: path)
+let expandedRows = try await client.expandTree(path: "/tmp/example")
+let collapsedRows = try client.collapseTree(path: "/tmp/example")
+let currentRows = client.treeRows()
 
 let root = try await client.currentRoot()
 try await client.open(path: "/tmp/example/report.txt")
@@ -230,27 +257,32 @@ library API of their own.
 
 1. `BrowserModel.start()` locates the bundled `file-peeker-server` executable.
 2. It calls `BrowserClient.start` with a local target.
-3. It calls `startListing` for the user's home directory.
-4. It repeatedly awaits `nextEntry` and appends each result to published state.
+3. It calls `loadTree` for the user's home directory and publishes the returned snapshot.
+4. Disclosure controls call `expandTree` or `collapseTree` and replace that snapshot.
 5. Double-clicking an entry or choosing `Open` from its right-click menu opens
    it: navigable entries start a new listing, while other entries call
    `BrowserClient.open`.
 
 The model uses a generation counter and cancels the previous Swift task when a
 new directory is opened. Results from an older generation are ignored.
-`ContentView` observes `currentPath`, `entries`, `isLoading`, and
-`errorMessage` and renders them on the main actor.
+Tree insertion, recursive collapse, depths, errors, and stale-result protection
+are maintained by the client. The model only tracks presentation state such as
+loading paths and renders recursively indented rows without changing
+`currentPath`. Collapsing removes descendants, so later expansion always reloads.
+`ContentView` observes the visible rows, loading paths, and root loading/error
+state on the main actor.
 
 ### Ratatui
 
 The terminal UI locates a sibling `file-peeker-server`, starts a local
-`BrowserClient`, and spawns Tokio tasks for listings and file opening. Those
-tasks convert client results into entry, completion, or operation-failure
-events. The main loop owns all application state and rendering.
+`BrowserClient`, and spawns Tokio tasks for tree loads, expansion, and file
+opening. Those tasks forward complete client-maintained tree snapshots to the
+main loop, which owns only presentation state and rendering.
 
 The terminal UI accepts an optional starting path. Arrow keys or `j`/`k` move
-the selection, Enter navigates into directories or opens non-navigable entries
-with `BrowserClient.open`, and `q` or Escape exits. Its `--smoke [PATH]` mode
+the selection, `h`/`l` select a visible parent/child, `o` toggles directory
+expansion, Enter navigates into directories or opens non-navigable entries with
+`BrowserClient.open`, and `q` or Escape exits. Its `--smoke [PATH]` mode
 consumes one listing without interactive rendering and is intended for
 verification.
 

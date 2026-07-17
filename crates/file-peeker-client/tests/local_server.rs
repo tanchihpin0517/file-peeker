@@ -32,6 +32,8 @@ async fn starts_and_stops_the_real_local_server() {
     fs::create_dir(&browse_root).expect("browse directory should be created");
     fs::write(browse_root.join("notes.txt"), "hello").expect("fixture file should be written");
     fs::create_dir(browse_root.join("docs")).expect("fixture directory should be created");
+    fs::write(browse_root.join("docs/first.txt"), "first")
+        .expect("nested fixture file should be written");
     std::os::unix::fs::symlink("docs", browse_root.join("docs-link"))
         .expect("fixture symlink should be created");
 
@@ -56,6 +58,8 @@ async fn starts_and_stops_the_real_local_server() {
     assert!(entries.iter().any(|entry| {
         entry.name == "docs-link" && entry.kind == EntryKind::Symlink && entry.navigable
     }));
+
+    verify_shared_tree(&client, &browse_root).await;
 
     let socket_record = fixture.path().join("socket-path");
     wait_until(
@@ -104,6 +108,48 @@ async fn starts_and_stops_the_real_local_server() {
             .exists(),
         "private endpoint directory should be removed"
     );
+}
+
+async fn verify_shared_tree(client: &BrowserClient, browse_root: &Path) {
+    let root_rows = client
+        .load_tree(browse_root.to_string_lossy().into_owned())
+        .await
+        .expect("shared tree should load");
+    let docs_path = browse_root.join("docs").to_string_lossy().into_owned();
+    assert!(root_rows.iter().any(|row| row.entry.path == docs_path));
+
+    let expanded_rows = client
+        .expand_tree(docs_path.clone())
+        .await
+        .expect("nested directory should expand");
+    assert!(expanded_rows.iter().any(|row| {
+        row.parent_path.as_deref() == Some(docs_path.as_str()) && row.entry.name == "first.txt"
+    }));
+    let collapsed_rows = client
+        .collapse_tree(docs_path.clone())
+        .expect("nested directory should collapse");
+    assert!(
+        collapsed_rows
+            .iter()
+            .all(|row| row.parent_path.as_deref() != Some(docs_path.as_str()))
+    );
+
+    fs::write(browse_root.join("docs/added-later.txt"), "later")
+        .expect("new nested fixture file should be written");
+    let reexpanded_rows = client
+        .expand_tree(docs_path.clone())
+        .await
+        .expect("nested directory should freshly re-expand");
+    let nested_names: std::collections::HashSet<&str> = reexpanded_rows
+        .iter()
+        .filter(|row| row.parent_path.as_deref() == Some(docs_path.as_str()))
+        .map(|row| row.entry.name.as_str())
+        .collect();
+    assert_eq!(
+        nested_names,
+        std::collections::HashSet::from(["first.txt", "added-later.txt"])
+    );
+    assert_eq!(client.tree_rows(), reexpanded_rows);
 }
 
 fn create_wrapper(fixture: &TempDir, real_server: &Path) -> PathBuf {

@@ -68,6 +68,18 @@ pub(super) async fn start(
     }))
 }
 
+pub(super) async fn collect(
+    socket_path: PathBuf,
+    path: String,
+) -> Result<Vec<DirectoryEntry>, ClientError> {
+    let state = start(socket_path, path).await?;
+    let mut entries = Vec::new();
+    while let Some(entry) = next(&state).await? {
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
 pub(super) async fn current_root(socket_path: PathBuf) -> Result<String, ClientError> {
     let mut stream =
         UnixStream::connect(&socket_path)
@@ -166,17 +178,17 @@ async fn run_listing(
                 kind,
                 navigable,
             } => {
-                sender
-                    .send(ListingItem::Entry(DirectoryEntry {
-                        path,
-                        name,
-                        kind: map_entry_kind(kind),
-                        navigable,
-                    }))
-                    .await
-                    .map_err(|_| ClientError::ConnectionClosed {
+                let entry = DirectoryEntry {
+                    path,
+                    name,
+                    kind: map_entry_kind(kind),
+                    navigable,
+                };
+                sender.send(ListingItem::Entry(entry)).await.map_err(|_| {
+                    ClientError::ConnectionClosed {
                         message: "listing was cancelled".into(),
-                    })?;
+                    }
+                })?;
             }
             ServerMessage::Done => {
                 let _ = sender.send(ListingItem::Done).await;

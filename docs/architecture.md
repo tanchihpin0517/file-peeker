@@ -58,6 +58,7 @@ It owns the dedicated local or SSH server lifecycle and:
 - Converts paths to absolute UTF-8 paths before sending them.
 - Converts protocol messages into UI-independent asynchronous operations and
   data types.
+- Maintains the active flattened directory tree for every UI.
 - Closes the control connection and waits for the server when dropped.
 
 The logical UI-facing interface is:
@@ -68,6 +69,13 @@ impl BrowserClient {
         -> Result<Arc<BrowserClient>, ClientError>;
     async fn start_listing(&self, path: String)
         -> Result<Arc<DirectoryListing>, ClientError>;
+    async fn load_tree(&self, path: String)
+        -> Result<Vec<DirectoryTreeRow>, ClientError>;
+    async fn expand_tree(&self, path: String)
+        -> Result<Vec<DirectoryTreeRow>, ClientError>;
+    fn collapse_tree(&self, path: String)
+        -> Result<Vec<DirectoryTreeRow>, ClientError>;
+    fn tree_rows(&self) -> Vec<DirectoryTreeRow>;
     async fn metadata(&self, path: String)
         -> Result<FileMetadata, ClientError>;
 }
@@ -89,8 +97,15 @@ impl DirectoryListing {
 
 These signatures define the API shared by the native Rust facade and UniFFI
 bindings. `start` launches and connects to the configured local or SSH server,
-listing streams direct children, and metadata currently returns a typed
-`NotImplemented` error.
+listing streams direct children, tree operations return complete flattened
+visible snapshots, and metadata currently returns a typed `NotImplemented`
+error.
+
+Each `BrowserClient` owns one active visible directory tree. Loading a root
+replaces it; expanding freshly lists and inserts direct children; collapsing
+discards every recursive descendant. Generations and per-path revisions prevent
+late operations from changing a newer root or a collapsed branch. UIs own only
+presentation state and their latest snapshot.
 
 `start_listing` begins the operation and returns a listing object.
 `next_entry` asynchronously waits for one result:
@@ -135,14 +150,15 @@ file-peeker [PATH]
 The Rust TUI uses Ratatui for rendering and terminal interaction. It passes
 `PATH`, or its current directory when omitted, to the client. It:
 
-- Runs directory consumption outside the main rendering path.
-- Converts each client result into a TUI application event.
+- Runs tree loads and expansions outside the main rendering path.
+- Converts each returned tree snapshot into a TUI application event.
 - Updates TUI state and calls `Terminal::draw` from the main event loop.
-- Keeps entries in arrival order.
-- Remains responsive to terminal and quit events while a listing is active.
-- Waits for the listing to finish before starting another navigation operation.
+- Keeps client rows in server enumeration order.
+- Remains responsive to terminal and quit events while an operation is active.
 - Allows selection movement and Enter to navigate into a directory or open a
   non-navigable entry with the system default application.
+- Allows `o` to expand or collapse a directory and `h`/`l` to select its visible
+  parent or first child without navigating.
 - Allows `q` or Escape to quit.
 - Displays errors returned by the client.
 
@@ -156,10 +172,12 @@ A native macOS UI written in Swift is a functional peer of the Rust TUI. It:
 
 - Use the same compiled Rust client library as the TUI.
 - Call the client through UniFFI-generated Swift bindings.
-- Repeatedly awaits `nextEntry()` in a main-actor observable model.
-- Apply entry, completion, and error state on `MainActor`.
+- Awaits shared tree operations in a main-actor observable model.
+- Applies complete tree snapshots and error state on `MainActor`.
 - Starts in the user's home directory and opens entries on double-click or from
   an entry's right-click menu.
+- Displays recursively expandable directory rows in list view without changing
+  the active directory, reloading each directory after it is collapsed.
 - Receive the same directory-entry, metadata, and error concepts as the TUI.
 - Keep its Xcode project definition in an XcodeGen `project.yml` file.
 
@@ -173,19 +191,20 @@ definition. The future Swift integration will include the UniFFI-generated
 Swift source, module map, and native library artifacts through settings defined
 by XcodeGen.
 
-## Directory listing example
+## Directory tree and listing example
 
-Both UIs use the same client sequence:
+Both UIs use the shared tree sequence:
 
 ```text
-start_listing(path) -> DirectoryListing
-next_entry()        -> entry, entry, ..., None
+load_tree(path)      -> visible rows
+expand_tree(path)    -> updated visible rows
+collapse_tree(path)  -> updated visible rows
+tree_rows()          -> current visible rows
 ```
 
-The client starts the configured local or SSH server during
-`BrowserClient.start`, sends the private `list` protocol message, and converts
-server responses into `DirectoryEntry` values. The UI only consumes those
-values.
+Every load or expansion sends the private `list` protocol message and converts
+server responses into `DirectoryTreeRow` values. The lower-level
+`start_listing`/`next_entry` stream remains available for non-tree consumers.
 
 ### Inside the shared client
 
@@ -196,7 +215,7 @@ and per-operation tasks:
 Ratatui or SwiftUI
         │
         ▼
-BrowserClient.start_listing(path)
+BrowserClient.load_tree(path) / expand_tree(path)
         │ open operation connection
         ▼
 Listing task ── list message ──> Dedicated server
@@ -206,7 +225,7 @@ Listing task ── list message ──> Dedicated server
 bounded listing queue
         │
         ▼
-DirectoryListing.next_entry()
+DirectoryTree snapshot
         │
         ▼
 Ratatui event or SwiftUI state update
@@ -224,7 +243,7 @@ struct BrowserClient {
     socket_path: String,
     control: ControlConnection,
     process: ChildProcess, // the local server or SSH process
-    state: SharedClientState,
+    tree: Mutex<DirectoryTree>,
 }
 
 struct DirectoryListing {
@@ -254,7 +273,8 @@ and are not exported through UniFFI.
 6. Keep that connection open for the lifetime of the client.
 7. Return a thread-safe `BrowserClient`.
 
-`start_listing(path)` then:
+`start_listing(path)`, `load_tree(path)`, and `expand_tree(path)` use the same
+operation path:
 
 1. Converts `path` to an absolute UTF-8 path.
 2. Rejects the call if the client or control connection is closed.
@@ -263,7 +283,8 @@ and are not exported through UniFFI.
 5. Identifies it as an operation connection and completes its handshake.
 6. Sends one `list` request on that connection.
 7. Starts an operation task that owns the connection and result sender.
-8. Returns a `DirectoryListing` connected to that result queue.
+8. Returns a `DirectoryListing`, or collects the results and applies them to
+   the active tree before returning its snapshot.
 
 `OperationHandle` lets `DirectoryListing` close its operation connection when
 the listing is abandoned; the socket itself remains owned by the operation
@@ -394,32 +415,26 @@ The background task never calls Ratatui. It only sends application events.
 
 ### SwiftUI
 
-UniFFI generates Swift async methods for the same client and listing objects.
-The SwiftUI model consumes them in a task and changes observable state on the
-main actor:
+UniFFI generates Swift methods for the same client and shared tree rows. The
+SwiftUI model replaces its published snapshot on the main actor:
 
 ```swift
 @MainActor
 final class BrowserModel: ObservableObject {
-    @Published var entries: [DirectoryEntry] = []
+    @Published var treeRows: [DirectoryTreeRow] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
 
     private let client: BrowserClient
 
     func openDirectory(_ path: String) {
-        entries = []
+        treeRows = []
         isLoading = true
         errorMessage = nil
 
         Task {
             do {
-                let listing = try await client.startListing(path: path)
-
-                while let entry = try await listing.nextEntry() {
-                    entries.append(entry)
-                }
-
+                treeRows = try await client.loadTree(path: path)
                 isLoading = false
             } catch {
                 errorMessage = String(describing: error)
@@ -431,8 +446,9 @@ final class BrowserModel: ObservableObject {
 ```
 
 Because the model is isolated to `MainActor`, its state changes occur in the UI
-context and SwiftUI redraws affected views automatically. The client does not
-know about `ObservableObject`, properties, views, or rendering.
+context and SwiftUI redraws affected views automatically. The client maintains
+tree structure but does not know about `ObservableObject`, selection, loading
+indicators, views, sorting, or rendering.
 
 The examples are illustrative. Exact runtime, channel, observation, and
 generated UniFFI syntax will be chosen during implementation.
@@ -452,20 +468,18 @@ sequenceDiagram
     Client->>Server: Launch with socket path
     Client->>Server: Open control connection
     Server-->>Client: Control connection accepted
-    TUI->>Client: start_listing(path)
+    TUI->>Client: load_tree(path)
     Client->>Server: Open operation connection
     Server-->>Client: Operation connection accepted
     Client->>Server: list request on operation connection
-    Client-->>TUI: DirectoryListing
     loop Direct children
         Server->>FS: Read next entry
         Server-->>Client: entry
-        TUI->>Client: next_entry()
-        Client-->>TUI: Entry
-        TUI-->>User: Display entry
     end
     Server-->>Client: done or error
     Client->>Server: Close operation connection
+    Client-->>TUI: Visible tree rows
+    TUI-->>User: Display entries
     User->>TUI: Quit
     TUI->>Client: Drop client
     Client->>Server: Close control connection

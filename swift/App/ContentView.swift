@@ -4,6 +4,10 @@ extension DirectoryEntry: Identifiable {
     public var id: String { path }
 }
 
+extension DirectoryTreeRow: Identifiable {
+    public var id: String { entry.path }
+}
+
 struct ContentView: View {
     @StateObject private var model = BrowserModel()
     @State private var selection: String?
@@ -11,6 +15,7 @@ struct ContentView: View {
     @State private var sortOrder = SortOrder.name
     @State private var searchText = ""
     @State private var isMorePresented = false
+    @State private var isConnectToServerPresented = false
 
     var body: some View {
         NavigationSplitView {
@@ -20,7 +25,6 @@ struct ContentView: View {
             FinderContent(
                 model: model,
                 selection: $selection,
-                searchText: searchText,
                 sortOrder: sortOrder,
                 viewStyle: viewStyle
             )
@@ -117,6 +121,12 @@ struct ContentView: View {
         }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Search")
         .frame(minWidth: 720, minHeight: 460)
+        .focusedSceneValue(\.connectToServer) {
+            isConnectToServerPresented = true
+        }
+        .sheet(isPresented: $isConnectToServerPresented) {
+            ConnectToServerView(model: model)
+        }
         .task {
             model.start()
         }
@@ -124,7 +134,7 @@ struct ContentView: View {
 
     private func openSelection() {
         guard let selection,
-              let entry = model.entries.first(where: { $0.path == selection }) else {
+              let entry = model.entry(at: selection) else {
             return
         }
         model.open(entry)
@@ -140,10 +150,99 @@ struct ContentView: View {
     }
 }
 
+private struct ConnectToServerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: BrowserModel
+    @State private var destination = ""
+    @State private var errorMessage: String?
+    @State private var isConnecting = false
+    @State private var connectionTask: Task<Void, Never>?
+    @FocusState private var isDestinationFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Connect to Server")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            Text("Enter an SSH destination, such as a host alias from your SSH configuration.")
+                .foregroundStyle(.secondary)
+
+            TextField("SSH Destination", text: $destination)
+                .focused($isDestinationFocused)
+                .disabled(isConnecting)
+                .onSubmit(connect)
+
+            if isConnecting {
+                ProgressView("Connecting…")
+                    .controlSize(.small)
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+
+            HStack {
+                Spacer()
+
+                Button("Cancel", role: .cancel) {
+                    connectionTask?.cancel()
+                    connectionTask = nil
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Connect", action: connect)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmedDestination.isEmpty || isConnecting)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .onAppear {
+            isDestinationFocused = true
+        }
+        .onDisappear {
+            connectionTask?.cancel()
+        }
+    }
+
+    private var trimmedDestination: String {
+        destination.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func connect() {
+        let destination = trimmedDestination
+        guard !destination.isEmpty, !isConnecting else {
+            return
+        }
+
+        isConnecting = true
+        errorMessage = nil
+        connectionTask = Task { @MainActor in
+            do {
+                try await model.connect(to: destination)
+                guard !Task.isCancelled else {
+                    return
+                }
+                connectionTask = nil
+                dismiss()
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = String(describing: error)
+                isConnecting = false
+                connectionTask = nil
+            }
+        }
+    }
+}
+
 private struct FinderContent: View {
     @ObservedObject var model: BrowserModel
     @Binding var selection: String?
-    let searchText: String
     let sortOrder: SortOrder
     let viewStyle: ViewStyle
 
@@ -178,24 +277,58 @@ private struct FinderContent: View {
     }
 
     private var fileTable: some View {
-        Table(visibleEntries, selection: $selection) {
-            TableColumn("Name") { entry in
+        Table(visibleTreeRows, selection: $selection) {
+            TableColumn("Name") { row in
                 HStack(spacing: 8) {
-                    Image(systemName: symbol(for: entry))
-                        .foregroundStyle(entry.kind == .directory ? Color.accentColor : .secondary)
+                    Color.clear
+                        .frame(width: CGFloat(row.depth) * 16, height: 1)
+
+                    if row.entry.navigable {
+                        if model.loadingTreePaths.contains(row.entry.path) {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .frame(width: 12, height: 12)
+                        } else {
+                            Button {
+                                model.toggleExpansion(of: row.entry)
+                            } label: {
+                                Image(systemName: row.expanded ? "chevron.down" : "chevron.right")
+                                    .font(.caption2)
+                                    .frame(width: 12, height: 12)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help(row.expanded ? "Collapse" : "Expand")
+                        }
+                    } else {
+                        Color.clear
+                            .frame(width: 12, height: 12)
+                    }
+
+                    Image(systemName: symbol(for: row.entry))
+                        .foregroundStyle(row.entry.kind == .directory ? Color.accentColor : .secondary)
                         .frame(width: 18)
-                    Text(entry.name)
+                    Text(row.entry.name)
                         .lineLimit(1)
+
+                    if let errorMessage = row.errorMessage {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .help(errorMessage)
+                    }
                 }
+                .frame(height: 10)
             }
 
-            TableColumn("Kind") { entry in
-                Text(kindName(for: entry))
+            TableColumn("Kind") { row in
+                Text(kindName(for: row.entry))
                     .foregroundStyle(.secondary)
+                    .frame(height: 10)
             }
             .width(min: 100, ideal: 150)
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .environment(\.defaultMinListRowHeight, 10)
         .contextMenu(forSelectionType: String.self) { paths in
             tableContextMenu(for: paths)
         } primaryAction: { paths in
@@ -238,24 +371,43 @@ private struct FinderContent: View {
     }
 
     private var visibleEntries: [DirectoryEntry] {
-        let filtered = searchText.isEmpty
-            ? model.entries
-            : model.entries.filter {
-                $0.name.localizedCaseInsensitiveContains(searchText)
-            }
+        model.entries.sorted(by: entryComesBefore)
+    }
 
-        return filtered.sorted { lhs, rhs in
-            switch sortOrder {
-            case .name:
-                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-            case .kind:
-                let lhsKind = kindName(for: lhs)
-                let rhsKind = kindName(for: rhs)
-                if lhsKind == rhsKind {
-                    return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-                }
-                return lhsKind.localizedStandardCompare(rhsKind) == .orderedAscending
+    private var visibleTreeRows: [DirectoryTreeRow] {
+        let rowsByParent = Dictionary(grouping: model.treeRows, by: \.parentPath)
+        var result: [DirectoryTreeRow] = []
+        appendRows(parentPath: nil, from: rowsByParent, to: &result)
+        return result
+    }
+
+    private func appendRows(
+        parentPath: String?,
+        from rowsByParent: [String?: [DirectoryTreeRow]],
+        to result: inout [DirectoryTreeRow]
+    ) {
+        let rows = (rowsByParent[parentPath] ?? []).sorted {
+            entryComesBefore($0.entry, $1.entry)
+        }
+        for row in rows {
+            result.append(row)
+            if row.expanded {
+                appendRows(parentPath: row.entry.path, from: rowsByParent, to: &result)
             }
+        }
+    }
+
+    private func entryComesBefore(_ lhs: DirectoryEntry, _ rhs: DirectoryEntry) -> Bool {
+        switch sortOrder {
+        case .name:
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        case .kind:
+            let lhsKind = kindName(for: lhs)
+            let rhsKind = kindName(for: rhs)
+            if lhsKind == rhsKind {
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+            return lhsKind.localizedStandardCompare(rhsKind) == .orderedAscending
         }
     }
 
@@ -284,10 +436,7 @@ private struct FinderContent: View {
     }
 
     private var itemCount: String {
-        if searchText.isEmpty {
-            return "\(model.entries.count) \(model.entries.count == 1 ? "item" : "items")"
-        }
-        return "\(visibleEntries.count) of \(model.entries.count) items"
+        "\(model.entries.count) \(model.entries.count == 1 ? "item" : "items")"
     }
 
     private func symbol(for entry: DirectoryEntry) -> String {
@@ -346,7 +495,7 @@ private struct FinderContent: View {
         guard let path = paths.first else {
             return nil
         }
-        return model.entries.first(where: { $0.path == path })
+        return model.entry(at: path)
     }
 }
 

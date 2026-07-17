@@ -5,13 +5,20 @@ import Foundation
 final class BrowserModel: ObservableObject {
     @Published private(set) var currentPath =
         FileManager.default.homeDirectoryForCurrentUser.path
-    @Published private(set) var entries: [DirectoryEntry] = []
+    @Published private(set) var treeRows: [DirectoryTreeRow] = []
+    @Published private(set) var loadingTreePaths: Set<String> = []
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
     private var client: BrowserClient?
     private var loadTask: Task<Void, Never>?
+    private var expansionTasks: [String: Task<Void, Never>] = [:]
     private var generation: UInt64 = 0
+    private var homePath = FileManager.default.homeDirectoryForCurrentUser.path
+
+    var entries: [DirectoryEntry] {
+        treeRows.lazy.filter { $0.depth == 0 }.map(\.entry)
+    }
 
     func start() {
         guard client == nil, loadTask == nil else {
@@ -74,7 +81,84 @@ final class BrowserModel: ObservableObject {
     }
 
     func openHome() {
-        openDirectory(FileManager.default.homeDirectoryForCurrentUser.path)
+        openDirectory(homePath)
+    }
+
+    func entry(at path: String) -> DirectoryEntry? {
+        treeRows.first(where: { $0.entry.path == path })?.entry
+    }
+
+    func toggleExpansion(of entry: DirectoryEntry) {
+        guard entry.navigable,
+              let rowIndex = treeRows.firstIndex(where: { $0.entry.path == entry.path }),
+              !loadingTreePaths.contains(entry.path) else {
+            return
+        }
+
+        guard let client else {
+            return
+        }
+
+        let path = entry.path
+        if treeRows[rowIndex].expanded {
+            do {
+                let rows = try client.collapseTree(path: path)
+                let visiblePaths = Set(rows.map(\.entry.path))
+                let removedTaskPaths = expansionTasks.keys.filter { !visiblePaths.contains($0) }
+                for taskPath in removedTaskPaths {
+                    expansionTasks[taskPath]?.cancel()
+                    expansionTasks[taskPath] = nil
+                    loadingTreePaths.remove(taskPath)
+                }
+                treeRows = rows
+            } catch {
+                errorMessage = String(describing: error)
+            }
+            return
+        }
+
+        let requestGeneration = generation
+        loadingTreePaths.insert(path)
+        expansionTasks[path] = Task {
+            do {
+                let rows = try await client.expandTree(path: path)
+                try Task.checkCancellation()
+                guard requestGeneration == generation else {
+                    return
+                }
+                treeRows = rows
+            } catch is CancellationError {
+                return
+            } catch {
+                guard requestGeneration == generation else {
+                    return
+                }
+                treeRows = client.treeRows()
+            }
+            loadingTreePaths.remove(path)
+            expansionTasks[path] = nil
+        }
+    }
+
+    func connect(to destination: String) async throws {
+        let remoteClient = try await BrowserClient.start(
+            config: ClientConfig(target: .ssh(destination: destination))
+        )
+
+        do {
+            let remoteRoot = try await remoteClient.currentRoot()
+            try Task.checkCancellation()
+
+            generation &+= 1
+            loadTask?.cancel()
+            loadTask = nil
+            client = remoteClient
+            homePath = remoteRoot
+            openDirectory(remoteRoot)
+        } catch {
+            try? await remoteClient.close()
+            throw error
+        }
     }
 
     private func openDirectory(_ path: String) {
@@ -85,23 +169,20 @@ final class BrowserModel: ObservableObject {
         generation &+= 1
         let requestGeneration = generation
         loadTask?.cancel()
+        cancelExpansionTasks()
         currentPath = path
-        entries = []
+        treeRows = []
         isLoading = true
         errorMessage = nil
 
         loadTask = Task {
             do {
-                let listing = try await client.startListing(path: path)
-                while !Task.isCancelled, let entry = try await listing.nextEntry() {
-                    guard requestGeneration == generation else {
-                        return
-                    }
-                    entries.append(entry)
-                }
+                let rows = try await client.loadTree(path: path)
+                try Task.checkCancellation()
                 guard requestGeneration == generation else {
                     return
                 }
+                treeRows = rows
                 isLoading = false
             } catch is CancellationError {
                 return
@@ -114,6 +195,15 @@ final class BrowserModel: ObservableObject {
             }
         }
     }
+
+    private func cancelExpansionTasks() {
+        for task in expansionTasks.values {
+            task.cancel()
+        }
+        expansionTasks.removeAll()
+        loadingTreePaths.removeAll()
+    }
+
 }
 
 private enum BrowserUIError: LocalizedError {
