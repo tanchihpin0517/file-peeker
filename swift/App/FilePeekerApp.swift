@@ -6,6 +6,6 @@ struct FilePeekerApp: App {
         WindowGroup {
             ContentView()
         }
+        .defaultSize(width: 980, height: 640)
     }
 }
-

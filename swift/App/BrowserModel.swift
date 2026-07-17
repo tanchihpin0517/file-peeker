@@ -18,6 +18,9 @@ final class BrowserModel: ObservableObject {
             return
         }
 
+        isLoading = true
+        errorMessage = nil
+
         loadTask = Task {
             do {
                 guard let serverURL = Bundle.main.url(
@@ -32,10 +35,17 @@ final class BrowserModel: ObservableObject {
                         target: .local(serverExecutablePath: serverURL.path)
                     )
                 )
+                guard !Task.isCancelled else {
+                    return
+                }
                 self.client = client
+                loadTask = nil
                 openDirectory(currentPath)
+            } catch is CancellationError {
+                return
             } catch {
                 errorMessage = String(describing: error)
+                isLoading = false
                 loadTask = nil
             }
         }

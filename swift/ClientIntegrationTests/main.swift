@@ -101,6 +101,17 @@ struct ClientIntegrationTests {
                     target: .local(serverExecutablePath: serverPath)
                 )
             )
+            let currentRoot = try await client.currentRoot()
+            let expectedRoot = URL(
+                fileURLWithPath: FileManager.default.currentDirectoryPath,
+                isDirectory: true
+            ).standardizedFileURL
+            require(
+                URL(fileURLWithPath: currentRoot, isDirectory: true).standardizedFileURL
+                    == expectedRoot,
+                "real server current root did not match its working directory"
+            )
+
             let listing = try await client.startListing(path: directory.path)
             var names: [String] = []
             while let entry = try await listing.nextEntry() {
