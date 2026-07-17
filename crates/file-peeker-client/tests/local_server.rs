@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use file_peeker_client::{BrowserClient, ClientConfig, EntryKind};
+use file_peeker_client::{BrowserClient, ClientConfig, EntryKind, ServerTarget};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
@@ -21,7 +21,9 @@ async fn starts_and_stops_the_real_local_server() {
     let wrapper = create_wrapper(&fixture, &real_server);
 
     let client = BrowserClient::start(ClientConfig {
-        server_executable_path: wrapper.to_string_lossy().into_owned(),
+        target: ServerTarget::Local {
+            server_executable_path: wrapper.to_string_lossy().into_owned(),
+        },
     })
     .await
     .expect("client startup should complete");
@@ -71,7 +73,20 @@ async fn starts_and_stops_the_real_local_server() {
         "server socket should exist after startup"
     );
 
-    drop(client);
+    let current_root = client
+        .current_root()
+        .await
+        .expect("server current root should be available");
+    assert!(Path::new(&current_root).is_absolute());
+
+    client
+        .close()
+        .await
+        .expect("explicit client shutdown should complete");
+    client
+        .close()
+        .await
+        .expect("explicit client shutdown should be idempotent");
 
     let pid = fs::read_to_string(fixture.path().join("pid"))
         .expect("PID record should be readable")

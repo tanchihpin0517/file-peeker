@@ -44,6 +44,7 @@ pub enum ErrorCode {
 pub enum ClientMessage {
     Hello { version: u32, role: ConnectionRole },
     List { path: String },
+    CurrentRoot,
     GetMetadata { path: String },
 }
 
@@ -65,6 +66,9 @@ pub enum ServerMessage {
         size: u64,
         readonly: bool,
         modified: Option<String>,
+    },
+    CurrentRoot {
+        path: String,
     },
     Done,
     Error {

@@ -9,12 +9,17 @@ license.workspace = true
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
+clap.workspace = true
 file-peeker-protocol = { path = "../file-peeker-protocol" }
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uniffi = { workspace = true, features = ["tokio"] }
+
+[[bin]]
+name = "file-peeker-client"
+path = "src/main.rs"
 
 [lints]
 workspace = true

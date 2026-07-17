@@ -1,7 +1,8 @@
 # File Peeker Protocol v1
 
-Status: NDJSON framing, the local Unix transport, control and operation
-handshakes, and directory listing are implemented. Metadata remains pending.
+Status: NDJSON framing, local Unix and SSH-forwarded Unix transports, control
+and operation handshakes, directory listing, and current-root discovery are
+implemented. Metadata remains pending.
 
 This is the private local protocol between the shared client library and its
 dedicated server. UIs do not implement this protocol. Both the Rust TUI and a
@@ -63,7 +64,8 @@ Exactly one control connection exists. It stays open for the lifetime of
 `BrowserClient` and carries no filesystem operations in v1. If it closes, the
 server closes all operation connections and exits.
 
-Each operation connection sends exactly one `list` or `get_metadata` request
+Each operation connection sends exactly one `list`, `current_root`, or
+`get_metadata` request
 after `hello_ok`, receives that operation's responses, and then closes. Multiple
 operation connections may be active at once.
 
@@ -73,6 +75,23 @@ connections received before the control connection or after it has closed.
 The server is dedicated to one client and its socket is placed in a private
 owner-only directory. Therefore every accepted connection implicitly belongs
 to that client; no session token is used.
+
+## Get the current root
+
+The client can query the absolute working directory inherited by the server.
+This supplies a remote initial path without assuming where an SSH login starts.
+
+Request:
+
+```json
+{"type":"current_root"}
+```
+
+Response:
+
+```json
+{"type":"current_root","path":"/home/example"}
+```
 
 ## List a directory
 
@@ -180,5 +199,5 @@ version. Optional fields may be added because receivers ignore unknown fields.
 
 Remote transport is outside v1. Before network use, the design must add
 authentication, encryption, authorization, and allowed filesystem roots. The
-client interface should remain stable when a remote transport is added so UIs
+client interface remains stable when the SSH transport is selected so UIs
 do not need to learn the wire protocol.

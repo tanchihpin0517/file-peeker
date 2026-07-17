@@ -7,16 +7,21 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+mod install;
 mod listing;
-#[allow(dead_code)]
-mod remote_server_install;
 mod startup;
 
 uniffi::setup_scaffolding!();
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct ClientConfig {
-    pub server_executable_path: String,
+    pub target: ServerTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum ServerTarget {
+    Local { server_executable_path: String },
+    Ssh { destination: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -84,14 +89,14 @@ impl Drop for BrowserClient {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl BrowserClient {
-    /// Creates a client and starts its dedicated server.
+    /// Creates a client and starts its dedicated local or SSH server.
     ///
     /// # Errors
     ///
     /// Returns a typed startup, process, connection, or protocol error.
     #[uniffi::constructor(name = "start")]
     pub async fn start(config: ClientConfig) -> Result<Arc<Self>, ClientError> {
-        let lifecycle = startup::start_local(config).await?;
+        let lifecycle = startup::start(config).await?;
         Ok(Arc::new(Self { lifecycle }))
     }
 
@@ -108,6 +113,29 @@ impl BrowserClient {
         }
         let state = listing::start(self.lifecycle.socket_path().to_path_buf(), path).await?;
         Ok(Arc::new(DirectoryListing { state }))
+    }
+
+    /// Returns the server process's current working directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a connection, protocol, or remote filesystem error.
+    pub async fn current_root(&self) -> Result<String, ClientError> {
+        if self.lifecycle.is_closed() {
+            return Err(ClientError::ConnectionClosed {
+                message: "server is no longer running".into(),
+            });
+        }
+        listing::current_root(self.lifecycle.socket_path().to_path_buf()).await
+    }
+
+    /// Closes the control connection and waits for the owned server to exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shutdown does not complete within its bounded timeout.
+    pub async fn close(&self) -> Result<(), ClientError> {
+        self.lifecycle.close().await
     }
 
     /// Retrieves metadata for one path.
@@ -143,7 +171,7 @@ impl DirectoryListing {
 mod tests {
     use std::sync::Arc;
 
-    use super::{BrowserClient, ClientConfig, ClientError, DirectoryListing};
+    use super::{BrowserClient, ClientConfig, ClientError, DirectoryListing, ServerTarget};
 
     fn assert_send_sync<T: Send + Sync>() {}
 
@@ -158,7 +186,9 @@ mod tests {
     #[tokio::test]
     async fn start_rejects_an_empty_server_executable() {
         let error = BrowserClient::start(ClientConfig {
-            server_executable_path: String::new(),
+            target: ServerTarget::Local {
+                server_executable_path: String::new(),
+            },
         })
         .await
         .expect_err("an empty executable must fail");
@@ -169,11 +199,25 @@ mod tests {
     #[tokio::test]
     async fn start_reports_an_early_server_exit() {
         let error = BrowserClient::start(ClientConfig {
-            server_executable_path: "/usr/bin/false".into(),
+            target: ServerTarget::Local {
+                server_executable_path: "/usr/bin/false".into(),
+            },
         })
         .await
         .expect_err("a process that exits immediately must fail startup");
 
         assert!(matches!(error, ClientError::ServerExited { .. }));
+    }
+
+    #[tokio::test]
+    async fn remote_connect_requires_an_explicit_destination() {
+        let error = BrowserClient::start(ClientConfig {
+            target: ServerTarget::Ssh {
+                destination: String::new(),
+            },
+        })
+        .await
+        .expect_err("an empty SSH destination must fail");
+        assert!(matches!(error, ClientError::ServerStart { .. }));
     }
 }

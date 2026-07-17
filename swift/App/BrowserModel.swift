@@ -28,7 +28,9 @@ final class BrowserModel: ObservableObject {
                 }
 
                 let client = try await BrowserClient.start(
-                    config: ClientConfig(serverExecutablePath: serverURL.path)
+                    config: ClientConfig(
+                        target: .local(serverExecutablePath: serverURL.path)
+                    )
                 )
                 self.client = client
                 openDirectory(currentPath)

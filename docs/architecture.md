@@ -1,7 +1,8 @@
 # File Peeker v1 Architecture
 
-Status: local startup, directory listing, and minimal Ratatui and SwiftUI
-navigation are implemented. Metadata and remote operation remain pending.
+Status: local startup, directory listing, minimal Ratatui and SwiftUI navigation,
+and diagnostic SSH startup are implemented. Metadata and remote UI selection
+remain pending.
 
 ## Goal
 
@@ -46,10 +47,12 @@ use session IDs or session tokens.
 ### Client
 
 The shared Rust client library is the only interface between a UI and the server.
-It owns the local server lifecycle and:
+It owns the dedicated local or SSH server lifecycle and:
 
+- Accepts one `ServerTarget` configuration for either a local executable or an
+  SSH destination.
 - Creates a private temporary Unix socket path.
-- Starts the server with that path.
+- Starts the server locally or provisions and starts it through SSH forwarding.
 - Opens a long-lived control connection and checks the protocol version.
 - Opens one additional connection for each filesystem operation.
 - Converts paths to absolute UTF-8 paths before sending them.
@@ -69,6 +72,15 @@ impl BrowserClient {
         -> Result<FileMetadata, ClientError>;
 }
 
+struct ClientConfig {
+    target: ServerTarget,
+}
+
+enum ServerTarget {
+    Local { server_executable_path: String },
+    Ssh { destination: String },
+}
+
 impl DirectoryListing {
     async fn next_entry(&self)
         -> Result<Option<DirectoryEntry>, ClientError>;
@@ -76,8 +88,9 @@ impl DirectoryListing {
 ```
 
 These signatures define the API shared by the native Rust facade and UniFFI
-bindings. `start` launches and connects to the local server, listing streams
-direct children, and metadata currently returns a typed `NotImplemented` error.
+bindings. `start` launches and connects to the configured local or SSH server,
+listing streams direct children, and metadata currently returns a typed
+`NotImplemented` error.
 
 `start_listing` begins the operation and returns a listing object.
 `next_entry` asynchronously waits for one result:
@@ -168,9 +181,10 @@ start_listing(path) -> DirectoryListing
 next_entry()        -> entry, entry, ..., None
 ```
 
-The client starts the server during `BrowserClient.start`, sends the private
-`list` protocol message, and converts server responses into `DirectoryEntry`
-values. The UI only consumes those values.
+The client starts the configured local or SSH server during
+`BrowserClient.start`, sends the private `list` protocol message, and converts
+server responses into `DirectoryEntry` values. The UI only consumes those
+values.
 
 ### Inside the shared client
 
@@ -208,7 +222,7 @@ The internal types are conceptually:
 struct BrowserClient {
     socket_path: String,
     control: ControlConnection,
-    server: ChildProcess,
+    process: ChildProcess, // the local server or SSH process
     state: SharedClientState,
 }
 
@@ -230,11 +244,14 @@ and are not exported through UniFFI.
 
 `BrowserClient.start(config)` performs these steps:
 
-1. Create a private socket location.
-2. Launch the server process.
-3. Open a control connection and identify it during the version handshake.
-4. Keep that connection open for the lifetime of the client.
-5. Return a thread-safe `BrowserClient`.
+1. Validate the selected local or SSH target.
+2. For SSH, ensure the compatible remote server is installed.
+3. Create a private local socket location.
+4. Launch the local server or SSH process; SSH forwards the local socket to the
+   remote server socket.
+5. Open a control connection and identify it during the version handshake.
+6. Keep that connection open for the lifetime of the client.
+7. Return a thread-safe `BrowserClient`.
 
 `start_listing(path)` then:
 

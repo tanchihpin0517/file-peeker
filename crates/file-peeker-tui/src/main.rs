@@ -1,7 +1,7 @@
 use std::{error::Error, path::PathBuf, sync::Arc, time::Duration};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use file_peeker_client::{BrowserClient, ClientConfig, ClientError, DirectoryEntry};
+use file_peeker_client::{BrowserClient, ClientConfig, ClientError, DirectoryEntry, ServerTarget};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
@@ -149,7 +149,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("start path must be valid UTF-8")?
         .to_owned();
     let client = BrowserClient::start(ClientConfig {
-        server_executable_path: server.to_string_lossy().into_owned(),
+        target: ServerTarget::Local {
+            server_executable_path: server.to_string_lossy().into_owned(),
+        },
     })
     .await?;
     if smoke {

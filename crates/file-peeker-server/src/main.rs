@@ -39,6 +39,9 @@ enum ServerCommand {
     Serve {
         #[arg(long = "socket", value_name = "PATH")]
         socket_path: PathBuf,
+        /// Remove the private socket parent directory when the server exits.
+        #[arg(long)]
+        remove_parent_on_exit: bool,
     },
     /// Print server and protocol version information.
     Version {
@@ -55,7 +58,10 @@ enum VersionFormat {
 #[tokio::main]
 async fn main() {
     let result = match Cli::parse().command {
-        ServerCommand::Serve { socket_path } => serve(socket_path).await,
+        ServerCommand::Serve {
+            socket_path,
+            remove_parent_on_exit,
+        } => serve(socket_path, remove_parent_on_exit).await,
         ServerCommand::Version {
             format: VersionFormat::Json,
         } => {
@@ -78,10 +84,10 @@ fn print_version_json() {
     );
 }
 
-async fn serve(socket_path: PathBuf) -> Result<(), ServerError> {
+async fn serve(socket_path: PathBuf, remove_parent_on_exit: bool) -> Result<(), ServerError> {
     validate_socket_path(&socket_path)?;
     let listener = UnixListener::bind(&socket_path)?;
-    let _socket_lease = SocketLease::new(socket_path);
+    let _socket_lease = SocketLease::new(socket_path, remove_parent_on_exit);
 
     let (mut control, _) = listener.accept().await?;
     handshake_control(&mut control).await?;
@@ -270,10 +276,35 @@ async fn handle_operation(mut stream: UnixStream) -> Result<(), ServerError> {
 
     match read_client_message(&mut stream).await? {
         ClientMessage::List { path } => handle_listing(&mut stream, &path).await,
+        ClientMessage::CurrentRoot => handle_current_root(&mut stream).await,
         _ => Err(ServerError::Protocol {
-            message: "operation connection must contain one list request".into(),
+            message: "operation connection must contain one request".into(),
         }),
     }
+}
+
+async fn handle_current_root(stream: &mut UnixStream) -> Result<(), ServerError> {
+    let path = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            return write_operation_error(stream, ErrorCode::Io, &error.to_string()).await;
+        }
+    };
+    let Some(path) = path.to_str() else {
+        return write_operation_error(
+            stream,
+            ErrorCode::InvalidPath,
+            "Current directory is not valid UTF-8",
+        )
+        .await;
+    };
+    write_server_message(
+        stream,
+        &ServerMessage::CurrentRoot {
+            path: path.to_owned(),
+        },
+    )
+    .await
 }
 
 async fn handle_listing(stream: &mut UnixStream, path: &str) -> Result<(), ServerError> {
@@ -387,17 +418,26 @@ async fn termination_signal() -> Result<(), ServerError> {
 
 struct SocketLease {
     path: PathBuf,
+    remove_parent_on_exit: bool,
 }
 
 impl SocketLease {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(path: PathBuf, remove_parent_on_exit: bool) -> Self {
+        Self {
+            path,
+            remove_parent_on_exit,
+        }
     }
 }
 
 impl Drop for SocketLease {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        if self.remove_parent_on_exit
+            && let Some(parent) = self.path.parent()
+        {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 }
 
@@ -428,7 +468,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            ServerCommand::Serve { socket_path }
+            ServerCommand::Serve { socket_path, .. }
                 if socket_path == Path::new("/tmp/file-peeker.sock")
         ));
     }
@@ -481,7 +521,7 @@ mod tests {
     async fn serves_control_handshake_and_cleans_up() {
         let directory = private_tempdir();
         let socket_path = directory.path().join("server.sock");
-        let server = tokio::spawn(serve(socket_path.clone()));
+        let server = tokio::spawn(serve(socket_path.clone(), false));
 
         let mut stream = connect_with_retry(&socket_path).await;
         let hello = ClientMessage::Hello {

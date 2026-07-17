@@ -1,4 +1,10 @@
-use std::{ffi::OsString, fmt::Write as _, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    ffi::OsString,
+    fmt::Write as _,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use file_peeker_protocol::PROTOCOL_VERSION;
 use serde_json::Value;
@@ -14,6 +20,9 @@ const REMOTE_SCRIPT: &str = r#"set -eu
 version=$1
 cargo_hint=$2
 protocol_version=$3
+source=$4
+source_root=$5
+policy=$6
 install_root="$HOME/.file-peeker/servers/$version"
 installed_bin="$install_root/bin/file-peeker-server"
 
@@ -24,9 +33,22 @@ verify_server() {
     test "$actual" = "$expected"
 }
 
-if verify_server; then
+case "$policy" in
+    reuse|overwrite) ;;
+    *)
+        printf '%s\n' "unknown installation policy: $policy" >&2
+        exit 2
+        ;;
+esac
+
+if test "$policy" = reuse && verify_server; then
     printf '%s\n' 'FILE_PEEKER_INSTALL_OUTCOME=already_installed'
     "$installed_bin" version --format json
+    exit 0
+fi
+
+if test "$source" = check; then
+    printf '%s\n' 'FILE_PEEKER_INSTALL_REQUIRED'
     exit 0
 fi
 
@@ -39,13 +61,34 @@ else
     }
 fi
 
-"$cargo_bin" install \
-    --locked \
-    --force \
-    --root "$install_root" \
-    --version "$version" \
-    --bin file-peeker-server \
-    file-peeker-server
+case "$source" in
+    crates_io)
+        "$cargo_bin" install \
+            --locked \
+            --force \
+            --root "$install_root" \
+            --version "$version" \
+            --bin file-peeker-server \
+            file-peeker-server
+        ;;
+    workspace)
+        protocol_package="$source_root/file-peeker-protocol-$version"
+        server_package="$source_root/file-peeker-server-$version"
+        tar -xzf "$source_root/protocol.crate" -C "$source_root"
+        tar -xzf "$source_root/server.crate" -C "$source_root"
+        "$cargo_bin" install \
+            --locked \
+            --force \
+            --root "$install_root" \
+            --path "$server_package" \
+            --bin file-peeker-server \
+            --config "patch.crates-io.file-peeker-protocol.path='$protocol_package'"
+        ;;
+    *)
+        printf '%s\n' "unknown installation source: $source" >&2
+        exit 2
+        ;;
+esac
 
 if ! verify_server; then
     printf '%s\n' 'installed server failed version verification' >&2
@@ -57,24 +100,59 @@ printf '%s\n' 'FILE_PEEKER_INSTALL_OUTCOME=installed'
 "#;
 
 #[derive(Debug)]
-struct RemoteInstallConfig {
-    destination: String,
-    server_version: String,
-    ssh_executable: PathBuf,
-    ssh_arguments: Vec<OsString>,
-    remote_cargo: Option<String>,
-    timeout: Duration,
-    output_limit: usize,
+pub(super) struct RemoteInstallConfig {
+    pub(super) destination: String,
+    pub(super) server_version: String,
+    pub(super) ssh_executable: PathBuf,
+    pub(super) ssh_arguments: Vec<OsString>,
+    pub(super) remote_cargo: Option<String>,
+    pub(super) timeout: Duration,
+    pub(super) output_limit: usize,
+    pub(super) source: RemoteInstallSource,
+    pub(super) policy: RemoteInstallPolicy,
+}
+
+impl RemoteInstallConfig {
+    pub(super) fn for_current_build(destination: String, policy: RemoteInstallPolicy) -> Self {
+        Self {
+            destination,
+            server_version: env!("CARGO_PKG_VERSION").into(),
+            ssh_executable: PathBuf::from("ssh"),
+            ssh_arguments: Vec::new(),
+            remote_cargo: None,
+            timeout: Duration::from_secs(300),
+            output_limit: 64 * 1024,
+            source: if cfg!(debug_assertions) {
+                RemoteInstallSource::Workspace
+            } else {
+                RemoteInstallSource::CratesIo
+            },
+            policy,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RemoteInstallOutcome {
+pub(super) enum RemoteInstallSource {
+    Workspace,
+    CratesIo,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RemoteInstallPolicy {
+    ReuseExisting,
+    #[allow(dead_code)]
+    Overwrite,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RemoteInstallOutcome {
     Installed,
     AlreadyInstalled,
 }
 
 #[derive(Debug, Error)]
-enum RemoteInstallError {
+pub(super) enum RemoteInstallError {
     #[error("invalid remote installation configuration: {0}")]
     InvalidConfig(String),
     #[error("failed to start SSH: {0}")]
@@ -89,12 +167,66 @@ enum RemoteInstallError {
     Io(String),
 }
 
-async fn install_remote_server(
+pub(super) async fn install_remote_server(
     config: &RemoteInstallConfig,
 ) -> Result<RemoteInstallOutcome, RemoteInstallError> {
     validate_config(config)?;
 
-    let remote_command = build_remote_command(config);
+    if config.policy == RemoteInstallPolicy::ReuseExisting
+        && remote_server_is_compatible(config).await?
+    {
+        return Ok(RemoteInstallOutcome::AlreadyInstalled);
+    }
+
+    match config.source {
+        RemoteInstallSource::Workspace => install_workspace_server(config).await,
+        RemoteInstallSource::CratesIo => run_remote_install_script(config, "").await,
+    }
+}
+
+async fn run_remote_install_script(
+    config: &RemoteInstallConfig,
+    workspace_root: &str,
+) -> Result<RemoteInstallOutcome, RemoteInstallError> {
+    let remote_command = build_remote_command(config, workspace_root, None);
+    let stdout = run_remote_script(config, remote_command).await?;
+    parse_success_response(&stdout.bytes, stdout.truncated, &config.server_version)
+}
+
+async fn remote_server_is_compatible(
+    config: &RemoteInstallConfig,
+) -> Result<bool, RemoteInstallError> {
+    let remote_command = build_remote_command(config, "", Some("check"));
+    let stdout = run_remote_script(config, remote_command).await?;
+    if stdout.truncated {
+        return Err(RemoteInstallError::InvalidResponse(
+            "SSH stdout exceeded the configured limit".into(),
+        ));
+    }
+    let response = std::str::from_utf8(&stdout.bytes)
+        .map_err(|error| RemoteInstallError::InvalidResponse(error.to_string()))?;
+    if response
+        .lines()
+        .any(|line| line == "FILE_PEEKER_INSTALL_OUTCOME=already_installed")
+    {
+        verify_version_json(
+            response.lines().last().unwrap_or_default(),
+            &config.server_version,
+        )?;
+        Ok(true)
+    } else if response.trim() == "FILE_PEEKER_INSTALL_REQUIRED" {
+        Ok(false)
+    } else {
+        Err(RemoteInstallError::InvalidResponse(
+            "unknown installation check response".into(),
+        ))
+    }
+}
+
+async fn run_remote_script(
+    config: &RemoteInstallConfig,
+    remote_command: String,
+) -> Result<BoundedOutput, RemoteInstallError> {
     let mut command = Command::new(&config.ssh_executable);
     command
         .args(&config.ssh_arguments)
@@ -149,7 +281,150 @@ async fn install_remote_server(
         });
     }
 
-    parse_success_response(&stdout.bytes, stdout.truncated, &config.server_version)
+    Ok(stdout)
+}
+
+async fn install_workspace_server(
+    config: &RemoteInstallConfig,
+) -> Result<RemoteInstallOutcome, RemoteInstallError> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| RemoteInstallError::InvalidConfig("cannot locate workspace root".into()))?;
+    package_workspace_crates(workspace).await?;
+
+    let package_dir = workspace.join("target/package");
+    let protocol = package_dir.join(format!(
+        "file-peeker-protocol-{}.crate",
+        config.server_version
+    ));
+    let server = package_dir.join(format!(
+        "file-peeker-server-{}.crate",
+        config.server_version
+    ));
+    let remote_root = format!(
+        "/tmp/file-peeker-dev-install-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| RemoteInstallError::Io(error.to_string()))?
+            .as_nanos()
+    );
+
+    run_workspace_ssh(config, &format!("mkdir -m 700 '{remote_root}'"), None).await?;
+    let result = async {
+        transfer_workspace_package(config, &protocol, &format!("{remote_root}/protocol.crate"))
+            .await?;
+        transfer_workspace_package(config, &server, &format!("{remote_root}/server.crate")).await?;
+
+        run_remote_install_script(config, &remote_root).await
+    }
+    .await;
+    let cleanup = run_workspace_ssh(config, &format!("rm -rf '{remote_root}'"), None).await;
+    match result {
+        Ok(outcome) => {
+            cleanup?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let _ = cleanup;
+            Err(error)
+        }
+    }
+}
+
+async fn package_workspace_crates(workspace: &Path) -> Result<(), RemoteInstallError> {
+    run_local_cargo(
+        Command::new("cargo")
+            .arg("package")
+            .arg("--manifest-path")
+            .arg(workspace.join("crates/file-peeker-protocol/Cargo.toml"))
+            .arg("--allow-dirty")
+            .arg("--no-verify"),
+        "package protocol crate",
+    )
+    .await?;
+    run_local_cargo(
+        Command::new("cargo")
+            .arg("package")
+            .arg("--manifest-path")
+            .arg(workspace.join("crates/file-peeker-server/Cargo.toml"))
+            .arg("--allow-dirty")
+            .arg("--no-verify")
+            .arg("--config")
+            .arg(format!(
+                "patch.crates-io.file-peeker-protocol.path='{}'",
+                workspace.join("crates/file-peeker-protocol").display()
+            )),
+        "package server crate",
+    )
+    .await
+}
+
+async fn run_local_cargo(command: &mut Command, action: &str) -> Result<(), RemoteInstallError> {
+    let status = command
+        .status()
+        .await
+        .map_err(|error| RemoteInstallError::Spawn(format!("cannot {action}: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(RemoteInstallError::Failed {
+            diagnostics: format!("failed to {action}: {status}"),
+        })
+    }
+}
+
+async fn transfer_workspace_package(
+    config: &RemoteInstallConfig,
+    local: &Path,
+    remote: &str,
+) -> Result<(), RemoteInstallError> {
+    let bytes = std::fs::read(local).map_err(|error| {
+        RemoteInstallError::Io(format!("cannot read {}: {error}", local.display()))
+    })?;
+    run_workspace_ssh(config, &format!("cat > '{remote}'"), Some(&bytes)).await
+}
+
+async fn run_workspace_ssh(
+    config: &RemoteInstallConfig,
+    remote_command: &str,
+    input: Option<&[u8]>,
+) -> Result<(), RemoteInstallError> {
+    let mut child = Command::new(&config.ssh_executable)
+        .args(&config.ssh_arguments)
+        .arg(&config.destination)
+        .arg(remote_command)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| RemoteInstallError::Spawn(error.to_string()))?;
+    if let Some(bytes) = input {
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| RemoteInstallError::Io("SSH stdin was not available".into()))?
+            .write_all(bytes)
+            .await
+            .map_err(|error| RemoteInstallError::Io(error.to_string()))?;
+    }
+    let status = timeout(config.timeout, child.wait())
+        .await
+        .map_err(|_| RemoteInstallError::Timeout(config.timeout.as_millis()))?
+        .map_err(|error| RemoteInstallError::Io(error.to_string()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(RemoteInstallError::Failed {
+            diagnostics: format!("SSH exited with {status}"),
+        })
+    }
 }
 
 fn validate_config(config: &RemoteInstallConfig) -> Result<(), RemoteInstallError> {
@@ -197,14 +472,36 @@ fn is_exact_stable_version(version: &str) -> bool {
         })
 }
 
-fn build_remote_command(config: &RemoteInstallConfig) -> String {
+fn build_remote_command(
+    config: &RemoteInstallConfig,
+    workspace_root: &str,
+    source_override: Option<&str>,
+) -> String {
     let cargo = config.remote_cargo.as_deref().unwrap_or("");
-    ["sh", "-s", "--", &config.server_version, cargo]
-        .into_iter()
-        .map(shell_quote)
-        .chain(std::iter::once(PROTOCOL_VERSION.to_string()))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let protocol_version = PROTOCOL_VERSION.to_string();
+    let source = source_override.unwrap_or(match config.source {
+        RemoteInstallSource::Workspace => "workspace",
+        RemoteInstallSource::CratesIo => "crates_io",
+    });
+    let policy = match config.policy {
+        RemoteInstallPolicy::ReuseExisting => "reuse",
+        RemoteInstallPolicy::Overwrite => "overwrite",
+    };
+    [
+        "sh",
+        "-s",
+        "--",
+        &config.server_version,
+        cargo,
+        &protocol_version,
+        source,
+        workspace_root,
+        policy,
+    ]
+    .into_iter()
+    .map(shell_quote)
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -344,8 +641,8 @@ mod tests {
 
     use super::{
         PROTOCOL_VERSION, REMOTE_SCRIPT, RemoteInstallConfig, RemoteInstallError,
-        RemoteInstallOutcome, install_remote_server, is_exact_stable_version,
-        parse_success_response, shell_quote,
+        RemoteInstallOutcome, RemoteInstallPolicy, RemoteInstallSource, install_remote_server,
+        is_exact_stable_version, parse_success_response, shell_quote,
     };
 
     #[test]
@@ -364,11 +661,15 @@ mod tests {
     }
 
     #[test]
-    fn production_script_uses_only_crates_io_package_installation() {
+    fn unified_script_supports_workspace_and_crates_io_sources() {
         assert!(REMOTE_SCRIPT.contains("$HOME/.file-peeker/servers/$version"));
         assert!(REMOTE_SCRIPT.contains("--version \"$version\""));
+        assert!(REMOTE_SCRIPT.contains("--path \"$server_package\""));
+        assert!(REMOTE_SCRIPT.contains("crates_io)"));
+        assert!(REMOTE_SCRIPT.contains("workspace)"));
+        assert!(REMOTE_SCRIPT.contains("FILE_PEEKER_INSTALL_REQUIRED"));
         assert!(REMOTE_SCRIPT.contains("file-peeker-server"));
-        for prohibited in ["--path", "--git", "--registry", "--index"] {
+        for prohibited in ["--git", "--registry", "--index"] {
             assert!(!REMOTE_SCRIPT.contains(prohibited));
         }
     }
@@ -395,6 +696,39 @@ mod tests {
                 .install_root()
                 .join("bin/file-peeker-server")
                 .is_file()
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_policy_reinstalls_an_existing_server() {
+        let fixture = Fixture::new(false);
+        let mut config = fixture.config(Duration::from_secs(5));
+        config.policy = RemoteInstallPolicy::Overwrite;
+
+        for _ in 0..2 {
+            assert_eq!(
+                install_remote_server(&config)
+                    .await
+                    .expect("forced installation should succeed"),
+                RemoteInstallOutcome::Installed
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_reuse_checks_before_packaging() {
+        let fixture = Fixture::new(false);
+        let mut config = fixture.config(Duration::from_secs(5));
+        install_remote_server(&config)
+            .await
+            .expect("initial installation should succeed");
+
+        config.source = RemoteInstallSource::Workspace;
+        assert_eq!(
+            install_remote_server(&config)
+                .await
+                .expect("compatible workspace installation should be reused"),
+            RemoteInstallOutcome::AlreadyInstalled
         );
     }
 
@@ -516,6 +850,8 @@ chmod +x "$root/bin/file-peeker-server"
                 ),
                 timeout,
                 output_limit: 64 * 1024,
+                source: RemoteInstallSource::CratesIo,
+                policy: RemoteInstallPolicy::ReuseExisting,
             }
         }
 

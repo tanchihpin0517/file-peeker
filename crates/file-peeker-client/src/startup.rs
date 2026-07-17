@@ -17,13 +17,14 @@ use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
-    process::{Child, Command},
-    sync::mpsc,
+    process::{Child, ChildStdin, Command},
+    sync::{Notify, mpsc},
     task::JoinHandle,
     time::{Instant, sleep, timeout, timeout_at},
 };
 
-use crate::{ClientConfig, ClientError};
+use crate::install::{RemoteInstallConfig, RemoteInstallPolicy, install_remote_server};
+use crate::{ClientConfig, ClientError, ServerTarget};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -36,11 +37,36 @@ pub(super) struct LifecycleHandle {
     shutdown: mpsc::UnboundedSender<()>,
     socket_path: PathBuf,
     closed: Arc<AtomicBool>,
+    closed_notify: Arc<Notify>,
+}
+
+struct RunningProcess {
+    child: Child,
+    control: UnixStream,
+    stderr_task: JoinHandle<Result<BoundedOutput, std::io::Error>>,
+    _endpoint: TempDir,
+    child_stdin: Option<ChildStdin>,
 }
 
 impl LifecycleHandle {
     pub(super) fn shutdown(&self) {
         let _ = self.shutdown.send(());
+    }
+
+    pub(super) async fn close(&self) -> Result<(), ClientError> {
+        if self.is_closed() {
+            return Ok(());
+        }
+        let notified = self.closed_notify.notified();
+        self.shutdown();
+        if self.is_closed() {
+            return Ok(());
+        }
+        timeout(SHUTDOWN_TIMEOUT + Duration::from_secs(1), notified)
+            .await
+            .map_err(|_| ClientError::ConnectionClosed {
+                message: "timed out waiting for server shutdown".into(),
+            })
     }
 
     pub(super) fn socket_path(&self) -> &Path {
@@ -52,8 +78,17 @@ impl LifecycleHandle {
     }
 }
 
-pub(super) async fn start_local(config: ClientConfig) -> Result<LifecycleHandle, ClientError> {
-    let executable = validate_config(&config)?;
+pub(super) async fn start(config: ClientConfig) -> Result<LifecycleHandle, ClientError> {
+    match config.target {
+        ServerTarget::Local {
+            server_executable_path,
+        } => start_local(server_executable_path).await,
+        ServerTarget::Ssh { destination } => start_remote(destination).await,
+    }
+}
+
+async fn start_local(server_executable_path: String) -> Result<LifecycleHandle, ClientError> {
+    let executable = validate_local_executable(&server_executable_path)?;
     let endpoint = create_endpoint()?;
     let socket_path = endpoint.path().join("server.sock");
     validate_socket_length(&socket_path)?;
@@ -93,29 +128,150 @@ pub(super) async fn start_local(config: ClientConfig) -> Result<LifecycleHandle,
 
     let (shutdown, shutdown_receiver) = mpsc::unbounded_channel();
     let closed = Arc::new(AtomicBool::new(false));
+    let closed_notify = Arc::new(Notify::new());
     tokio::spawn(supervise(
-        child,
-        control,
-        stderr_task,
-        endpoint,
+        RunningProcess {
+            child,
+            control,
+            stderr_task,
+            _endpoint: endpoint,
+            child_stdin: None,
+        },
         shutdown_receiver,
         Arc::clone(&closed),
+        Arc::clone(&closed_notify),
     ));
 
     Ok(LifecycleHandle {
         shutdown,
         socket_path,
         closed,
+        closed_notify,
     })
 }
 
-fn validate_config(config: &ClientConfig) -> Result<PathBuf, ClientError> {
-    if config.server_executable_path.is_empty() {
+pub(super) async fn start_remote(destination: String) -> Result<LifecycleHandle, ClientError> {
+    validate_destination(&destination)?;
+    install_remote_server(&RemoteInstallConfig::for_current_build(
+        destination.clone(),
+        RemoteInstallPolicy::ReuseExisting,
+    ))
+    .await
+    .map_err(|error| ClientError::ServerStart {
+        message: error.to_string(),
+    })?;
+
+    let endpoint = create_endpoint()?;
+    let socket_path = endpoint.path().join("server.sock");
+    validate_socket_length(&socket_path)?;
+    let token = endpoint
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ClientError::ServerStart {
+            message: "generated endpoint name is not valid UTF-8".into(),
+        })?;
+    let remote_directory = format!("/tmp/{token}-remote");
+    let remote_socket = format!("{remote_directory}/server.sock");
+    let remote_script = format!(
+        "set -eu; runtime={}; mkdir -m 700 \"$runtime\"; server=\"$HOME/.file-peeker/servers/{}/bin/file-peeker-server\"; \"$server\" serve --socket \"$runtime/server.sock\" --remove-parent-on-exit & server_pid=$!; (cat >/dev/null; kill \"$server_pid\" 2>/dev/null || :) & monitor_pid=$!; cleanup() {{ kill \"$server_pid\" \"$monitor_pid\" 2>/dev/null || :; rm -rf \"$runtime\"; }}; trap cleanup EXIT HUP INT TERM; set +e; wait \"$server_pid\"; status=$?; kill \"$monitor_pid\" 2>/dev/null || :; wait \"$monitor_pid\" 2>/dev/null; exit \"$status\"",
+        shell_quote(&remote_directory),
+        env!("CARGO_PKG_VERSION")
+    );
+    let forward = format!("{}:{remote_socket}", socket_path.display());
+    let mut command = Command::new("ssh");
+    command
+        .arg("-T")
+        .arg("-o")
+        .arg("ExitOnForwardFailure=yes")
+        .arg("-o")
+        .arg("StreamLocalBindUnlink=yes")
+        .arg("-L")
+        .arg(forward)
+        .arg(&destination)
+        .arg(remote_script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    start_child(command, endpoint, socket_path, "SSH remote server").await
+}
+
+fn validate_destination(destination: &str) -> Result<(), ClientError> {
+    if destination.is_empty() || destination.starts_with('-') {
+        return Err(ClientError::ServerStart {
+            message: "SSH destination is required and must not begin with `-`".into(),
+        });
+    }
+    Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+async fn start_child(
+    mut command: Command,
+    endpoint: TempDir,
+    socket_path: PathBuf,
+    description: &str,
+) -> Result<LifecycleHandle, ClientError> {
+    let mut child = command.spawn().map_err(|error| ClientError::ServerStart {
+        message: format!("cannot launch {description}: {error}"),
+    })?;
+    let child_stdin = child.stdin.take();
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ClientError::ServerStart {
+            message: format!("{description} stderr was not available"),
+        })?;
+    let stderr_task = tokio::spawn(read_bounded(stderr, STDERR_LIMIT));
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let control = loop {
+        let mut stream = match connect_control(&mut child, &socket_path, deadline).await {
+            Ok(stream) => stream,
+            Err(error) => return Err(cleanup_startup_failure(child, stderr_task, error).await),
+        };
+        match complete_handshake(&mut child, &mut stream, deadline).await {
+            Ok(()) => break stream,
+            Err(ClientError::ConnectionClosed { .. }) if Instant::now() < deadline => {
+                sleep(CONNECT_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(cleanup_startup_failure(child, stderr_task, error).await),
+        }
+    };
+    let (shutdown, shutdown_receiver) = mpsc::unbounded_channel();
+    let closed = Arc::new(AtomicBool::new(false));
+    let closed_notify = Arc::new(Notify::new());
+    tokio::spawn(supervise(
+        RunningProcess {
+            child,
+            control,
+            stderr_task,
+            _endpoint: endpoint,
+            child_stdin,
+        },
+        shutdown_receiver,
+        Arc::clone(&closed),
+        Arc::clone(&closed_notify),
+    ));
+    Ok(LifecycleHandle {
+        shutdown,
+        socket_path,
+        closed,
+        closed_notify,
+    })
+}
+
+fn validate_local_executable(server_executable_path: &str) -> Result<PathBuf, ClientError> {
+    if server_executable_path.is_empty() {
         return Err(ClientError::ServerStart {
             message: "server executable path is required".into(),
         });
     }
-    Ok(PathBuf::from(&config.server_executable_path))
+    Ok(PathBuf::from(server_executable_path))
 }
 
 fn create_endpoint() -> Result<TempDir, ClientError> {
@@ -295,17 +451,23 @@ async fn cleanup_startup_failure(
 }
 
 async fn supervise(
-    mut child: Child,
-    mut control: UnixStream,
-    stderr_task: JoinHandle<Result<BoundedOutput, std::io::Error>>,
-    _endpoint: TempDir,
+    running: RunningProcess,
     mut shutdown: mpsc::UnboundedReceiver<()>,
     closed: Arc<AtomicBool>,
+    closed_notify: Arc<Notify>,
 ) {
+    let RunningProcess {
+        mut child,
+        mut control,
+        stderr_task,
+        _endpoint,
+        child_stdin,
+    } = running;
     let mut probe = [0_u8; 1];
     tokio::select! {
         _ = shutdown.recv() => {
             let _ = control.shutdown().await;
+            drop(child_stdin);
             if timeout(SHUTDOWN_TIMEOUT, child.wait()).await.is_err() {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
@@ -320,6 +482,7 @@ async fn supervise(
         }
     }
     closed.store(true, Ordering::Release);
+    closed_notify.notify_waiters();
     let _ = stderr_task.await;
 }
 
@@ -395,7 +558,9 @@ mod tests {
 
     use tokio::io::AsyncWriteExt;
 
-    use super::{BoundedOutput, read_bounded, validate_socket_length};
+    use super::{
+        BoundedOutput, read_bounded, shell_quote, validate_destination, validate_socket_length,
+    };
 
     #[test]
     fn rejects_an_overlong_socket_path() {
@@ -425,5 +590,17 @@ mod tests {
     fn lifecycle_timeouts_are_bounded() {
         assert!(super::STARTUP_TIMEOUT <= Duration::from_secs(10));
         assert!(super::SHUTDOWN_TIMEOUT <= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn requires_a_safe_ssh_destination() {
+        assert!(validate_destination("").is_err());
+        assert!(validate_destination("-oProxyCommand=bad").is_err());
+        assert!(validate_destination("ntu").is_ok());
+    }
+
+    #[test]
+    fn quotes_remote_shell_values() {
+        assert_eq!(shell_quote("a b'c"), "'a b'\"'\"'c'");
     }
 }

@@ -11,10 +11,19 @@ struct ClientIntegrationTests {
     }
 
     private static func testGeneratedValueTypes() {
-        let config = ClientConfig(serverExecutablePath: "/tmp/file-peeker-server")
+        let localConfig = ClientConfig(
+            target: .local(serverExecutablePath: "/tmp/file-peeker-server")
+        )
         require(
-            config.serverExecutablePath == "/tmp/file-peeker-server",
-            "ClientConfig did not preserve serverExecutablePath"
+            localConfig.target
+                == .local(serverExecutablePath: "/tmp/file-peeker-server"),
+            "ClientConfig did not preserve its local target"
+        )
+
+        let sshConfig = ClientConfig(target: .ssh(destination: "example-host"))
+        require(
+            sshConfig.target == .ssh(destination: "example-host"),
+            "ClientConfig did not preserve its SSH target"
         )
 
         let entry = DirectoryEntry(
@@ -43,7 +52,9 @@ struct ClientIntegrationTests {
         do {
             _ = try await BrowserClient.start(
                 config: ClientConfig(
-                    serverExecutablePath: "/definitely/missing/file-peeker-server"
+                    target: .local(
+                        serverExecutablePath: "/definitely/missing/file-peeker-server"
+                    )
                 )
             )
             fail("BrowserClient.start unexpectedly succeeded")
@@ -86,7 +97,9 @@ struct ClientIntegrationTests {
             try Data().write(to: file)
 
             let client = try await BrowserClient.start(
-                config: ClientConfig(serverExecutablePath: serverPath)
+                config: ClientConfig(
+                    target: .local(serverExecutablePath: serverPath)
+                )
             )
             let listing = try await client.startListing(path: directory.path)
             var names: [String] = []

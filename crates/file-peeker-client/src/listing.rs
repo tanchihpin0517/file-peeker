@@ -68,6 +68,24 @@ pub(super) async fn start(
     }))
 }
 
+pub(super) async fn current_root(socket_path: PathBuf) -> Result<String, ClientError> {
+    let mut stream =
+        UnixStream::connect(&socket_path)
+            .await
+            .map_err(|error| ClientError::ConnectionClosed {
+                message: format!("cannot open current-root connection: {error}"),
+            })?;
+    handshake_operation(&mut stream).await?;
+    write_message(&mut stream, &ClientMessage::CurrentRoot).await?;
+    match read_message(&mut stream).await? {
+        ServerMessage::CurrentRoot { path } => Ok(path),
+        ServerMessage::Error { code, message } => Err(map_server_error(code, message)),
+        message => Err(ClientError::Protocol {
+            message: format!("unexpected current-root response: {message:?}"),
+        }),
+    }
+}
+
 pub(super) async fn next(state: &ListingState) -> Result<Option<DirectoryEntry>, ClientError> {
     if state.finished.load(Ordering::Acquire) {
         return Ok(None);
