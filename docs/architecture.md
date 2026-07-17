@@ -141,7 +141,8 @@ The Rust TUI uses Ratatui for rendering and terminal interaction. It passes
 - Keeps entries in arrival order.
 - Remains responsive to terminal and quit events while a listing is active.
 - Waits for the listing to finish before starting another navigation operation.
-- Allows selection movement and Enter to open a navigable child.
+- Allows selection movement and Enter to navigate into a directory or open a
+  non-navigable entry with the system default application.
 - Allows `q` or Escape to quit.
 - Displays errors returned by the client.
 
@@ -157,8 +158,8 @@ A native macOS UI written in Swift is a functional peer of the Rust TUI. It:
 - Call the client through UniFFI-generated Swift bindings.
 - Repeatedly awaits `nextEntry()` in a main-actor observable model.
 - Apply entry, completion, and error state on `MainActor`.
-- Starts in the user's home directory and opens navigable entries on
-  double-click.
+- Starts in the user's home directory and opens entries on double-click or from
+  an entry's right-click menu.
 - Receive the same directory-entry, metadata, and error concepts as the TUI.
 - Keep its Xcode project definition in an XcodeGen `project.yml` file.
 

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use file_peeker_client::{BrowserClient, ClientConfig, ServerTarget};
 
@@ -26,6 +28,12 @@ enum Command {
         /// SSH destination, resolved through the user's SSH configuration.
         #[arg(value_name = "SSH_DESTINATION")]
         destination: String,
+    },
+    /// Open a local path with the system default application.
+    Open {
+        /// Local path to open.
+        #[arg(value_name = "PATH")]
+        path: String,
     },
 }
 
@@ -90,8 +98,31 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("{path}");
         }
+        Command::Open { path } => {
+            let server = sibling_server()?;
+            verbose(format!("open: path={path} server={}", server.display()));
+            let client = BrowserClient::start(ClientConfig {
+                target: ServerTarget::Local {
+                    server_executable_path: server.to_string_lossy().into_owned(),
+                },
+            })
+            .await?;
+            let opened = client.open(path).await;
+            let closed = client.close().await;
+            opened?;
+            closed?;
+            verbose("open: system application accepted the path");
+        }
     }
     Ok(())
+}
+
+fn sibling_server() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    Ok(executable
+        .parent()
+        .ok_or("client executable has no parent directory")?
+        .join("file-peeker-server"))
 }
 
 fn install_source() -> &'static str {
@@ -143,6 +174,23 @@ mod tests {
     fn install_requires_destination() {
         let error = Cli::try_parse_from(["file-peeker-client", "install"])
             .expect_err("destination must be required");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_open_path() {
+        let cli = Cli::try_parse_from(["file-peeker-client", "open", "/tmp/report draft.txt"])
+            .expect("open command should parse");
+        assert!(matches!(
+            cli.command,
+            Command::Open { path } if path == "/tmp/report draft.txt"
+        ));
+    }
+
+    #[test]
+    fn open_requires_path() {
+        let error =
+            Cli::try_parse_from(["file-peeker-client", "open"]).expect_err("path must be required");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 }

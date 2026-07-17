@@ -14,7 +14,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            FinderSidebar()
+            FinderSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
         } detail: {
             FinderContent(
@@ -187,10 +187,6 @@ private struct FinderContent: View {
                     Text(entry.name)
                         .lineLimit(1)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) {
-                    model.open(entry)
-                }
             }
 
             TableColumn("Kind") { entry in
@@ -200,6 +196,11 @@ private struct FinderContent: View {
             .width(min: 100, ideal: 150)
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .contextMenu(forSelectionType: String.self) { paths in
+            tableContextMenu(for: paths)
+        } primaryAction: { paths in
+            openTableSelection(paths)
+        }
     }
 
     private var iconGrid: some View {
@@ -226,6 +227,9 @@ private struct FinderContent: View {
                     }
                     .onTapGesture(count: 2) {
                         model.open(entry)
+                    }
+                    .contextMenu {
+                        entryContextMenu(for: entry)
                     }
                 }
             }
@@ -311,6 +315,39 @@ private struct FinderContent: View {
             return "Other"
         }
     }
+
+    @ViewBuilder
+    private func entryContextMenu(for entry: DirectoryEntry) -> some View {
+        Button("Open") {
+            selection = entry.path
+            model.open(entry)
+        }
+    }
+
+    @ViewBuilder
+    private func tableContextMenu(for paths: Set<String>) -> some View {
+        if let entry = entry(in: paths) {
+            Button("Open") {
+                selection = entry.path
+                model.open(entry)
+            }
+        }
+    }
+
+    private func openTableSelection(_ paths: Set<String>) {
+        guard let entry = entry(in: paths) else {
+            return
+        }
+        selection = entry.path
+        model.open(entry)
+    }
+
+    private func entry(in paths: Set<String>) -> DirectoryEntry? {
+        guard let path = paths.first else {
+            return nil
+        }
+        return model.entries.first(where: { $0.path == path })
+    }
 }
 
 private enum SortOrder: String, CaseIterable, Identifiable {
@@ -330,59 +367,21 @@ private enum SortOrder: String, CaseIterable, Identifiable {
 }
 
 private struct FinderSidebar: View {
+    @ObservedObject var model: BrowserModel
+
     var body: some View {
         List {
-            SidebarSection("Favorites", items: SidebarItem.favorites)
-            SidebarSection("iCloud", items: SidebarItem.iCloud)
-            SidebarSection("Locations", items: SidebarItem.locations)
+            Button {
+                model.openHome()
+            } label: {
+                Label("Home", systemImage: "house.fill")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
         .listStyle(.sidebar)
     }
-}
-
-private struct SidebarSection: View {
-    let title: String
-    let items: [SidebarItem]
-
-    init(_ title: String, items: [SidebarItem]) {
-        self.title = title
-        self.items = items
-    }
-
-    var body: some View {
-        Section(title) {
-            ForEach(items) { item in
-                Label(item.title, systemImage: item.symbol)
-                    .allowsHitTesting(false)
-            }
-        }
-    }
-}
-
-private struct SidebarItem: Identifiable {
-    let title: String
-    let symbol: String
-
-    var id: String { title }
-
-    static let favorites = [
-        SidebarItem(title: "AirDrop", symbol: "airdrop"),
-        SidebarItem(title: "Recents", symbol: "clock"),
-        SidebarItem(title: "Applications", symbol: "square.grid.2x2"),
-        SidebarItem(title: "Desktop", symbol: "desktopcomputer"),
-        SidebarItem(title: "Documents", symbol: "doc"),
-        SidebarItem(title: "Downloads", symbol: "arrow.down.circle"),
-    ]
-
-    static let iCloud = [
-        SidebarItem(title: "iCloud Drive", symbol: "icloud"),
-        SidebarItem(title: "Shared", symbol: "person.2"),
-    ]
-
-    static let locations = [
-        SidebarItem(title: "Macintosh HD", symbol: "internaldrive"),
-        SidebarItem(title: "Network", symbol: "network"),
-    ]
 }
 
 private enum ViewStyle: String, CaseIterable, Identifiable {

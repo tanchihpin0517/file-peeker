@@ -85,6 +85,8 @@ impl BrowserClient {
 
     pub async fn close(&self) -> Result<(), ClientError>;
 
+    pub async fn open(&self, path: String) -> Result<(), ClientError>;
+
     pub async fn metadata(
         &self,
         path: String,
@@ -98,6 +100,7 @@ impl BrowserClient {
 | `start_listing` | Normalizes the supplied path, opens one operation connection, and returns a pull-based listing | Implemented |
 | `current_root` | Returns the server process's absolute current working directory | Implemented |
 | `close` | Closes control, waits for the owned server/SSH process, and cleans up private endpoints | Implemented; idempotent |
+| `open` | Opens a path with the macOS default application for local clients; succeeds without action for SSH clients | Implemented |
 | `metadata` | Intended to return metadata for one path | Reserved; currently returns `ClientError::NotImplemented` without contacting the server |
 
 `start_listing` accepts absolute or relative UTF-8 paths. Relative paths are
@@ -209,6 +212,7 @@ while let entry = try await listing.nextEntry() {
 }
 
 let root = try await client.currentRoot()
+try await client.open(path: "/tmp/example/report.txt")
 try await client.close()
 ```
 
@@ -228,8 +232,9 @@ library API of their own.
 2. It calls `BrowserClient.start` with a local target.
 3. It calls `startListing` for the user's home directory.
 4. It repeatedly awaits `nextEntry` and appends each result to published state.
-5. Double-clicking a `DirectoryEntry` with `navigable == true` starts a new
-   listing for that entry's path.
+5. Double-clicking an entry or choosing `Open` from its right-click menu opens
+   it: navigable entries start a new listing, while other entries call
+   `BrowserClient.open`.
 
 The model uses a generation counter and cancels the previous Swift task when a
 new directory is opened. Results from an older generation are ignored.
@@ -239,14 +244,15 @@ new directory is opened. Results from an older generation are ignored.
 ### Ratatui
 
 The terminal UI locates a sibling `file-peeker-server`, starts a local
-`BrowserClient`, and spawns a Tokio task to consume each listing. That task
-converts client results into `AppEvent::Entry`, `Finished`, or `Failed` events.
-The main loop owns all application state and rendering.
+`BrowserClient`, and spawns Tokio tasks for listings and file opening. Those
+tasks convert client results into entry, completion, or operation-failure
+events. The main loop owns all application state and rendering.
 
 The terminal UI accepts an optional starting path. Arrow keys or `j`/`k` move
-the selection, Enter opens a navigable entry, and `q` or Escape exits. Its
-`--smoke [PATH]` mode consumes one listing without interactive rendering and is
-intended for verification.
+the selection, Enter navigates into directories or opens non-navigable entries
+with `BrowserClient.open`, and `q` or Escape exits. Its `--smoke [PATH]` mode
+consumes one listing without interactive rendering and is intended for
+verification.
 
 ## Client-server wire API
 
@@ -437,12 +443,15 @@ The server CLI is normally invoked by the client, not by a UI or end user.
 ```text
 file-peeker-client connect SSH_DESTINATION
 file-peeker-client install SSH_DESTINATION
+file-peeker-client open PATH
 ```
 
 - `connect` ensures a compatible remote server is installed, starts it through
   SSH, prints its current root to stdout, and closes it.
 - `install` overwrites and verifies the versioned remote server installation,
   then prints its remote executable path to stdout.
+- `open` starts the sibling local server, opens `PATH` with the macOS default
+  application through `BrowserClient.open`, and shuts the server down.
 - Progress and diagnostics are written to stderr.
 
 ### Terminal UI

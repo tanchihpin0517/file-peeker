@@ -52,10 +52,29 @@ final class BrowserModel: ObservableObject {
     }
 
     func open(_ entry: DirectoryEntry) {
-        guard entry.navigable else {
+        if entry.navigable {
+            openDirectory(entry.path)
             return
         }
-        openDirectory(entry.path)
+
+        guard let client else {
+            return
+        }
+
+        errorMessage = nil
+        Task {
+            do {
+                try await client.open(path: entry.path)
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = String(describing: error)
+            }
+        }
+    }
+
+    func openHome() {
+        openDirectory(FileManager.default.homeDirectoryForCurrentUser.path)
     }
 
     private func openDirectory(_ path: String) {

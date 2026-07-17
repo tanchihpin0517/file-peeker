@@ -16,6 +16,13 @@ enum AppEvent {
     Entry(u64, DirectoryEntry),
     Finished(u64),
     Failed(u64, ClientError),
+    OpenFailed(u64, ClientError),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum OpenAction {
+    Directory(String),
+    File(String),
 }
 
 #[derive(Debug)]
@@ -30,7 +37,7 @@ struct App {
 }
 
 impl App {
-    fn open(&mut self, path: String, events: mpsc::UnboundedSender<AppEvent>) {
+    fn open_directory(&mut self, path: String, events: mpsc::UnboundedSender<AppEvent>) {
         self.generation += 1;
         let generation = self.generation;
         self.path.clone_from(&path);
@@ -58,6 +65,26 @@ impl App {
         });
     }
 
+    fn open_selected(&mut self, events: mpsc::UnboundedSender<AppEvent>) {
+        let Some(action) = open_action(&self.entries, self.selected) else {
+            return;
+        };
+
+        match action {
+            OpenAction::Directory(path) => self.open_directory(path, events),
+            OpenAction::File(path) => {
+                self.error = None;
+                let generation = self.generation;
+                let client = Arc::clone(&self.client);
+                tokio::spawn(async move {
+                    if let Err(error) = client.open(path).await {
+                        let _ = events.send(AppEvent::OpenFailed(generation, error));
+                    }
+                });
+            }
+        }
+    }
+
     fn update(&mut self, event: AppEvent) {
         match event {
             AppEvent::Entry(generation, entry) if generation == self.generation => {
@@ -68,6 +95,9 @@ impl App {
             }
             AppEvent::Failed(generation, error) if generation == self.generation => {
                 self.loading = false;
+                self.error = Some(error.to_string());
+            }
+            AppEvent::OpenFailed(generation, error) if generation == self.generation => {
                 self.error = Some(error.to_string());
             }
             _ => {}
@@ -82,10 +112,6 @@ impl App {
         } else {
             self.selected = self.selected.saturating_sub(1);
         }
-    }
-
-    fn selected_directory(&self) -> Option<String> {
-        selected_directory(&self.entries, self.selected)
     }
 
     fn render(&self, frame: &mut Frame<'_>) {
@@ -174,7 +200,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         error: None,
         generation: 0,
     };
-    app.open(path, sender.clone());
+    app.open_directory(path, sender.clone());
 
     let mut terminal = ratatui::try_init()?;
     let result = run(&mut terminal, &mut app, &sender, &mut receiver);
@@ -202,11 +228,7 @@ fn run(
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Down | KeyCode::Char('j') => app.move_selection(true),
                 KeyCode::Up | KeyCode::Char('k') => app.move_selection(false),
-                KeyCode::Enter => {
-                    if let Some(path) = app.selected_directory() {
-                        app.open(path, sender.clone());
-                    }
-                }
+                KeyCode::Enter => app.open_selected(sender.clone()),
                 _ => {}
             }
         }
@@ -221,21 +243,24 @@ fn sibling_server() -> Result<PathBuf, Box<dyn Error>> {
         .join("file-peeker-server"))
 }
 
-fn selected_directory(entries: &[DirectoryEntry], selected: usize) -> Option<String> {
-    entries
-        .get(selected)
-        .filter(|entry| entry.navigable)
-        .map(|entry| entry.path.clone())
+fn open_action(entries: &[DirectoryEntry], selected: usize) -> Option<OpenAction> {
+    entries.get(selected).map(|entry| {
+        if entry.navigable {
+            OpenAction::Directory(entry.path.clone())
+        } else {
+            OpenAction::File(entry.path.clone())
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use file_peeker_client::{DirectoryEntry, EntryKind};
 
-    use super::selected_directory;
+    use super::{OpenAction, open_action};
 
     #[test]
-    fn only_navigable_entries_can_be_opened() {
+    fn selected_entries_choose_directory_navigation_or_file_opening() {
         let entry = DirectoryEntry {
             path: "/tmp/file".into(),
             name: "file".into(),
@@ -243,11 +268,15 @@ mod tests {
             navigable: false,
         };
         let mut entries = vec![entry];
-        assert!(selected_directory(&entries, 0).is_none());
+        assert_eq!(
+            open_action(&entries, 0),
+            Some(OpenAction::File("/tmp/file".into()))
+        );
         entries[0].navigable = true;
         assert_eq!(
-            selected_directory(&entries, 0).as_deref(),
-            Some("/tmp/file")
+            open_action(&entries, 0),
+            Some(OpenAction::Directory("/tmp/file".into()))
         );
+        assert_eq!(open_action(&entries, 1), None);
     }
 }

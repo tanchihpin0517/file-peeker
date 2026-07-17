@@ -9,6 +9,7 @@ use thiserror::Error;
 
 mod install;
 mod listing;
+mod opener;
 mod startup;
 
 uniffi::setup_scaffolding!();
@@ -79,6 +80,22 @@ impl ClientError {
 #[derive(Debug, uniffi::Object)]
 pub struct BrowserClient {
     lifecycle: startup::LifecycleHandle,
+    mode: ClientMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientMode {
+    Local,
+    Ssh,
+}
+
+impl From<&ServerTarget> for ClientMode {
+    fn from(target: &ServerTarget) -> Self {
+        match target {
+            ServerTarget::Local { .. } => Self::Local,
+            ServerTarget::Ssh { .. } => Self::Ssh,
+        }
+    }
 }
 
 impl Drop for BrowserClient {
@@ -96,8 +113,9 @@ impl BrowserClient {
     /// Returns a typed startup, process, connection, or protocol error.
     #[uniffi::constructor(name = "start")]
     pub async fn start(config: ClientConfig) -> Result<Arc<Self>, ClientError> {
+        let mode = ClientMode::from(&config.target);
         let lifecycle = startup::start(config).await?;
-        Ok(Arc::new(Self { lifecycle }))
+        Ok(Arc::new(Self { lifecycle, mode }))
     }
 
     /// Starts a pull-based directory listing operation.
@@ -136,6 +154,23 @@ impl BrowserClient {
     /// Returns an error if shutdown does not complete within its bounded timeout.
     pub async fn close(&self) -> Result<(), ClientError> {
         self.lifecycle.close().await
+    }
+
+    /// Opens a local path with the system default application.
+    ///
+    /// SSH clients intentionally treat this operation as a successful no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns a connection error when the client is closed, or an I/O error
+    /// when the macOS system opener cannot be launched or reports failure.
+    pub async fn open(&self, path: String) -> Result<(), ClientError> {
+        if self.lifecycle.is_closed() {
+            return Err(ClientError::ConnectionClosed {
+                message: "server is no longer running".into(),
+            });
+        }
+        opener::open(self.mode, path).await
     }
 
     /// Retrieves metadata for one path.

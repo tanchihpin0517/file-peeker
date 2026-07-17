@@ -46,6 +46,7 @@ V1 is a local, macOS-only, read-only browser. It:
 - Stream and display the direct children of that directory.
 - Include hidden entries and keep filesystem enumeration order.
 - Allow entering child directories and directory symlinks.
+- Open non-directory entries with the macOS default application.
 
 V1 will not include parent navigation, sorting, previews, search, filesystem
 changes, remote UI navigation, reconnection, or a server shared by multiple clients.
@@ -69,6 +70,14 @@ To install the remote server without starting it, use:
 
 ```text
 cargo run -p file-peeker-client -- install SSH_DESTINATION
+```
+
+To exercise local system-default file opening through the client API, build the
+server and run the diagnostic command:
+
+```text
+cargo build -p file-peeker-server
+cargo run -p file-peeker-client -- open PATH
 ```
 
 `install` always overwrites the versioned server installation and prints its
