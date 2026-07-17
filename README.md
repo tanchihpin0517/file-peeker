@@ -94,6 +94,7 @@ stderr; successful stdout contains only the remote path.
 
 ## Documents
 
+- [API](docs/api.md)
 - [Architecture](docs/architecture.md)
 - [Protocol](docs/protocol.md)
 - [Startup routine](docs/startup.md)

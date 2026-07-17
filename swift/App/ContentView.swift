@@ -1,19 +1,32 @@
 import SwiftUI
 
+extension DirectoryEntry: Identifiable {
+    public var id: String { path }
+}
+
 struct ContentView: View {
     @StateObject private var model = BrowserModel()
     @State private var selection: String?
-    @State private var viewStyle = ViewStyle.icons
+    @State private var viewStyle = ViewStyle.list
+    @State private var sortOrder = SortOrder.name
+    @State private var searchText = ""
+    @State private var isMorePresented = false
 
     var body: some View {
         NavigationSplitView {
             FinderSidebar()
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
         } detail: {
-            FinderContent(model: model, selection: $selection)
+            FinderContent(
+                model: model,
+                selection: $selection,
+                searchText: searchText,
+                sortOrder: sortOrder,
+                viewStyle: viewStyle
+            )
         }
         .navigationSplitViewStyle(.balanced)
-        .navigationTitle("File Peeker")
+        .navigationTitle(toolbarTitle)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Button("Back", systemImage: "chevron.left") {}
@@ -24,50 +37,97 @@ struct ContentView: View {
                     .disabled(true)
             }
 
-            ToolbarItem(placement: .principal) {
-                Text(toolbarTitle)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(model.currentPath)
-            }
-
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItem(id: "view-style", placement: .primaryAction) {
                 Picker("View", selection: $viewStyle) {
                     ForEach(ViewStyle.allCases) { style in
                         Image(systemName: style.symbol)
                             .tag(style)
+                            .disabled(style == .columns || style == .gallery)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 116)
+                .frame(width: 152)
                 .help("View")
-                .disabled(true)
+            }
 
-                Button("Group", systemImage: "square.grid.3x3.square") {}
-                    .help("Group Items")
-                    .disabled(true)
-                Button("Share", systemImage: "square.and.arrow.up") {}
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+            }
+
+            ToolbarItem(id: "group-items", placement: .primaryAction) {
+                Menu {
+                    Picker("Sort By", selection: $sortOrder) {
+                        ForEach(SortOrder.allCases) { order in
+                            Text(order.title)
+                                .tag(order)
+                        }
+                    }
+                } label: {
+                    Label("Sort", systemImage: "square.grid.3x3.square")
+                }
+                .help("Sort Items")
+            }
+
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                if let selection {
+                    ShareLink(item: URL(fileURLWithPath: selection)) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
                     .help("Share")
-                    .disabled(true)
+                } else {
+                    Button("Share", systemImage: "square.and.arrow.up") {}
+                        .help("Share")
+                        .disabled(true)
+                }
+
                 Button("Tags", systemImage: "tag") {}
                     .help("Edit Tags")
                     .disabled(true)
-                Button("More", systemImage: "ellipsis.circle") {}
-                    .help("More")
-                    .disabled(true)
 
-                TextField("Search", text: .constant(""))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
-                    .disabled(true)
+                Button("More", systemImage: "ellipsis") {
+                    isMorePresented.toggle()
+                }
+                .help("More")
+                .popover(isPresented: $isMorePresented, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button("Open") {
+                            openSelection()
+                            isMorePresented = false
+                        }
+                        .disabled(selection == nil)
+
+                        Divider()
+
+                        Button("Get Info") {}
+                            .disabled(true)
+                    }
+                    .padding(12)
+                    .frame(width: 160)
+                }
+            }
+
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
             }
         }
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search")
         .frame(minWidth: 720, minHeight: 460)
         .task {
             model.start()
         }
+    }
+
+    private func openSelection() {
+        guard let selection,
+              let entry = model.entries.first(where: { $0.path == selection }) else {
+            return
+        }
+        model.open(entry)
     }
 
     private var toolbarTitle: String {
@@ -83,6 +143,9 @@ struct ContentView: View {
 private struct FinderContent: View {
     @ObservedObject var model: BrowserModel
     @Binding var selection: String?
+    let searchText: String
+    let sortOrder: SortOrder
+    let viewStyle: ViewStyle
 
     var body: some View {
         VStack(spacing: 0) {
@@ -106,21 +169,89 @@ private struct FinderContent: View {
                 description: Text(error)
             )
         } else {
-            List(model.entries, id: \.path, selection: $selection) { entry in
+            if viewStyle == .icons {
+                iconGrid
+            } else {
+                fileTable
+            }
+        }
+    }
+
+    private var fileTable: some View {
+        Table(visibleEntries, selection: $selection) {
+            TableColumn("Name") { entry in
                 HStack(spacing: 8) {
                     Image(systemName: symbol(for: entry))
+                        .foregroundStyle(entry.kind == .directory ? Color.accentColor : .secondary)
                         .frame(width: 18)
                     Text(entry.name)
                         .lineLimit(1)
-                    Spacer()
                 }
-                .tag(entry.path)
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) {
                     model.open(entry)
                 }
             }
-            .listStyle(.inset)
+
+            TableColumn("Kind") { entry in
+                Text(kindName(for: entry))
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 100, ideal: 150)
+        }
+        .tableStyle(.inset(alternatesRowBackgrounds: true))
+    }
+
+    private var iconGrid: some View {
+        ScrollView {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 96), spacing: 18)],
+                spacing: 20
+            ) {
+                ForEach(visibleEntries, id: \.path) { entry in
+                    VStack(spacing: 8) {
+                        Image(systemName: symbol(for: entry))
+                            .font(.system(size: 38))
+                            .foregroundStyle(entry.kind == .directory ? Color.accentColor : .secondary)
+                        Text(entry.name)
+                            .font(.caption)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(6)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        selection = entry.path
+                    }
+                    .onTapGesture(count: 2) {
+                        model.open(entry)
+                    }
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private var visibleEntries: [DirectoryEntry] {
+        let filtered = searchText.isEmpty
+            ? model.entries
+            : model.entries.filter {
+                $0.name.localizedCaseInsensitiveContains(searchText)
+            }
+
+        return filtered.sorted { lhs, rhs in
+            switch sortOrder {
+            case .name:
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            case .kind:
+                let lhsKind = kindName(for: lhs)
+                let rhsKind = kindName(for: rhs)
+                if lhsKind == rhsKind {
+                    return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+                }
+                return lhsKind.localizedStandardCompare(rhsKind) == .orderedAscending
+            }
         }
     }
 
@@ -149,19 +280,51 @@ private struct FinderContent: View {
     }
 
     private var itemCount: String {
-        "\(model.entries.count) \(model.entries.count == 1 ? "item" : "items")"
+        if searchText.isEmpty {
+            return "\(model.entries.count) \(model.entries.count == 1 ? "item" : "items")"
+        }
+        return "\(visibleEntries.count) of \(model.entries.count) items"
     }
 
     private func symbol(for entry: DirectoryEntry) -> String {
         switch entry.kind {
         case .directory:
-            return "folder"
+            return "folder.fill"
         case .symlink:
             return "link"
         case .file:
             return "doc"
         case .other:
             return "questionmark.square"
+        }
+    }
+
+    private func kindName(for entry: DirectoryEntry) -> String {
+        switch entry.kind {
+        case .directory:
+            return "Folder"
+        case .symlink:
+            return "Alias"
+        case .file:
+            return "Document"
+        case .other:
+            return "Other"
+        }
+    }
+}
+
+private enum SortOrder: String, CaseIterable, Identifiable {
+    case name
+    case kind
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .name:
+            return "Name"
+        case .kind:
+            return "Kind"
         }
     }
 }
