@@ -55,10 +55,6 @@ struct ContentView: View {
                 .help("View")
             }
 
-            if #available(macOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .primaryAction)
-            }
-
             ToolbarItem(id: "group-items", placement: .primaryAction) {
                 Menu {
                     Picker("Sort By", selection: $sortOrder) {
@@ -71,10 +67,6 @@ struct ContentView: View {
                     Label("Sort", systemImage: "square.grid.3x3.square")
                 }
                 .help("Sort Items")
-            }
-
-            if #available(macOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .primaryAction)
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
@@ -113,10 +105,6 @@ struct ContentView: View {
                     .padding(12)
                     .frame(width: 160)
                 }
-            }
-
-            if #available(macOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .primaryAction)
             }
         }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Search")
