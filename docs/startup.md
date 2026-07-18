@@ -19,16 +19,18 @@ UI -> Session -> private Unix socket -> local server -> local filesystem
 
 Remote
 
-UI -> Session -> local Unix socket -> SSH forward -> remote Unix socket
-                         client owns SSH              -> remote server
-                                                      -> remote filesystem
+UI -> Session -> local Unix socket -> SSH master -> remote Unix socket
+                         |                 |              -> remote server
+                         |                 |              -> remote filesystem
+                         |                 |
+                         +-> control socket +-> one authenticated SSH transport
 ```
 
 The important design choice is that remote browsing does not introduce a TCP
 server or a second protocol. SSH supplies authentication, encryption, remote
-process launch, and Unix-socket forwarding. After the local server process or
-remote SSH process has been launched, both targets converge on the same
-connection and protocol behavior.
+process launch, and Unix-socket forwarding. After the local server or remote
+forwarding is ready, both targets converge on the same connection and protocol
+behavior.
 
 Each `Session` owns exactly one dedicated server lifecycle:
 
@@ -38,7 +40,9 @@ Each `Session` owns exactly one dedicated server lifecycle:
 - dropping the last session/listing reference or explicitly closing the session
   cleans up its owned process and private endpoints.
 
-Startup follows the same bounded sequence for either target:
+Local and SSH startup share endpoint, handshake, diagnostic, and lifecycle
+primitives, but each target owns its process-specific orchestration. Their
+common endpoint sequence is:
 
 ```text
 select and validate target
@@ -47,7 +51,7 @@ select and validate target
 prepare a private local endpoint
         |
         v
-launch the local server or SSH process
+launch the local server or prepare the SSH transport
         |
         v
 retry connection while watching timeout and child exit
@@ -59,11 +63,33 @@ complete protocol-version and control-role handshake
 return Session owning the complete lifecycle
 ```
 
-For SSH targets, compatible server installation is a preparation step before
-launch. The client selects the matching server version, keeps it in an
-application-owned versioned directory, and hides installation details from the
-UI. Development and release builds differ only in package source: transferred
-workspace packages for development and crates.io for release.
+For SSH targets, the client creates one ControlMaster before checking or
+installing the server. Compatibility checks, installation, server launch, and
+StreamLocal forwarding all reuse that authenticated SSH transport. The client
+selects the matching server version, keeps it in an application-owned versioned
+directory, and hides installation details from the UI. Development and release
+builds differ only in package source: transferred workspace packages for
+development and crates.io for release.
+
+## Internal module layout
+
+Startup implementation lives under `crates/file-peeker-client/src/startup/`:
+
+- `mod.rs` is the lifecycle facade. It dispatches `SessionTarget`, owns
+  `LifecycleHandle`, and marks a session closed after its target-specific
+  supervisor finishes.
+- `local.rs` owns the local child process, startup rollback, and supervision.
+- `remote.rs` orchestrates the SSH master, installation, server launcher,
+  forwarding, rollback, and remote supervision.
+- `ssh.rs` owns OpenSSH command construction and control operations.
+- `runtime.rs` owns session directories, socket paths, permissions, UUIDs, and
+  log retention.
+- `protocol.rs` owns socket connection retries and the control handshake.
+- `diagnostics.rs` owns bounded stderr capture and session-log writing.
+
+Local and remote process structs remain private to their modules. Each target
+passes its supervisor future to `LifecycleHandle`; there is no shared process
+enum and no process-specific branching in the lifecycle facade.
 
 ## Public client API
 
@@ -97,24 +123,45 @@ begin with `-` are rejected.
 For a local target, the client:
 
 1. Validates that the server executable path is present.
-2. Creates an owner-only temporary directory under `/tmp` and reserves a short
-   Unix socket path inside it.
+2. Creates an owner-only session directory under
+   `~/.file-peeker/run/<session-id>/` and reserves `server.sock` inside it.
 3. Starts the server with:
 
    ```text
    file-peeker-server serve --socket <private-socket>
    ```
 
-4. Captures complete server diagnostics from stderr.
+4. Drains server stderr, retains bounded diagnostics in memory, and writes the
+   full stream to `~/.file-peeker/logs/<session-id>.log`.
 5. Retries the socket connection while also watching for process exit and the
    startup deadline.
 6. Sends the protocol-version and control-role handshake.
 7. Returns a `Session` that owns the server process, control connection,
-   and temporary endpoint.
+   and session endpoint.
 
 The Ratatui application and SwiftUI application currently construct local
 targets. The Swift application bundles the server executable in its application
 resources.
+
+### Local server startup timeline
+
+```text
+Client                   Local server
+  |                            |
+  |-- create session dir ----->|  ~/.file-peeker/run/<session-id>/
+  |-- spawn ------------------>|  serve --socket server.sock
+  |                            |-- bind server.sock
+  |-- connect with retry ----->|
+  |-- hello(control, version)->|
+  |<--------- hello_ok --------|
+  |                            |
+  +-- return ready Session     +-- accept operation connections
+```
+
+The server is considered ready only after it has bound `server.sock`, accepted
+the dedicated control connection, and returned `hello_ok` for the expected
+protocol version. Merely spawning the process or observing the socket file is
+not sufficient.
 
 ## Remote installation
 
@@ -145,22 +192,56 @@ successful installation fail.
 
 For an SSH target, `Client::connect`:
 
-1. Checks whether the matching remote server is already installed and
-   compatible.
-2. Installs it only when installation is required; a compatible installation is
-   not overwritten.
-3. Creates a private local Unix socket endpoint.
-4. Starts SSH with Unix-socket forwarding and
-   `ExitOnForwardFailure=yes`.
-5. Creates a private remote runtime directory and starts the installed server
-   on a Unix socket inside it.
-6. Connects to the local end of the forwarded socket and performs the same
-   control handshake used by local startup.
-7. Returns the same `Session` type used for a local target.
+1. Creates `~/.file-peeker/run/<session-id>/` locally with `server.sock` and
+   `cm.sock` paths, rejecting unsafe ownership, symlinks, or paths that cannot
+   be encoded for Unix sockets and StreamLocal forwarding.
+2. Starts a foreground OpenSSH ControlMaster and waits up to 300 seconds for
+   authentication and `ssh -O check` readiness.
+3. Checks the matching remote server installation through the master and
+   installs only when required. Every install command uses the same
+   `ControlPath` with non-interactive multiplex clients.
+4. Queries the absolute remote home path, then reserves
+   `~/.file-peeker/run/<session-id>/server.sock` on the remote host.
+5. Starts a long-lived SSH launcher channel through the master. The remote
+   wrapper creates the owner-only runtime directory, starts the installed
+   server, monitors launcher stdin, and removes its directory on exit.
+6. Adds forwarding separately with `ssh -O forward`, a StreamLocal mapping from
+   the local socket to the remote socket, and `ExitOnForwardFailure=yes`.
+7. Connects to the local forwarded socket within the five-second startup
+   deadline and performs the same control handshake used by local startup.
+8. Returns the same `Session` type used for a local target.
 
 The server is not exposed on a TCP port. Authentication and encryption are
 provided by SSH, and normal SSH configuration continues to control identities,
-ports, jump hosts, and host verification.
+ports, jump hosts, and host verification. The master is dedicated to one
+`Session`; it does not reconnect or persist after that session closes.
+
+### Remote server startup timeline
+
+```text
+Client             SSH master          Remote launcher       Remote server
+  |                     |                       |                    |
+  |-- start/auth ------>|                       |                    |
+  |-- -O check -------->|                       |                    |
+  |-- install/check --->|-- exec channels ---->|                    |
+  |-- query HOME ------>|-- exec channel ----->|                    |
+  |-- launch ---------->|-- session channel -->|                    |
+  |                     |                       |-- create runtime ->|
+  |                     |                       |-- spawn ---------->|
+  |                     |                       |                    |-- bind server.sock
+  |-- -O forward ------>|                       |                    |
+  |-- connect local --->|== StreamLocal forwarding ================>|
+  |-- hello(control) -->|===========================================>|
+  |<------------------------------- hello_ok -----------------------|
+  |                     |                       |                    |
+  +-- return ready Session                     |                    +-- accept operations
+```
+
+The master must be ready before installation begins. The launcher starts the
+remote server without daemonizing it and keeps stdin open as its lifetime
+signal. StreamLocal forwarding is added only through the existing master. As
+with local startup, the remote session becomes ready only after the forwarded
+control handshake succeeds.
 
 ## Operations after startup
 
@@ -181,14 +262,35 @@ The metadata client method is still a typed `NotImplemented` result.
 supervisor. Shutdown:
 
 1. Closes the control connection.
-2. Lets the server or SSH process exit within a bounded grace period.
-3. Kills and reaps the owned process if it does not exit in time.
-4. Removes the owned local temporary socket directory.
-5. For SSH startup, closes SSH stdin and removes the private remote runtime
-   directory through the remote cleanup trap.
+2. Lets the local server exit within a bounded grace period, or closes the
+   remote launcher stdin and lets its cleanup trap stop the remote server and
+   remove the remote runtime directory.
+3. Kills and reaps an owned server or launcher that does not exit in time.
+4. For SSH startup, cancels the StreamLocal forward with `ssh -O cancel`, asks
+   the master to exit with `ssh -O exit`, and kills it if bounded shutdown does
+   not complete.
+5. Drops the owned local session directory, removing its sockets.
 
 Explicit close is idempotent. New operations are rejected after the lifecycle
-has closed.
+has closed. `Session::close().await` waits for the supervisor; `Drop` sends the
+same shutdown signal but cannot wait synchronously.
+
+## Runtime files and diagnostics
+
+Runtime and log roots are maintained separately:
+
+```text
+~/.file-peeker/
+├── run/<session-id>/
+│   ├── server.sock
+│   └── cm.sock        # SSH sessions only
+└── logs/<session-id>.log
+```
+
+The `run` root and session directories use mode `0700`; log files use `0600`.
+The client retains the ten newest session logs. Normal shutdown removes the
+session directory, while logs remain available for diagnosis. Automatic
+cleanup after process crashes or machine restarts is intentionally deferred.
 
 ## Diagnostic CLI
 
@@ -235,9 +337,8 @@ The implemented routine is covered by:
 - a Swift client test that starts the bundled server and lists a directory;
 - an Xcode build of the SwiftUI application;
 - a remote package installation script for unpublished crates;
-- an end-to-end SSH diagnostic run against the configured `ntu` destination,
-  including installation compatibility checking, control handshake, current
-  root retrieval, and clean shutdown.
+- unit coverage for runtime-path security, socket limits, SSH multiplex
+  arguments, protocol framing, and diagnostics.
 
 Run the complete local verification sequence with:
 
@@ -251,11 +352,19 @@ Run the unpublished remote installation test with:
 scripts/test-remote-server-install.sh SSH_DESTINATION
 ```
 
+When an SSH destination is available, run the complete remote lifecycle
+manually with:
+
+```text
+cargo run -p file-peeker-client -- connect SSH_DESTINATION
+```
+
 ## Remaining startup work
 
 The main remaining work is hardening rather than the happy-path startup flow:
 
 - automated remote lifecycle and failure-path integration tests;
+- crash recovery and stale runtime-file cleanup;
 - local timeout, wrong-version, and diagnostic-cleanup integration fixtures;
 - preservation of one terminal lifecycle error for consistent later failures;
 - crates.io publishing metadata and validation of the release installation

@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     fmt::Write as _,
+    io::Write as _,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -110,6 +111,7 @@ pub(super) struct RemoteInstallConfig {
     pub(super) output_limit: usize,
     pub(super) source: RemoteInstallSource,
     pub(super) policy: RemoteInstallPolicy,
+    pub(super) log_path: Option<PathBuf>,
 }
 
 impl RemoteInstallConfig {
@@ -128,6 +130,7 @@ impl RemoteInstallConfig {
                 RemoteInstallSource::CratesIo
             },
             policy,
+            log_path: None,
         }
     }
 }
@@ -274,6 +277,7 @@ async fn run_remote_script(
 
     let stdout = join_reader(stdout_task).await?;
     let stderr = join_reader(stderr_task).await?;
+    append_diagnostics(config, "install ssh stderr", &stderr.bytes);
 
     if !status.success() {
         return Err(RemoteInstallError::Failed {
@@ -392,7 +396,8 @@ async fn run_workspace_ssh(
     remote_command: &str,
     input: Option<&[u8]>,
 ) -> Result<(), RemoteInstallError> {
-    let mut child = Command::new(&config.ssh_executable)
+    let mut command = Command::new(&config.ssh_executable);
+    command
         .args(&config.ssh_arguments)
         .arg(&config.destination)
         .arg(remote_command)
@@ -402,9 +407,16 @@ async fn run_workspace_ssh(
             Stdio::null()
         })
         .stdout(Stdio::null())
-        .kill_on_drop(true)
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
         .spawn()
         .map_err(|error| RemoteInstallError::Spawn(error.to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| RemoteInstallError::Io("SSH stderr was not available".into()))?;
+    let stderr_task = tokio::spawn(read_bounded(stderr, config.output_limit));
     if let Some(bytes) = input {
         child
             .stdin
@@ -414,16 +426,43 @@ async fn run_workspace_ssh(
             .await
             .map_err(|error| RemoteInstallError::Io(error.to_string()))?;
     }
-    let status = timeout(config.timeout, child.wait())
-        .await
-        .map_err(|_| RemoteInstallError::Timeout(config.timeout.as_millis()))?
-        .map_err(|error| RemoteInstallError::Io(error.to_string()))?;
+    let status = if let Ok(result) = timeout(config.timeout, child.wait()).await {
+        result.map_err(|error| RemoteInstallError::Io(error.to_string()))?
+    } else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        let _ = stderr_task.await;
+        return Err(RemoteInstallError::Timeout(config.timeout.as_millis()));
+    };
+    let stderr = join_reader(stderr_task).await?;
+    append_diagnostics(config, "workspace ssh stderr", &stderr.bytes);
     if status.success() {
         Ok(())
     } else {
         Err(RemoteInstallError::Failed {
-            diagnostics: format!("SSH exited with {status}"),
+            diagnostics: format_diagnostics(
+                status.code(),
+                &BoundedOutput {
+                    bytes: Vec::new(),
+                    truncated: false,
+                },
+                &stderr,
+            ),
         })
+    }
+}
+
+fn append_diagnostics(config: &RemoteInstallConfig, label: &str, bytes: &[u8]) {
+    let Some(path) = &config.log_path else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "[{label}]");
+    let _ = file.write_all(bytes);
+    if !bytes.ends_with(b"\n") {
+        let _ = writeln!(file);
     }
 }
 
@@ -852,6 +891,7 @@ chmod +x "$root/bin/file-peeker-server"
                 output_limit: 64 * 1024,
                 source: RemoteInstallSource::CratesIo,
                 policy: RemoteInstallPolicy::ReuseExisting,
+                log_path: None,
             }
         }
 
