@@ -36,20 +36,6 @@ struct ClientIntegrationTests {
         require(entry.kind == .directory, "DirectoryEntry did not preserve kind")
         require(entry.navigable, "DirectoryEntry did not preserve navigable")
 
-        let row = StateRow(
-            entry: entry,
-            parentPath: "/tmp/example",
-            depth: 1,
-            expanded: false,
-            errorMessage: nil
-        )
-        require(row.entry == entry, "StateRow did not preserve its entry")
-        require(row.depth == 1, "StateRow did not preserve depth")
-
-        let snapshot = StateSnapshot(path: "/tmp/example", rows: [row])
-        require(snapshot.path == "/tmp/example", "StateSnapshot did not preserve its path")
-        require(snapshot.rows == [row], "StateSnapshot did not preserve its rows")
-
         let metadata = FileMetadata(
             path: "/tmp/example/docs",
             kind: .directory,
@@ -135,55 +121,51 @@ struct ClientIntegrationTests {
                 "real server current root did not match its working directory"
             )
 
-            let state = try await session.openState(path: directory.path)
-            let independentState = try await session.openState(path: directory.path)
-            let rootSnapshot = state.snapshot()
-            let names = rootSnapshot.rows.map(\.entry.name)
+            let listing = try await session.list(path: directory.path)
+            let independentListing = try await session.list(path: directory.path)
+            let rootEntries = try await collect(listing)
+            let independentEntries = try await collect(independentListing)
+            let names = rootEntries.map(\.name)
 
             require(
                 names.contains(expectedName),
                 "real server listing did not return the test file"
             )
-            let firstExpandedSnapshot = try await state.expand(path: nested.path)
-            let firstNestedNames = firstExpandedSnapshot.rows
-                .filter { $0.parentPath == nested.path }
-                .map(\.entry.name)
+            let firstNestedNames = try await collect(
+                session.list(path: nested.path)
+            ).map(\.name)
             require(
                 firstNestedNames == [nestedFile.lastPathComponent],
                 "first shared-tree expansion returned unexpected contents"
             )
 
             require(
-                independentState.snapshot() == rootSnapshot,
-                "independent states on one session did not remain isolated"
-            )
-
-            let collapsedSnapshot = try state.collapse(path: nested.path)
-            require(
-                collapsedSnapshot.rows.allSatisfy { $0.parentPath != nested.path },
-                "collapse did not discard nested rows"
+                independentEntries == rootEntries,
+                "independent listings on one session did not match"
             )
 
             let addedLater = nested.appendingPathComponent("added-later.txt")
             try Data().write(to: addedLater)
-            let secondExpandedSnapshot = try await state.expand(path: nested.path)
+            let secondEntries = try await collect(session.list(path: nested.path))
             let secondNestedNames = Set(
-                secondExpandedSnapshot.rows
-                    .filter { $0.parentPath == nested.path }
-                    .map(\.entry.name)
+                secondEntries.map(\.name)
             )
             require(
                 secondNestedNames == [nestedFile.lastPathComponent, addedLater.lastPathComponent],
                 "second shared-tree expansion did not reload fresh contents"
             )
-            require(
-                state.snapshot() == secondExpandedSnapshot,
-                "State.snapshot did not return the current browsing snapshot"
-            )
-            print("PASS session target and independent browsing states from Swift")
+            print("PASS session target and independent streamed listings from Swift")
         } catch {
             fail("real server startup and listing failed: \(error)")
         }
+    }
+
+    private static func collect(_ listing: Listing) async throws -> [DirectoryEntry] {
+        var entries: [DirectoryEntry] = []
+        while let batch = try await listing.nextBatch() {
+            entries.append(contentsOf: batch)
+        }
+        return entries
     }
 
     private static func require(

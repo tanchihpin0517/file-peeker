@@ -1,27 +1,33 @@
 import Combine
 import Foundation
 
+struct DisplayRow: Identifiable {
+    var entry: DirectoryEntry
+    var parentPath: String?
+    var depth: UInt32
+    var expanded: Bool
+    var errorMessage: String?
+
+    var id: String { entry.path }
+}
+
 @MainActor
 final class BrowserModel: ObservableObject {
-    @Published private(set) var snapshot: StateSnapshot?
+    @Published private(set) var currentPath: String
+    @Published private(set) var treeRows: [DisplayRow] = []
     @Published private(set) var loadingTreePaths: Set<String> = []
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
     private let client = Client()
     private var session: Session?
-    private var state: State?
     private var loadTask: Task<Void, Never>?
     private var expansionTasks: [String: Task<Void, Never>] = [:]
     private var generation: UInt64 = 0
     private var homePath = FileManager.default.homeDirectoryForCurrentUser.path
 
-    var currentPath: String {
-        snapshot?.path ?? homePath
-    }
-
-    var treeRows: [StateRow] {
-        snapshot?.rows ?? []
+    init() {
+        currentPath = FileManager.default.homeDirectoryForCurrentUser.path
     }
 
     var entries: [DirectoryEntry] {
@@ -33,9 +39,9 @@ final class BrowserModel: ObservableObject {
             return
         }
 
-        isLoading = true
-        errorMessage = nil
-        let path = homePath
+        generation &+= 1
+        let requestGeneration = generation
+        prepareRoot(path: homePath)
         loadTask = Task {
             do {
                 guard let serverURL = Bundle.main.url(
@@ -50,19 +56,18 @@ final class BrowserModel: ObservableObject {
                         target: .local(serverExecutablePath: serverURL.path)
                     )
                 )
-                let state = try await session.openState(path: path)
                 try Task.checkCancellation()
+                guard requestGeneration == generation else { return }
                 self.session = session
-                self.state = state
-                snapshot = state.snapshot()
-                isLoading = false
-                loadTask = nil
+                try await consumeRoot(
+                    session: session,
+                    path: homePath,
+                    requestGeneration: requestGeneration
+                )
             } catch is CancellationError {
                 return
             } catch {
-                errorMessage = String(describing: error)
-                isLoading = false
-                loadTask = nil
+                finishRootFailure(error, requestGeneration: requestGeneration)
             }
         }
     }
@@ -73,10 +78,7 @@ final class BrowserModel: ObservableObject {
             return
         }
 
-        guard let session else {
-            return
-        }
-
+        guard let session else { return }
         errorMessage = nil
         Task {
             do {
@@ -99,44 +101,44 @@ final class BrowserModel: ObservableObject {
 
     func toggleExpansion(of entry: DirectoryEntry) {
         guard entry.navigable,
-              let rowIndex = treeRows.firstIndex(where: { $0.entry.path == entry.path }),
-              !loadingTreePaths.contains(entry.path),
-              let state else {
+              let index = treeRows.firstIndex(where: { $0.entry.path == entry.path }),
+              let session else {
+            return
+        }
+
+        if treeRows[index].expanded {
+            collapse(path: entry.path)
             return
         }
 
         let path = entry.path
-        if treeRows[rowIndex].expanded {
-            do {
-                let snapshot = try state.collapse(path: path)
-                cancelTasksMissing(from: snapshot)
-                self.snapshot = snapshot
-            } catch {
-                errorMessage = String(describing: error)
-            }
-            return
-        }
-
         let requestGeneration = generation
+        treeRows[index].expanded = true
+        treeRows[index].errorMessage = nil
         loadingTreePaths.insert(path)
         expansionTasks[path] = Task {
             do {
-                let snapshot = try await state.expand(path: path)
-                try Task.checkCancellation()
-                guard requestGeneration == generation else {
-                    return
+                let listing = try await session.list(path: path)
+                while let batch = try await listing.nextBatch() {
+                    try Task.checkCancellation()
+                    guard requestGeneration == generation,
+                          treeRows.contains(where: { $0.entry.path == path && $0.expanded }) else {
+                        return
+                    }
+                    merge(batch: batch, parentPath: path)
                 }
-                self.snapshot = snapshot
+                guard requestGeneration == generation else { return }
+                finishExpansion(path: path)
             } catch is CancellationError {
                 return
             } catch {
-                guard requestGeneration == generation else {
-                    return
+                guard requestGeneration == generation else { return }
+                loadingTreePaths.remove(path)
+                expansionTasks[path] = nil
+                if let index = treeRows.firstIndex(where: { $0.entry.path == path }) {
+                    treeRows[index].errorMessage = String(describing: error)
                 }
-                snapshot = state.snapshot()
             }
-            loadingTreePaths.remove(path)
-            expansionTasks[path] = nil
         }
     }
 
@@ -145,64 +147,124 @@ final class BrowserModel: ObservableObject {
             config: SessionConfig(target: .ssh(destination: destination))
         )
         let remoteRoot = try await newSession.currentRoot()
-        let newState = try await newSession.openState(path: remoteRoot)
         try Task.checkCancellation()
 
-        generation &+= 1
-        loadTask?.cancel()
-        loadTask = nil
-        cancelExpansionTasks()
         session = newSession
-        state = newState
         homePath = remoteRoot
-        snapshot = newState.snapshot()
-        isLoading = false
-        errorMessage = nil
+        beginRootListing(session: newSession, path: remoteRoot)
     }
 
     private func openDirectory(_ path: String) {
-        guard let session else {
-            return
-        }
+        guard let session else { return }
+        beginRootListing(session: session, path: path)
+    }
 
+    private func beginRootListing(session: Session, path: String) {
         generation &+= 1
         let requestGeneration = generation
         loadTask?.cancel()
         cancelExpansionTasks()
-        isLoading = true
-        errorMessage = nil
+        prepareRoot(path: path)
 
         loadTask = Task {
             do {
-                let newState = try await session.openState(path: path)
-                try Task.checkCancellation()
-                guard requestGeneration == generation else {
-                    return
-                }
-                state = newState
-                snapshot = newState.snapshot()
-                isLoading = false
-                loadTask = nil
+                try await consumeRoot(
+                    session: session,
+                    path: path,
+                    requestGeneration: requestGeneration
+                )
             } catch is CancellationError {
                 return
             } catch {
-                guard requestGeneration == generation else {
-                    return
-                }
-                errorMessage = String(describing: error)
-                isLoading = false
-                loadTask = nil
+                finishRootFailure(error, requestGeneration: requestGeneration)
             }
         }
     }
 
-    private func cancelTasksMissing(from snapshot: StateSnapshot) {
-        let visiblePaths = Set(snapshot.rows.map(\.entry.path))
-        let removedTaskPaths = expansionTasks.keys.filter { !visiblePaths.contains($0) }
-        for path in removedTaskPaths {
-            expansionTasks[path]?.cancel()
-            expansionTasks[path] = nil
-            loadingTreePaths.remove(path)
+    private func prepareRoot(path: String) {
+        currentPath = path
+        treeRows = []
+        isLoading = true
+        errorMessage = nil
+    }
+
+    private func consumeRoot(
+        session: Session,
+        path: String,
+        requestGeneration: UInt64
+    ) async throws {
+        let listing = try await session.list(path: path)
+        while let batch = try await listing.nextBatch() {
+            try Task.checkCancellation()
+            guard requestGeneration == generation else { return }
+            merge(batch: batch, parentPath: nil)
+        }
+        guard requestGeneration == generation else { return }
+        isLoading = false
+        loadTask = nil
+    }
+
+    private func finishRootFailure(_ error: Error, requestGeneration: UInt64) {
+        guard requestGeneration == generation else { return }
+        errorMessage = String(describing: error)
+        isLoading = false
+        loadTask = nil
+    }
+
+    private func merge(batch: [DirectoryEntry], parentPath: String?) {
+        let depth = parentPath
+            .flatMap { path in treeRows.first(where: { $0.entry.path == path })?.depth }
+            .map { $0 + 1 } ?? 0
+        for entry in batch {
+            if let index = treeRows.firstIndex(where: { $0.entry.path == entry.path }) {
+                treeRows[index].entry = entry
+            } else {
+                treeRows.append(
+                    DisplayRow(
+                        entry: entry,
+                        parentPath: parentPath,
+                        depth: depth,
+                        expanded: false,
+                        errorMessage: nil
+                    )
+                )
+            }
+        }
+    }
+
+    private func finishExpansion(path: String) {
+        loadingTreePaths.remove(path)
+        expansionTasks[path] = nil
+    }
+
+    private func collapse(path: String) {
+        var removedPaths: Set<String> = []
+        var frontier: Set<String> = [path]
+        while !frontier.isEmpty {
+            let children = Set(
+                treeRows
+                    .filter { row in
+                        guard let parentPath = row.parentPath else { return false }
+                        return frontier.contains(parentPath)
+                    }
+                    .map(\.entry.path)
+            )
+            removedPaths.formUnion(children)
+            frontier = children
+        }
+        treeRows.removeAll { removedPaths.contains($0.entry.path) }
+        if let index = treeRows.firstIndex(where: { $0.entry.path == path }) {
+            treeRows[index].expanded = false
+            treeRows[index].errorMessage = nil
+        }
+
+        let cancelledPaths = expansionTasks.keys.filter {
+            $0 == path || removedPaths.contains($0)
+        }
+        for cancelledPath in cancelledPaths {
+            expansionTasks[cancelledPath]?.cancel()
+            expansionTasks[cancelledPath] = nil
+            loadingTreePaths.remove(cancelledPath)
         }
     }
 

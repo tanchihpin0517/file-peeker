@@ -1,208 +1,106 @@
 # File Peeker Protocol v1
 
-Status: NDJSON framing, local Unix and SSH-forwarded Unix transports, control
-and operation handshakes, directory listing, and current-root discovery are
-implemented. Metadata remains pending.
+File Peeker uses a private NDJSON protocol over local or SSH-forwarded Unix
+domain sockets. Protocol v1 is still under development; the streaming listing
+sequence replaces the earlier atomic `list_result` shape without compatibility.
 
-This is the private local protocol between the shared client library and its
-dedicated server. UIs do not implement this protocol. Both the Rust TUI and a
-future native Swift UI use the same client library and its UI-independent
-interface. Swift reaches that interface through UniFFI-generated bindings;
-UniFFI is not part of the server wire protocol.
+Each `Session` owns one long-lived control connection and opens one connection
+per filesystem operation. Operation connections carry one request, so the
+protocol does not use request IDs or multiplexing.
 
-Each `Session` owns one server. They use one long-lived control connection
-and one connection per filesystem operation. Each operation connection carries
-exactly one request, so messages do not need request IDs or multiplexing.
+## Framing and handshakes
 
-## Protocol overview
+Every message is one UTF-8 JSON object followed by `\n`. An encoded message may
+not exceed 1 MiB. Malformed, oversized, or out-of-order messages terminate the
+operation.
 
-| Exchange | Connection | Client message | Successful server message | Status |
-| --- | --- | --- | --- | --- |
-| Session handshake | Control | `hello` with role `control` | `hello_ok` | Implemented |
-| Operation handshake | Operation | `hello` with role `operation` | `hello_ok` | Implemented |
-| Current root | Operation | `current_root` | `current_root` | Implemented |
-| Directory listing | Operation | `list` | `list_result` | Implemented |
-| File metadata | Operation | `get_metadata` | `metadata` | Reserved |
-
-The server can send `error` instead of the expected success message. After its
-handshake, a control connection carries no further messages; an operation
-connection carries exactly one request and one response.
-
-## Transport
-
-The server listens on one private Unix domain stream socket and accepts the
-owning client's control and operation connections. Each message is one UTF-8
-JSON object followed by a newline (NDJSON).
-
-- The receiver handles each complete line immediately.
-- Messages have no fixed size limit; the receiver reads a complete line before
-  decoding it.
-- Unknown or malformed messages cause the receiver to close the connection.
-- Extra JSON fields are ignored for forward compatibility.
-
-Paths are absolute UTF-8 strings in v1. The client converts relative input
-against its current directory before sending it. The server rejects relative
-paths. Supporting non-UTF-8 Unix paths is deferred.
-
-## Connection roles
-
-Every connection starts with `hello` and declares its role.
-
-Control connection:
+Every connection begins with `hello`:
 
 ```json
 {"type":"hello","version":1,"role":"control"}
-```
-
-Operation connection:
-
-```json
 {"type":"hello","version":1,"role":"operation"}
 ```
 
-The server accepts the version:
+The server replies:
 
 ```json
 {"type":"hello_ok","version":1}
 ```
 
-Or rejects it and closes the connection:
-
-```json
-{"type":"error","code":"unsupported_version","message":"Unsupported protocol version"}
-```
-
-No other message may be sent before `hello_ok`.
-
-Exactly one control connection exists. It stays open for the lifetime of
-`Session` and carries no filesystem operations in v1. If it closes, the
-server closes all operation connections and exits.
-
-Each operation connection sends exactly one `list`, `current_root`, or
-`get_metadata` request
-after `hello_ok`, receives that operation's response, and then closes. Multiple
-operation connections may be active at once.
-
-The control connection must be established first. The server rejects operation
-connections received before the control connection or after it has closed.
-
-The server is dedicated to one client and its socket is placed in a private
-owner-only directory. Therefore every accepted connection implicitly belongs
-to that client; no session token is used.
-
-## Get the current root
-
-The client can query the absolute working directory inherited by the server.
-This supplies a remote initial path without assuming where an SSH login starts.
-
-Request:
-
-```json
-{"type":"current_root"}
-```
-
-Response:
-
-```json
-{"type":"current_root","path":"/home/example"}
-```
+or rejects the version with a terminal `error`. The control connection accepts
+no messages after its handshake. Closing it shuts down the dedicated server.
 
 ## List a directory
 
-Request:
+The client requests the direct children of one absolute UTF-8 path:
 
 ```json
 {"type":"list","path":"/tmp/example"}
 ```
 
-After it finishes enumerating the directory, the server sends one response
-containing every direct child in filesystem enumeration order:
+The server enumerates without globally sorting and sends zero or more non-empty
+batches:
 
 ```json
-{"type":"list_result","entries":[{"path":"/tmp/example/docs","name":"docs","kind":"directory","navigable":true}]}
+{"type":"list_batch","entries":[{"name":"docs","kind":"directory","navigable":true}]}
 ```
 
-Failure:
+Wire entries omit their repeated parent path. The Rust client validates `name`
+as one path component and reconstructs the absolute child path before exposing
+`DirectoryEntry` to a UI.
+
+Successful enumeration ends explicitly:
+
+```json
+{"type":"list_end"}
+```
+
+An empty directory sends only `list_end`. EOF before `list_end` is a truncated
+operation, never success.
+
+The server targets batches of 64 KiB and flushes at 512 entries or 25 ms after
+the first buffered entry, whichever occurs first. The timer is not reset by new
+entries. Enumeration pauses while a batch write is pending, providing bounded
+backpressure without a prefetch queue.
+
+If enumeration fails after valid entries were buffered, the server flushes that
+batch and then sends a terminal error. Clients may therefore retain useful
+partial results while marking the listing incomplete.
+
+`kind` is `file`, `directory`, `symlink`, or `other`. `navigable` is true for
+directories and symlinks whose current target is a directory. Failed symlink
+target resolution makes the symlink non-navigable. Non-UTF-8 filenames are
+unsupported and terminate the listing with `invalid_path`.
+
+## Other operations
+
+Current root:
+
+```json
+{"type":"current_root"}
+{"type":"current_root","path":"/home/example"}
+```
+
+Metadata remains reserved:
+
+```json
+{"type":"get_metadata","path":"/tmp/example/docs"}
+{"type":"metadata","path":"/tmp/example/docs","kind":"directory","size":96,"readonly":false,"modified":null}
+```
+
+## Errors and operation rules
 
 ```json
 {"type":"error","code":"permission_denied","message":"Cannot read directory"}
 ```
 
-An empty directory produces `{"type":"list_result","entries":[]}`. If any
-part of enumeration fails, the server discards the entries collected so far and
-sends only the error; partial listings are never returned.
+Codes are `not_found`, `permission_denied`, `not_directory`, `invalid_path`,
+`io`, and `unsupported_version`. An error is terminal for its operation.
 
-`kind` is one of:
-
-- `file`
-- `directory`
-- `symlink`
-- `other`
-
-`navigable` is true for directories and for symlinks whose current targets are
-directories. `name` is the final path component for display. Clients use
-`path`, not `name`, for later operations.
-
-## Get metadata
-
-Metadata exists for development, testing, and future UIs. The v1 terminal UI
-does not request or display it.
-
-Request:
-
-```json
-{"type":"get_metadata","path":"/tmp/example/docs"}
-```
-
-Success:
-
-```json
-{"type":"metadata","path":"/tmp/example/docs","kind":"directory","size":96,"readonly":false,"modified":"2026-07-16T12:10:00Z"}
-```
-
-`modified` is an RFC 3339 UTC timestamp or `null`. `size` is a non-negative JSON
-integer with filesystem-defined meaning for the entry type.
-
-Failure uses the same `error` message as directory listing.
-
-## Errors
-
-Operation errors contain a stable `code` and a human-readable `message`.
-Clients use the code for control flow.
-
-| Code | Meaning |
-| --- | --- |
-| `not_found` | The path does not exist |
-| `permission_denied` | OS permissions rejected the operation |
-| `not_directory` | A listing path is not a directory |
-| `invalid_path` | The supplied path is invalid |
-| `io` | Another filesystem I/O error occurred |
-| `unsupported_version` | The protocol version is not supported |
-
-An `error` is terminal for the current operation. Framing or message-order
-errors close the connection because continuing could misread the stream.
-
-## Operation rules
-
-- An operation connection carries exactly one request.
-- `list_result` is valid only while handling `list`.
-- `metadata` is valid only while handling `get_metadata`.
-- The client converts the complete `list_result` into the in-flight state load.
-- An operation `error` is returned to the caller.
-- Losing an operation connection fails only that operation.
+- One operation connection carries one request.
+- `list_batch`, `list_end`, and listing errors are valid only after `list`.
+- Empty listing batches are invalid.
 - Closing an operation connection cancels that operation.
-- Losing the control connection or server process invalidates the session, all
-  states backed by it, and all active operations.
-
-Closing the control connection is the shutdown mechanism. There is no separate
-shutdown request.
-
-## Future compatibility
-
-Changes that break these fields or message sequences require a new protocol
-version. Optional fields may be added because receivers ignore unknown fields.
-
-Remote transport is outside v1. Before network use, the design must add
-authentication, encryption, authorization, and allowed filesystem roots. The
-client interface remains stable when the SSH transport is selected so UIs
-do not need to learn the wire protocol.
+- Multiple operation connections may run concurrently.
+- A directory listing is not a filesystem snapshot; changes during enumeration
+  have platform-defined visibility.

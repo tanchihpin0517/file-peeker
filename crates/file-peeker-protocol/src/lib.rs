@@ -47,7 +47,6 @@ pub enum ClientMessage {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListingEntry {
-    pub path: String,
     pub name: String,
     pub kind: EntryKind,
     pub navigable: bool,
@@ -59,9 +58,10 @@ pub enum ServerMessage {
     HelloOk {
         version: u32,
     },
-    ListResult {
+    ListBatch {
         entries: Vec<ListingEntry>,
     },
+    ListEnd,
     Metadata {
         path: String,
         kind: EntryKind,
@@ -97,10 +97,9 @@ mod tests {
     }
 
     #[test]
-    fn list_result_shape_matches_protocol_document() {
-        let message = ServerMessage::ListResult {
+    fn list_batch_shape_matches_protocol_document() {
+        let message = ServerMessage::ListBatch {
             entries: vec![ListingEntry {
-                path: "/tmp/example/docs".into(),
                 name: "docs".into(),
                 kind: EntryKind::Directory,
                 navigable: true,
@@ -111,16 +110,16 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"type":"list_result","entries":[{"path":"/tmp/example/docs","name":"docs","kind":"directory","navigable":true}]}"#
+            r#"{"type":"list_batch","entries":[{"name":"docs","kind":"directory","navigable":true}]}"#
         );
     }
 
     #[test]
-    fn empty_list_result_has_an_empty_entries_array() {
-        let message = ServerMessage::ListResult { entries: vec![] };
+    fn list_end_shape_matches_protocol_document() {
+        let message = ServerMessage::ListEnd;
 
-        let json = serde_json::to_string(&message).expect("empty list result should serialize");
+        let json = serde_json::to_string(&message).expect("list end should serialize");
 
-        assert_eq!(json, r#"{"type":"list_result","entries":[]}"#);
+        assert_eq!(json, r#"{"type":"list_end"}"#);
     }
 }

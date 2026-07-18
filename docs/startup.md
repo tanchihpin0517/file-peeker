@@ -35,8 +35,8 @@ Each `Session` owns exactly one dedicated server lifecycle:
 - one long-lived control connection defines the shared lifetime;
 - each filesystem operation uses its own short-lived connection;
 - closing the control connection asks the dedicated server to exit;
-- dropping the last session/state reference or explicitly closing the session cleans up its owned process and
-  private endpoints.
+- dropping the last session/listing reference or explicitly closing the session
+  cleans up its owned process and private endpoints.
 
 Startup follows the same bounded sequence for either target:
 
@@ -170,7 +170,7 @@ the same local or forwarded socket and perform an operation-role handshake.
 
 The implemented operations are:
 
-- collect directory entries while loading or expanding a browsing state;
+- stream directory-entry batches through pull-based `Listing` objects;
 - return the server's current working directory for the diagnostic CLI.
 
 The metadata client method is still a typed `NotImplemented` result.

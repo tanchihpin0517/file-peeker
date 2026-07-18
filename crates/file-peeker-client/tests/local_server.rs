@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use file_peeker_client::{Client, Session, SessionConfig, SessionTarget};
+use file_peeker_client::{Client, DirectoryEntry, Listing, Session, SessionConfig, SessionTarget};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
@@ -118,74 +118,66 @@ async fn separate_sessions_have_independent_lifecycles() {
         })
         .await
         .expect("second session should start");
-    let second_state = std::sync::Arc::clone(&second)
-        .open_state(second_fixture.path().to_string_lossy().into_owned())
+    let second_listing = std::sync::Arc::clone(&second)
+        .list(second_fixture.path().to_string_lossy().into_owned())
         .await
-        .expect("second session should open a state");
+        .expect("second session should start a listing");
 
     first.close().await.expect("first session should close");
     assert!(second.current_root().await.is_ok());
-    assert_eq!(
-        second_state.snapshot().path,
-        second_fixture.path().to_string_lossy()
-    );
+    assert!(!collect_listing(&second_listing).await.is_empty());
     second.close().await.expect("second session should close");
 }
 
 async fn verify_shared_tree(client: &std::sync::Arc<Session>, browse_root: &Path) {
-    let state = std::sync::Arc::clone(client)
-        .open_state(browse_root.to_string_lossy().into_owned())
+    let listing = std::sync::Arc::clone(client)
+        .list(browse_root.to_string_lossy().into_owned())
         .await
-        .expect("browsing state should open");
-    let independent_state = std::sync::Arc::clone(client)
-        .open_state(browse_root.to_string_lossy().into_owned())
+        .expect("root listing should start");
+    let independent_listing = std::sync::Arc::clone(client)
+        .list(browse_root.to_string_lossy().into_owned())
         .await
-        .expect("an independent browsing state should open");
-    let root_snapshot = state.snapshot();
+        .expect("an independent listing should start");
+    let root_entries = collect_listing(&listing).await;
+    let independent_entries = collect_listing(&independent_listing).await;
     let docs_path = browse_root.join("docs").to_string_lossy().into_owned();
-    assert!(
-        root_snapshot
-            .rows
-            .iter()
-            .any(|row| row.entry.path == docs_path)
-    );
+    assert!(root_entries.iter().any(|entry| entry.path == docs_path));
+    assert_eq!(independent_entries, root_entries);
 
-    let expanded_snapshot = state
-        .expand(docs_path.clone())
+    let nested_listing = std::sync::Arc::clone(client)
+        .list(docs_path.clone())
         .await
-        .expect("nested directory should expand");
-    assert!(expanded_snapshot.rows.iter().any(|row| {
-        row.parent_path.as_deref() == Some(docs_path.as_str()) && row.entry.name == "first.txt"
-    }));
-    assert_eq!(independent_state.snapshot().rows, root_snapshot.rows);
-
-    let collapsed_snapshot = state
-        .collapse(docs_path.clone())
-        .expect("nested directory should collapse");
-    assert!(
-        collapsed_snapshot
-            .rows
-            .iter()
-            .all(|row| row.parent_path.as_deref() != Some(docs_path.as_str()))
-    );
+        .expect("nested listing should start");
+    let nested_entries = collect_listing(&nested_listing).await;
+    assert!(nested_entries.iter().any(|entry| entry.name == "first.txt"));
 
     fs::write(browse_root.join("docs/added-later.txt"), "later")
         .expect("new nested fixture file should be written");
-    let reexpanded_snapshot = state
-        .expand(docs_path.clone())
+    let fresh_listing = std::sync::Arc::clone(client)
+        .list(docs_path)
         .await
-        .expect("nested directory should freshly re-expand");
-    let nested_names: std::collections::HashSet<&str> = reexpanded_snapshot
-        .rows
+        .expect("fresh nested listing should start");
+    let fresh_entries = collect_listing(&fresh_listing).await;
+    let nested_names: std::collections::HashSet<&str> = fresh_entries
         .iter()
-        .filter(|row| row.parent_path.as_deref() == Some(docs_path.as_str()))
-        .map(|row| row.entry.name.as_str())
+        .map(|entry| entry.name.as_str())
         .collect();
     assert_eq!(
         nested_names,
         std::collections::HashSet::from(["first.txt", "added-later.txt"])
     );
-    assert_eq!(state.snapshot(), reexpanded_snapshot);
+}
+
+async fn collect_listing(listing: &std::sync::Arc<Listing>) -> Vec<DirectoryEntry> {
+    let mut entries = Vec::new();
+    while let Some(batch) = listing
+        .next_batch()
+        .await
+        .expect("listing batch should be readable")
+    {
+        entries.extend(batch);
+    }
+    entries
 }
 
 fn create_wrapper(fixture: &TempDir, real_server: &Path) -> PathBuf {

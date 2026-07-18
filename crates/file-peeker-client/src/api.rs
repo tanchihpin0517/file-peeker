@@ -7,23 +7,20 @@
 //!
 //! The API starts with [`Client`]. A client creates independent [`Session`]
 //! objects for local or SSH targets. A session owns one connection lifecycle,
-//! opens files, reports its current root, and creates [`State`] objects. A state
-//! maintains the expandable browsing status for one fixed root. All operations
-//! return [`FilePeekerError`] on failure.
+//! opens files, reports its current root, and creates pull-based [`Listing`]
+//! objects. All operations return [`FilePeekerError`] on failure.
 //!
 //! Public object API:
 //!
 //! - [`Client::new`] creates the shared API entry point.
 //! - [`Client::connect`] creates an independent local or SSH session.
 //! - [`Session::target`] returns the immutable connection target.
-//! - [`Session::open_state`] creates a browsing state rooted at a path.
+//! - [`Session::list`] starts a streamed directory listing.
 //! - [`Session::current_root`] returns the connected server's working directory.
 //! - [`Session::open`] opens a path with its associated application.
 //! - [`Session::metadata`] retrieves path metadata when implemented.
 //! - [`Session::close`] shuts down the session lifecycle.
-//! - [`State::snapshot`] returns the current flattened browsing rows.
-//! - [`State::expand`] freshly loads and expands a visible directory.
-//! - [`State::collapse`] removes a directory's visible descendants.
+//! - [`Listing::next_batch`] returns the next typed entry batch.
 
 use std::sync::Arc;
 
@@ -40,8 +37,8 @@ pub struct Session {
 }
 
 #[derive(Debug, uniffi::Object)]
-pub struct State {
-    inner: Arc<crate::state::State>,
+pub struct Listing {
+    inner: Arc<crate::ops::Listing>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -78,21 +75,6 @@ pub struct FileMetadata {
     pub size: u64,
     pub readonly: bool,
     pub modified: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
-pub struct StateRow {
-    pub entry: DirectoryEntry,
-    pub parent_path: Option<String>,
-    pub depth: u32,
-    pub expanded: bool,
-    pub error_message: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
-pub struct StateSnapshot {
-    pub path: String,
-    pub rows: Vec<StateRow>,
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq, uniffi::Error)]
@@ -149,14 +131,14 @@ impl Session {
         self.inner.target()
     }
 
-    /// Opens a fully loaded browsing state rooted at `path`.
+    /// Starts a streamed listing of the direct children at `path`.
     ///
     /// # Errors
     ///
     /// Returns a path, connection, protocol, or filesystem error.
-    pub async fn open_state(&self, path: String) -> Result<Arc<State>, FilePeekerError> {
-        let inner = Arc::clone(&self.inner).open_state(path).await?;
-        Ok(Arc::new(State { inner }))
+    pub async fn list(&self, path: String) -> Result<Arc<Listing>, FilePeekerError> {
+        let inner = Arc::clone(&self.inner).list(path).await?;
+        Ok(Arc::new(Listing { inner }))
     }
 
     /// Returns the connected server's current working directory.
@@ -197,28 +179,14 @@ impl Session {
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl State {
-    #[must_use]
-    pub fn snapshot(&self) -> StateSnapshot {
-        self.inner.snapshot()
-    }
-
-    /// Freshly loads and expands one visible directory.
+impl Listing {
+    /// Returns the next non-empty entry batch, or `None` after successful completion.
     ///
     /// # Errors
     ///
-    /// Returns a path, connection, protocol, or filesystem error.
-    pub async fn expand(&self, path: String) -> Result<StateSnapshot, FilePeekerError> {
-        self.inner.expand(path).await
-    }
-
-    /// Collapses a visible directory and discards its descendants.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-path error for an unknown or non-navigable row.
-    pub fn collapse(&self, path: String) -> Result<StateSnapshot, FilePeekerError> {
-        self.inner.collapse(path)
+    /// Returns a typed server, connection, framing, or protocol error.
+    pub async fn next_batch(&self) -> Result<Option<Vec<DirectoryEntry>>, FilePeekerError> {
+        self.inner.next_batch().await
     }
 }
 

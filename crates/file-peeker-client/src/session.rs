@@ -1,8 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use crate::{
-    FileMetadata, FilePeekerError, SessionConfig, SessionTarget, ops, startup, state::State,
-};
+use crate::{FileMetadata, FilePeekerError, SessionConfig, SessionTarget, ops, startup};
 
 #[derive(Debug)]
 pub(crate) struct Session {
@@ -55,16 +53,16 @@ impl Session {
         self.target.clone()
     }
 
-    /// Opens a fully loaded browsing state rooted at `path`.
+    /// Starts a streamed listing of the direct children at `path`.
     ///
     /// # Errors
     ///
     /// Returns a typed path, connection, protocol, or filesystem error.
-    pub(crate) async fn open_state(
+    pub(crate) async fn list(
         self: Arc<Self>,
         path: String,
-    ) -> Result<Arc<State>, FilePeekerError> {
-        State::load(self, path).await
+    ) -> Result<Arc<ops::Listing>, FilePeekerError> {
+        ops::Listing::start(self, path).await
     }
 
     /// Returns the server process's current working directory.

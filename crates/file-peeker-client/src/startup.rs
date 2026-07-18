@@ -13,7 +13,7 @@ use std::{
 use file_peeker_protocol::{ClientMessage, ConnectionRole, PROTOCOL_VERSION, ServerMessage};
 use tempfile::TempDir;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     process::{Child, ChildStdin, Command},
     sync::{Notify, mpsc},
@@ -29,6 +29,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(20);
 const STDERR_LIMIT: usize = 64 * 1024;
 const MAX_SOCKET_PATH_BYTES: usize = 100;
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub(super) struct LifecycleHandle {
@@ -413,24 +414,30 @@ async fn handshake_control(stream: &mut UnixStream) -> Result<(), FilePeekerErro
 
 async fn read_server_message(stream: &mut UnixStream) -> Result<ServerMessage, FilePeekerError> {
     let mut bytes = Vec::new();
-    let count = BufReader::new(stream)
-        .read_until(b'\n', &mut bytes)
-        .await
-        .map_err(|error| FilePeekerError::ConnectionClosed {
-            message: format!("cannot read control handshake: {error}"),
-        })?;
-
-    if count == 0 {
-        return Err(FilePeekerError::ConnectionClosed {
-            message: "server closed during the control handshake".into(),
-        });
+    loop {
+        let mut byte = [0_u8; 1];
+        let count =
+            stream
+                .read(&mut byte)
+                .await
+                .map_err(|error| FilePeekerError::ConnectionClosed {
+                    message: format!("cannot read control handshake: {error}"),
+                })?;
+        if count == 0 {
+            return Err(FilePeekerError::ConnectionClosed {
+                message: "server closed during the control handshake".into(),
+            });
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        if bytes.len() == MAX_FRAME_BYTES {
+            return Err(FilePeekerError::Protocol {
+                message: format!("control response exceeds {MAX_FRAME_BYTES} bytes"),
+            });
+        }
+        bytes.push(byte[0]);
     }
-    if bytes.last() != Some(&b'\n') {
-        return Err(FilePeekerError::Protocol {
-            message: "server response is not newline terminated".into(),
-        });
-    }
-    bytes.pop();
 
     serde_json::from_slice(&bytes).map_err(|error| FilePeekerError::Protocol {
         message: format!("server returned invalid JSON: {error}"),
@@ -557,6 +564,8 @@ mod tests {
     use file_peeker_protocol::{ErrorCode, ServerMessage};
     use tokio::{io::AsyncWriteExt, net::UnixStream};
 
+    use crate::FilePeekerError;
+
     use super::{
         BoundedOutput, read_bounded, read_server_message, shell_quote, validate_destination,
         validate_socket_length,
@@ -587,7 +596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_handshake_response_may_exceed_one_mib() {
+    async fn control_handshake_response_cannot_exceed_one_mib() {
         let message = ServerMessage::Error {
             code: ErrorCode::Io,
             message: "x".repeat(1024 * 1024 + 1),
@@ -598,18 +607,14 @@ mod tests {
         let (mut client_stream, mut server_stream) =
             UnixStream::pair().expect("socket pair should be created");
 
-        let writer = tokio::spawn(async move {
-            server_stream
-                .write_all(&bytes)
-                .await
-                .expect("large response should be writable");
-        });
-        let decoded = read_server_message(&mut client_stream)
+        let writer = tokio::spawn(async move { server_stream.write_all(&bytes).await });
+        let error = read_server_message(&mut client_stream)
             .await
-            .expect("large response should be readable");
-        writer.await.expect("writer task should complete");
+            .expect_err("large response should be rejected");
+        drop(client_stream);
+        let _ = writer.await.expect("writer task should complete");
 
-        assert_eq!(decoded, message);
+        assert!(matches!(error, FilePeekerError::Protocol { .. }));
     }
 
     #[test]

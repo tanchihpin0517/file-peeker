@@ -8,7 +8,7 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use file_peeker_client::{
-    Client, FilePeekerError, Session, SessionConfig, SessionTarget, State, StateRow, StateSnapshot,
+    Client, DirectoryEntry, FilePeekerError, Session, SessionConfig, SessionTarget,
 };
 use ratatui::{
     DefaultTerminal, Frame,
@@ -21,11 +21,22 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 #[derive(Debug)]
 enum AppEvent {
-    StateOpened(u64, Arc<State>, StateSnapshot),
+    RootBatch(u64, Vec<DirectoryEntry>),
+    RootFinished(u64),
     Failed(u64, FilePeekerError),
     OpenFailed(u64, FilePeekerError),
-    ExpansionFinished(u64, String, StateSnapshot),
-    ExpansionFailed(u64, String, StateSnapshot),
+    ExpansionBatch(u64, String, Vec<DirectoryEntry>),
+    ExpansionFinished(u64, String),
+    ExpansionFailed(u64, String, FilePeekerError),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DisplayRow {
+    entry: DirectoryEntry,
+    parent_path: Option<String>,
+    depth: u32,
+    expanded: bool,
+    error_message: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -43,12 +54,12 @@ enum RightAction {
 #[derive(Debug)]
 struct App {
     session: Arc<Session>,
-    state: Option<Arc<State>>,
     path: String,
-    rows: Vec<StateRow>,
+    rows: Vec<DisplayRow>,
     selected: usize,
     loading: bool,
     loading_tree_paths: HashSet<String>,
+    root_task: Option<JoinHandle<()>>,
     expansion_tasks: HashMap<String, JoinHandle<()>>,
     error: Option<String>,
     generation: u64,
@@ -58,25 +69,42 @@ impl App {
     fn open_directory(&mut self, path: String, events: mpsc::UnboundedSender<AppEvent>) {
         self.generation += 1;
         let generation = self.generation;
+        if let Some(task) = self.root_task.take() {
+            task.abort();
+        }
         self.loading_tree_paths.clear();
         for (_, task) in self.expansion_tasks.drain() {
             task.abort();
         }
         self.loading = true;
         self.error = None;
+        self.path.clone_from(&path);
+        self.rows.clear();
+        self.selected = 0;
         let session = Arc::clone(&self.session);
 
-        tokio::spawn(async move {
-            match session.open_state(path).await {
-                Ok(state) => {
-                    let snapshot = state.snapshot();
-                    let _ = events.send(AppEvent::StateOpened(generation, state, snapshot));
-                }
+        self.root_task = Some(tokio::spawn(async move {
+            match Arc::clone(&session).list(path).await {
+                Ok(listing) => loop {
+                    match listing.next_batch().await {
+                        Ok(Some(batch)) => {
+                            let _ = events.send(AppEvent::RootBatch(generation, batch));
+                        }
+                        Ok(None) => {
+                            let _ = events.send(AppEvent::RootFinished(generation));
+                            break;
+                        }
+                        Err(error) => {
+                            let _ = events.send(AppEvent::Failed(generation, error));
+                            break;
+                        }
+                    }
+                },
                 Err(error) => {
                     let _ = events.send(AppEvent::Failed(generation, error));
                 }
             }
-        });
+        }));
     }
 
     fn open_selected(&mut self, events: mpsc::UnboundedSender<AppEvent>) {
@@ -103,64 +131,87 @@ impl App {
         let Some(row) = self.rows.get(self.selected) else {
             return;
         };
-        if !row.entry.navigable || self.loading_tree_paths.contains(&row.entry.path) {
+        if !row.entry.navigable
+            || self.loading_tree_paths.contains(&row.entry.path) && !row.expanded
+        {
             return;
         }
 
-        let Some(state) = self.state.as_ref().map(Arc::clone) else {
-            return;
-        };
         if row.expanded {
-            match state.collapse(row.entry.path.clone()) {
-                Ok(snapshot) => self.replace_snapshot(snapshot),
-                Err(error) => self.error = Some(error.to_string()),
-            }
+            self.collapse(&row.entry.path.clone());
             return;
         }
 
         let path = row.entry.path.clone();
+        if let Some(row) = self.rows.get_mut(self.selected) {
+            row.expanded = true;
+            row.error_message = None;
+        }
         let task_path = path.clone();
         self.loading_tree_paths.insert(path.clone());
         let generation = self.generation;
-        let state = Arc::clone(&state);
+        let session = Arc::clone(&self.session);
         let task = tokio::spawn(async move {
-            let event = match state.expand(path.clone()).await {
-                Ok(snapshot) => AppEvent::ExpansionFinished(generation, path, snapshot),
-                Err(_) => AppEvent::ExpansionFailed(generation, path, state.snapshot()),
-            };
-            let _ = events.send(event);
+            match session.list(path.clone()).await {
+                Ok(listing) => loop {
+                    match listing.next_batch().await {
+                        Ok(Some(batch)) => {
+                            let _ = events.send(AppEvent::ExpansionBatch(
+                                generation,
+                                path.clone(),
+                                batch,
+                            ));
+                        }
+                        Ok(None) => {
+                            let _ = events.send(AppEvent::ExpansionFinished(generation, path));
+                            break;
+                        }
+                        Err(error) => {
+                            let _ = events.send(AppEvent::ExpansionFailed(generation, path, error));
+                            break;
+                        }
+                    }
+                },
+                Err(error) => {
+                    let _ = events.send(AppEvent::ExpansionFailed(generation, path, error));
+                }
+            }
         });
         self.expansion_tasks.insert(task_path, task);
     }
 
     fn update(&mut self, event: AppEvent) {
         match event {
-            AppEvent::StateOpened(generation, state, snapshot) if generation == self.generation => {
-                self.state = Some(state);
-                self.selected = 0;
-                self.replace_snapshot(snapshot);
+            AppEvent::RootBatch(generation, entries) if generation == self.generation => {
+                self.merge_batch(None, entries);
+            }
+            AppEvent::RootFinished(generation) if generation == self.generation => {
                 self.loading = false;
+                self.root_task = None;
             }
             AppEvent::Failed(generation, error) if generation == self.generation => {
                 self.loading = false;
+                self.root_task = None;
                 self.error = Some(error.to_string());
             }
             AppEvent::OpenFailed(generation, error) if generation == self.generation => {
                 self.error = Some(error.to_string());
             }
-            AppEvent::ExpansionFinished(generation, path, snapshot)
+            AppEvent::ExpansionBatch(generation, path, entries)
                 if generation == self.generation =>
             {
-                self.loading_tree_paths.remove(&path);
-                self.expansion_tasks.remove(&path);
-                self.replace_snapshot(snapshot);
+                self.merge_batch(Some(&path), entries);
             }
-            AppEvent::ExpansionFailed(generation, path, snapshot)
-                if generation == self.generation =>
-            {
+            AppEvent::ExpansionFinished(generation, path) if generation == self.generation => {
                 self.loading_tree_paths.remove(&path);
                 self.expansion_tasks.remove(&path);
-                self.replace_snapshot(snapshot);
+            }
+            AppEvent::ExpansionFailed(generation, path, error) if generation == self.generation => {
+                self.loading_tree_paths.remove(&path);
+                self.expansion_tasks.remove(&path);
+                if let Some(row) = self.rows.iter_mut().find(|row| row.entry.path == path) {
+                    row.error_message = Some(error.to_string());
+                }
             }
             _ => {}
         }
@@ -190,33 +241,80 @@ impl App {
         }
     }
 
-    fn replace_snapshot(&mut self, snapshot: StateSnapshot) {
+    fn merge_batch(&mut self, parent_path: Option<&str>, entries: Vec<DirectoryEntry>) {
         let selected_path = self
             .rows
             .get(self.selected)
             .map(|row| row.entry.path.clone());
-        let visible_paths: HashSet<&str> = snapshot
-            .rows
-            .iter()
-            .map(|row| row.entry.path.as_str())
-            .collect();
-        let removed_loading_paths: Vec<String> = self
-            .expansion_tasks
-            .keys()
-            .filter(|path| !visible_paths.contains(path.as_str()))
-            .cloned()
-            .collect();
-        for path in removed_loading_paths {
-            self.loading_tree_paths.remove(&path);
-            if let Some(task) = self.expansion_tasks.remove(&path) {
-                task.abort();
+        let depth = parent_path
+            .and_then(|path| self.rows.iter().find(|row| row.entry.path == path))
+            .map_or(0, |row| row.depth + 1);
+        for entry in entries {
+            if let Some(row) = self
+                .rows
+                .iter_mut()
+                .find(|row| row.entry.path == entry.path)
+            {
+                row.entry = entry;
+                continue;
             }
+            let insert_at = parent_path.map_or(self.rows.len(), |path| {
+                let parent_index = self
+                    .rows
+                    .iter()
+                    .position(|row| row.entry.path == path)
+                    .expect("expanded parent should remain visible");
+                self.descendants_end(parent_index)
+            });
+            self.rows.insert(
+                insert_at,
+                DisplayRow {
+                    entry,
+                    parent_path: parent_path.map(str::to_owned),
+                    depth,
+                    expanded: false,
+                    error_message: None,
+                },
+            );
         }
-        self.path = snapshot.path;
-        self.rows = snapshot.rows;
         self.selected = selected_path
             .and_then(|path| self.rows.iter().position(|row| row.entry.path == path))
             .unwrap_or_else(|| self.selected.min(self.rows.len().saturating_sub(1)));
+    }
+
+    fn descendants_end(&self, index: usize) -> usize {
+        let depth = self.rows[index].depth;
+        self.rows[index + 1..]
+            .iter()
+            .position(|row| row.depth <= depth)
+            .map_or(self.rows.len(), |offset| index + 1 + offset)
+    }
+
+    fn collapse(&mut self, path: &str) {
+        let Some(index) = self.rows.iter().position(|row| row.entry.path == path) else {
+            return;
+        };
+        let end = self.descendants_end(index);
+        let removed_paths: HashSet<String> = self.rows[index + 1..end]
+            .iter()
+            .map(|row| row.entry.path.clone())
+            .collect();
+        self.rows.drain(index + 1..end);
+        self.rows[index].expanded = false;
+        self.rows[index].error_message = None;
+        let cancelled: Vec<String> = self
+            .expansion_tasks
+            .keys()
+            .filter(|candidate| candidate.as_str() == path || removed_paths.contains(*candidate))
+            .cloned()
+            .collect();
+        for cancelled_path in cancelled {
+            self.loading_tree_paths.remove(&cancelled_path);
+            if let Some(task) = self.expansion_tasks.remove(&cancelled_path) {
+                task.abort();
+            }
+        }
+        self.selected = self.selected.min(self.rows.len().saturating_sub(1));
     }
 
     fn render(&self, frame: &mut Frame<'_>) {
@@ -305,12 +403,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
         .await?;
     if smoke {
-        let count = Arc::clone(&session)
-            .open_state(path)
-            .await?
-            .snapshot()
-            .rows
-            .len();
+        let listing = Arc::clone(&session).list(path).await?;
+        let mut count = 0;
+        while let Some(batch) = listing.next_batch().await? {
+            count += batch.len();
+        }
         println!("PASS local TUI listing smoke test ({count} entries)");
         return Ok(());
     }
@@ -318,12 +415,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let mut app = App {
         session,
-        state: None,
         path: path.clone(),
         rows: Vec::new(),
         selected: 0,
         loading: false,
         loading_tree_paths: HashSet::new(),
+        root_task: None,
         expansion_tasks: HashMap::new(),
         error: None,
         generation: 0,
@@ -374,7 +471,7 @@ fn sibling_server() -> Result<PathBuf, Box<dyn Error>> {
         .join("file-peeker-server"))
 }
 
-fn open_action(rows: &[StateRow], selected: usize) -> Option<OpenAction> {
+fn open_action(rows: &[DisplayRow], selected: usize) -> Option<OpenAction> {
     rows.get(selected).map(|row| {
         if row.entry.navigable {
             OpenAction::Directory(row.entry.path.clone())
@@ -384,19 +481,19 @@ fn open_action(rows: &[StateRow], selected: usize) -> Option<OpenAction> {
     })
 }
 
-fn parent_index(rows: &[StateRow], selected: usize) -> Option<usize> {
+fn parent_index(rows: &[DisplayRow], selected: usize) -> Option<usize> {
     let parent_path = rows.get(selected)?.parent_path.as_deref()?;
     rows.iter().position(|row| row.entry.path == parent_path)
 }
 
-fn first_child_index(rows: &[StateRow], selected: usize) -> Option<usize> {
+fn first_child_index(rows: &[DisplayRow], selected: usize) -> Option<usize> {
     let path = rows.get(selected)?.entry.path.as_str();
     rows.iter()
         .position(|row| row.parent_path.as_deref() == Some(path))
 }
 
 fn right_action(
-    rows: &[StateRow],
+    rows: &[DisplayRow],
     selected: usize,
     loading_paths: &HashSet<String>,
 ) -> Option<RightAction> {
@@ -415,14 +512,15 @@ fn right_action(
 mod tests {
     use std::collections::HashSet;
 
-    use file_peeker_client::{DirectoryEntry, EntryKind, StateRow};
+    use file_peeker_client::{DirectoryEntry, EntryKind};
 
     use super::{
-        OpenAction, RightAction, first_child_index, open_action, parent_index, right_action,
+        DisplayRow, OpenAction, RightAction, first_child_index, open_action, parent_index,
+        right_action,
     };
 
-    fn row(path: &str, parent_path: Option<&str>, navigable: bool) -> StateRow {
-        StateRow {
+    fn row(path: &str, parent_path: Option<&str>, navigable: bool) -> DisplayRow {
+        DisplayRow {
             entry: DirectoryEntry {
                 path: path.into(),
                 name: path.rsplit('/').next().unwrap_or(path).into(),

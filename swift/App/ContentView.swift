@@ -4,10 +4,6 @@ extension DirectoryEntry: Identifiable {
     public var id: String { path }
 }
 
-extension StateRow: Identifiable {
-    public var id: String { entry.path }
-}
-
 struct ContentView: View {
     @StateObject private var model = BrowserModel()
     @SwiftUI.State private var selection: String?
@@ -273,9 +269,15 @@ private struct FinderContent: View {
 
                     if row.entry.navigable {
                         if model.loadingTreePaths.contains(row.entry.path) {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .frame(width: 12, height: 12)
+                            Button {
+                                model.toggleExpansion(of: row.entry)
+                            } label: {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Cancel and collapse")
                         } else {
                             Button {
                                 model.toggleExpansion(of: row.entry)
@@ -362,17 +364,17 @@ private struct FinderContent: View {
         model.entries.sorted(by: entryComesBefore)
     }
 
-    private var visibleTreeRows: [StateRow] {
+    private var visibleTreeRows: [DisplayRow] {
         let rowsByParent = Dictionary(grouping: model.treeRows, by: \.parentPath)
-        var result: [StateRow] = []
+        var result: [DisplayRow] = []
         appendRows(parentPath: nil, from: rowsByParent, to: &result)
         return result
     }
 
     private func appendRows(
         parentPath: String?,
-        from rowsByParent: [String?: [StateRow]],
-        to result: inout [StateRow]
+        from rowsByParent: [String?: [DisplayRow]],
+        to result: inout [DisplayRow]
     ) {
         let rows = (rowsByParent[parentPath] ?? []).sorted {
             entryComesBefore($0.entry, $1.entry)

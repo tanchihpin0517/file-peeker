@@ -5,7 +5,7 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use file_peeker_protocol::{
-    ClientMessage, ConnectionRole, ErrorCode, ListingEntry, PROTOCOL_VERSION, ServerMessage,
+    ClientMessage, ConnectionRole, ErrorCode, PROTOCOL_VERSION, ServerMessage,
 };
 use thiserror::Error;
 use tokio::{
@@ -14,10 +14,13 @@ use tokio::{
     task::JoinSet,
 };
 
+mod ops;
+
 const MAX_SOCKET_PATH_BYTES: usize = 100;
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
-enum ServerError {
+pub(crate) enum ServerError {
     #[error("invalid socket path: {message}")]
     InvalidSocketPath { message: String },
     #[error("protocol error: {message}")]
@@ -119,7 +122,7 @@ async fn run_operations(
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
                 operations.spawn(async move {
-                    let _ = handle_operation(stream).await;
+                    let _ = ops::handle(stream).await;
                 });
             }
             Some(_) = operations.join_next(), if !operations.is_empty() => {}
@@ -203,7 +206,9 @@ async fn handshake_control(stream: &mut UnixStream) -> Result<(), ServerError> {
     }
 }
 
-async fn read_client_message(stream: &mut UnixStream) -> Result<ClientMessage, ServerError> {
+pub(crate) async fn read_client_message(
+    stream: &mut UnixStream,
+) -> Result<ClientMessage, ServerError> {
     let mut bytes = Vec::new();
     loop {
         let mut byte = [0_u8; 1];
@@ -215,6 +220,11 @@ async fn read_client_message(stream: &mut UnixStream) -> Result<ClientMessage, S
         if byte[0] == b'\n' {
             break;
         }
+        if bytes.len() == MAX_FRAME_BYTES {
+            return Err(ServerError::Protocol {
+                message: format!("message exceeds {MAX_FRAME_BYTES} bytes"),
+            });
+        }
         bytes.push(byte[0]);
     }
 
@@ -223,177 +233,22 @@ async fn read_client_message(stream: &mut UnixStream) -> Result<ClientMessage, S
     })
 }
 
-async fn write_server_message(
+pub(crate) async fn write_server_message(
     stream: &mut UnixStream,
     message: &ServerMessage,
 ) -> Result<(), ServerError> {
     let mut bytes = serde_json::to_vec(message).map_err(|error| ServerError::Protocol {
         message: format!("cannot encode response: {error}"),
     })?;
+    if bytes.len() > MAX_FRAME_BYTES {
+        return Err(ServerError::Protocol {
+            message: format!("response exceeds {MAX_FRAME_BYTES} bytes"),
+        });
+    }
     bytes.push(b'\n');
     stream.write_all(&bytes).await?;
     stream.flush().await?;
     Ok(())
-}
-
-async fn handle_operation(mut stream: UnixStream) -> Result<(), ServerError> {
-    let message = read_client_message(&mut stream).await?;
-    match message {
-        ClientMessage::Hello {
-            version,
-            role: ConnectionRole::Operation,
-        } if version == PROTOCOL_VERSION => {
-            write_server_message(
-                &mut stream,
-                &ServerMessage::HelloOk {
-                    version: PROTOCOL_VERSION,
-                },
-            )
-            .await?;
-        }
-        ClientMessage::Hello { version, .. } if version != PROTOCOL_VERSION => {
-            write_server_message(
-                &mut stream,
-                &ServerMessage::Error {
-                    code: ErrorCode::UnsupportedVersion,
-                    message: "Unsupported protocol version".into(),
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-        _ => {
-            return Err(ServerError::Protocol {
-                message: "operation connection must begin with operation hello".into(),
-            });
-        }
-    }
-
-    match read_client_message(&mut stream).await? {
-        ClientMessage::List { path } => handle_listing(&mut stream, &path).await,
-        ClientMessage::CurrentRoot => handle_current_root(&mut stream).await,
-        _ => Err(ServerError::Protocol {
-            message: "operation connection must contain one request".into(),
-        }),
-    }
-}
-
-async fn handle_current_root(stream: &mut UnixStream) -> Result<(), ServerError> {
-    let path = match std::env::current_dir() {
-        Ok(path) => path,
-        Err(error) => {
-            return write_operation_error(stream, ErrorCode::Io, &error.to_string()).await;
-        }
-    };
-    let Some(path) = path.to_str() else {
-        return write_operation_error(
-            stream,
-            ErrorCode::InvalidPath,
-            "Current directory is not valid UTF-8",
-        )
-        .await;
-    };
-    write_server_message(
-        stream,
-        &ServerMessage::CurrentRoot {
-            path: path.to_owned(),
-        },
-    )
-    .await
-}
-
-async fn handle_listing(stream: &mut UnixStream, path: &str) -> Result<(), ServerError> {
-    let path = Path::new(path);
-    if !path.is_absolute() {
-        return write_operation_error(
-            stream,
-            ErrorCode::InvalidPath,
-            "Listing path must be absolute",
-        )
-        .await;
-    }
-
-    let directory_entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) => return write_io_error(stream, error).await,
-    };
-    let mut entries = Vec::new();
-
-    for entry in directory_entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => return write_io_error(stream, error).await,
-        };
-        let entry_path = entry.path();
-        let Some(path) = entry_path.to_str() else {
-            return write_operation_error(
-                stream,
-                ErrorCode::InvalidPath,
-                "Encountered a non-UTF-8 path",
-            )
-            .await;
-        };
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            return write_operation_error(
-                stream,
-                ErrorCode::InvalidPath,
-                "Encountered a non-UTF-8 filename",
-            )
-            .await;
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) => return write_io_error(stream, error).await,
-        };
-        let (kind, navigable) = if file_type.is_dir() {
-            (file_peeker_protocol::EntryKind::Directory, true)
-        } else if file_type.is_file() {
-            (file_peeker_protocol::EntryKind::File, false)
-        } else if file_type.is_symlink() {
-            (
-                file_peeker_protocol::EntryKind::Symlink,
-                entry_path
-                    .metadata()
-                    .is_ok_and(|metadata| metadata.is_dir()),
-            )
-        } else {
-            (file_peeker_protocol::EntryKind::Other, false)
-        };
-
-        entries.push(ListingEntry {
-            path: path.to_owned(),
-            name,
-            kind,
-            navigable,
-        });
-    }
-
-    write_server_message(stream, &ServerMessage::ListResult { entries }).await
-}
-
-async fn write_io_error(stream: &mut UnixStream, error: std::io::Error) -> Result<(), ServerError> {
-    let code = match error.kind() {
-        std::io::ErrorKind::NotFound => ErrorCode::NotFound,
-        std::io::ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
-        std::io::ErrorKind::NotADirectory => ErrorCode::NotDirectory,
-        _ => ErrorCode::Io,
-    };
-    write_operation_error(stream, code, &error.to_string()).await
-}
-
-async fn write_operation_error(
-    stream: &mut UnixStream,
-    code: ErrorCode,
-    message: &str,
-) -> Result<(), ServerError> {
-    write_server_message(
-        stream,
-        &ServerMessage::Error {
-            code,
-            message: message.into(),
-        },
-    )
-    .await
 }
 
 #[cfg(unix)]
@@ -435,12 +290,10 @@ impl Drop for SocketLease {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, os::unix::fs::PermissionsExt, path::Path};
+    use std::{os::unix::fs::PermissionsExt, path::Path};
 
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use file_peeker_protocol::{
-        ClientMessage, ConnectionRole, ErrorCode, PROTOCOL_VERSION, ServerMessage,
-    };
+    use file_peeker_protocol::{ClientMessage, ConnectionRole, PROTOCOL_VERSION, ServerMessage};
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -448,7 +301,7 @@ mod tests {
         time::{Duration, sleep},
     };
 
-    use super::{Cli, ServerCommand, VersionFormat, handle_listing, read_client_message, serve};
+    use super::{Cli, ServerCommand, VersionFormat, read_client_message, serve};
 
     #[test]
     fn parses_serve_command() {
@@ -559,75 +412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listing_sends_one_atomic_result() {
-        let directory = private_tempdir();
-        std::fs::write(directory.path().join("notes.txt"), "hello")
-            .expect("fixture file should be created");
-        std::fs::create_dir(directory.path().join("docs"))
-            .expect("fixture directory should be created");
-        let listing_path = directory.path().to_string_lossy().into_owned();
-        let (mut server_stream, mut client_stream) =
-            UnixStream::pair().expect("socket pair should be created");
-
-        let server =
-            tokio::spawn(async move { handle_listing(&mut server_stream, &listing_path).await });
-        let mut response = String::new();
-        client_stream
-            .read_to_string(&mut response)
-            .await
-            .expect("listing response should be readable");
-        server
-            .await
-            .expect("listing task should complete")
-            .expect("listing should succeed");
-
-        assert_eq!(response.lines().count(), 1);
-        let message: ServerMessage =
-            serde_json::from_str(response.trim_end()).expect("listing response should decode");
-        let ServerMessage::ListResult { entries } = message else {
-            panic!("listing should return one list_result message");
-        };
-        let names: HashSet<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, HashSet::from(["docs", "notes.txt"]));
-    }
-
-    #[tokio::test]
-    async fn listing_error_sends_only_an_error_result() {
-        let directory = private_tempdir();
-        let listing_path = directory
-            .path()
-            .join("missing")
-            .to_string_lossy()
-            .into_owned();
-        let (mut server_stream, mut client_stream) =
-            UnixStream::pair().expect("socket pair should be created");
-
-        let server =
-            tokio::spawn(async move { handle_listing(&mut server_stream, &listing_path).await });
-        let mut response = String::new();
-        client_stream
-            .read_to_string(&mut response)
-            .await
-            .expect("listing error should be readable");
-        server
-            .await
-            .expect("listing task should complete")
-            .expect("listing error should be written");
-
-        assert_eq!(response.lines().count(), 1);
-        let message: ServerMessage =
-            serde_json::from_str(response.trim_end()).expect("listing error should decode");
-        assert!(matches!(
-            message,
-            ServerMessage::Error {
-                code: ErrorCode::NotFound,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn client_message_may_exceed_one_mib() {
+    async fn client_message_cannot_exceed_one_mib() {
         let path = format!("/{}", "x".repeat(1024 * 1024));
         let message = ClientMessage::List { path };
         let mut bytes = serde_json::to_vec(&message).expect("large request should encode");
@@ -636,18 +421,14 @@ mod tests {
         let (mut server_stream, mut client_stream) =
             UnixStream::pair().expect("socket pair should be created");
 
-        let writer = tokio::spawn(async move {
-            client_stream
-                .write_all(&bytes)
-                .await
-                .expect("large request should be writable");
-        });
-        let decoded = read_client_message(&mut server_stream)
+        let writer = tokio::spawn(async move { client_stream.write_all(&bytes).await });
+        let error = read_client_message(&mut server_stream)
             .await
-            .expect("large request should be readable");
-        writer.await.expect("writer task should complete");
+            .expect_err("large request should be rejected");
+        drop(server_stream);
+        let _ = writer.await.expect("writer task should complete");
 
-        assert_eq!(decoded, message);
+        assert!(matches!(error, super::ServerError::Protocol { .. }));
     }
 
     fn private_tempdir() -> TempDir {

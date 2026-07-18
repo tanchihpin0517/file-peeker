@@ -6,8 +6,7 @@ filesystem logic can run locally at first and on another machine in the future.
 This repository contains a minimal functional local browser and an SSH client
 diagnostic. The shared client starts and supervises a dedicated server over a
 private Unix socket. Its `Session` type owns a connection lifecycle, while
-independent `State` objects maintain visible directory trees for Ratatui and
-SwiftUI frontends.
+pull-based `Listing` objects stream typed batches to Ratatui and SwiftUI.
 
 ## Design
 
@@ -30,19 +29,18 @@ and managed with XcodeGen. The server protocol and process lifecycle remain
 private to the client. The same boundary carries diagnostic remote connections
 without moving filesystem logic into each UI.
 
-The client produces filesystem results asynchronously but does not update or
-render either UI. Ratatui forwards results into its application event loop;
-SwiftUI applies them to observable state on the main actor.
+The client produces typed filesystem batches asynchronously but does not retain
+or render them. Ratatui forwards batches into its application event loop;
+SwiftUI applies them to observable display state on the main actor.
 
 Each `Session` owns one dedicated server process. A long-lived control
 connection defines their shared lifetime, while each filesystem operation uses
 its own short-lived connection. This permits independent operations without
 request IDs or response routing on one socket.
 
-A session can create multiple independent browsing states. Each state has a
-fixed root path and retains its session; navigation fully loads a replacement
-state before a UI swaps to it. Different panes or tabs can therefore share a
-session or own separate sessions connected to different servers.
+A session can create multiple independent listings. Each listing retains its
+session and owns one operation connection. UIs own their visible trees and
+discard descendants when a directory collapses.
 
 ## First version
 
@@ -50,7 +48,7 @@ V1 is a local, macOS-only, read-only browser. It:
 
 - Start in a supplied path or the current directory.
 - Stream and display the direct children of that directory.
-- Include hidden entries and keep filesystem enumeration order.
+- Include hidden entries; the server streams enumeration order and each UI chooses its display order.
 - Allow entering child directories and directory symlinks.
 - Open non-directory entries with the macOS default application.
 
