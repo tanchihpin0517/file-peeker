@@ -299,7 +299,7 @@ Recommended internal responsibilities:
   testable launch description: child executable/argv, the local socket path to
   connect to, temporary-directory ownership, and redacted diagnostics.
 - `spawn_server(launch)` starts the child with stdin closed, stdout handled
-  deliberately, and stderr captured into a bounded diagnostic buffer.
+  deliberately, and stderr captured into a diagnostic buffer.
 - `connect_control(...)` retries only expected "not ready yet" connection
   failures. In parallel it watches child exit and the startup deadline.
 - `handshake_control(...)` sends protocol version 1 with role `control` and
@@ -396,7 +396,7 @@ The successful control handshake is the readiness signal.
 Do not expose the remote socket over TCP. Do not disable SSH server-key checking.
 Interactive SSH password/passphrase prompts are not a reliable GUI startup
 mechanism; initial implementation should expect keychain/agent/non-interactive
-authentication and surface SSH's bounded stderr when authentication fails.
+authentication and surface SSH's complete stderr when authentication fails.
 
 ## Server command-line and endpoint ownership
 
@@ -453,7 +453,7 @@ Map startup failures consistently:
 Diagnostics must:
 
 - distinguish local server exit from SSH exit;
-- include exit status and a bounded stderr tail;
+- include exit status and complete stderr;
 - avoid logging secrets or an entire user SSH configuration;
 - display argv in a redacted/debug-safe form;
 - preserve the primary startup error if cleanup also fails.
@@ -570,9 +570,9 @@ safety net.
    - Add short socket-path generation and owner-only temporary-directory
      handling.
 
-8. **Implement child supervision and bounded diagnostics.**
+8. **Implement child supervision and server diagnostics.**
    - Spawn the selected child with controlled stdio.
-   - Capture a bounded stderr tail without blocking the child.
+   - Capture complete stderr without blocking the child.
    - Race connection retries against child exit and startup timeout.
    - On every failure path, terminate/reap the child and release endpoint state.
 
@@ -618,7 +618,7 @@ safety net.
 - Endpoint paths obey the target platform's Unix socket path limit.
 - Existing files/sockets are never removed unless owned by the current startup.
 - Framing rejects malformed, out-of-order, and wrong-version messages.
-- Bounded stderr capture retains useful tail output without unbounded growth.
+- Complete stderr capture retains all server diagnostics.
 - Production installer argv contains no `--git`, `--path`, `--index`, or
   alternate `--registry` option.
 - The unpublished smoke test uses `--path` only after transferring and unpacking

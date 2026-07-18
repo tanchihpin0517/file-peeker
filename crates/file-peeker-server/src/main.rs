@@ -1,7 +1,4 @@
-use std::{
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use file_peeker_protocol::{
@@ -16,13 +13,10 @@ use tokio::{
 
 mod ops;
 
-const MAX_SOCKET_PATH_BYTES: usize = 100;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub(crate) enum ServerError {
-    #[error("invalid socket path: {message}")]
-    InvalidSocketPath { message: String },
     #[error("protocol error: {message}")]
     Protocol { message: String },
     #[error("server I/O error: {0}")]
@@ -88,7 +82,6 @@ fn print_version_json() {
 }
 
 async fn serve(socket_path: PathBuf, remove_parent_on_exit: bool) -> Result<(), ServerError> {
-    validate_socket_path(&socket_path)?;
     let listener = UnixListener::bind(&socket_path)?;
     let _socket_lease = SocketLease::new(socket_path, remove_parent_on_exit);
 
@@ -128,45 +121,6 @@ async fn run_operations(
             Some(_) = operations.join_next(), if !operations.is_empty() => {}
         }
     }
-}
-
-fn validate_socket_path(socket_path: &Path) -> Result<(), ServerError> {
-    if !socket_path.is_absolute() {
-        return Err(ServerError::InvalidSocketPath {
-            message: "path must be absolute".into(),
-        });
-    }
-    if socket_path.as_os_str().as_bytes().len() > MAX_SOCKET_PATH_BYTES {
-        return Err(ServerError::InvalidSocketPath {
-            message: format!("path must not exceed {MAX_SOCKET_PATH_BYTES} bytes"),
-        });
-    }
-    if socket_path.exists() {
-        return Err(ServerError::InvalidSocketPath {
-            message: "path already exists".into(),
-        });
-    }
-
-    let parent = socket_path
-        .parent()
-        .ok_or_else(|| ServerError::InvalidSocketPath {
-            message: "path must have a parent directory".into(),
-        })?;
-    let metadata = std::fs::metadata(parent).map_err(|error| ServerError::InvalidSocketPath {
-        message: format!("cannot inspect parent directory: {error}"),
-    })?;
-    if !metadata.is_dir() {
-        return Err(ServerError::InvalidSocketPath {
-            message: "parent path is not a directory".into(),
-        });
-    }
-    if metadata.permissions().mode() & 0o077 != 0 {
-        return Err(ServerError::InvalidSocketPath {
-            message: "parent directory must be accessible only by its owner".into(),
-        });
-    }
-
-    Ok(())
 }
 
 async fn handshake_control(stream: &mut UnixStream) -> Result<(), ServerError> {
@@ -293,7 +247,9 @@ mod tests {
     use std::{os::unix::fs::PermissionsExt, path::Path};
 
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use file_peeker_protocol::{ClientMessage, ConnectionRole, PROTOCOL_VERSION, ServerMessage};
+    use file_peeker_protocol::{
+        ClientMessage, ConnectionRole, ErrorCode, PROTOCOL_VERSION, ServerMessage,
+    };
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -301,7 +257,10 @@ mod tests {
         time::{Duration, sleep},
     };
 
-    use super::{Cli, ServerCommand, VersionFormat, read_client_message, serve};
+    use super::{
+        Cli, MAX_FRAME_BYTES, ServerCommand, VersionFormat, read_client_message, serve,
+        write_server_message,
+    };
 
     #[test]
     fn parses_serve_command() {
@@ -366,7 +325,23 @@ mod tests {
 
     #[tokio::test]
     async fn serves_control_handshake_and_cleans_up() {
+        assert_server_lifecycle(private_tempdir()).await;
+    }
+
+    #[tokio::test]
+    async fn accepts_a_socket_in_a_permissive_parent_directory() {
         let directory = private_tempdir();
+        let mut permissions = std::fs::metadata(directory.path())
+            .expect("temporary directory should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(directory.path(), permissions)
+            .expect("temporary directory should become permissive");
+
+        assert_server_lifecycle(directory).await;
+    }
+
+    async fn assert_server_lifecycle(directory: TempDir) {
         let socket_path = directory.path().join("server.sock");
         let server = tokio::spawn(serve(socket_path.clone(), false));
 
@@ -413,10 +388,10 @@ mod tests {
 
     #[tokio::test]
     async fn client_message_cannot_exceed_one_mib() {
-        let path = format!("/{}", "x".repeat(1024 * 1024));
+        let path = format!("/{}", "x".repeat(MAX_FRAME_BYTES));
         let message = ClientMessage::List { path };
         let mut bytes = serde_json::to_vec(&message).expect("large request should encode");
-        assert!(bytes.len() > 1024 * 1024);
+        assert!(bytes.len() > MAX_FRAME_BYTES);
         bytes.push(b'\n');
         let (mut server_stream, mut client_stream) =
             UnixStream::pair().expect("socket pair should be created");
@@ -427,6 +402,22 @@ mod tests {
             .expect_err("large request should be rejected");
         drop(server_stream);
         let _ = writer.await.expect("writer task should complete");
+
+        assert!(matches!(error, super::ServerError::Protocol { .. }));
+    }
+
+    #[tokio::test]
+    async fn server_message_cannot_exceed_one_mib() {
+        let message = ServerMessage::Error {
+            code: ErrorCode::Io,
+            message: "x".repeat(MAX_FRAME_BYTES),
+        };
+        let (mut server_stream, _client_stream) =
+            UnixStream::pair().expect("socket pair should be created");
+
+        let error = write_server_message(&mut server_stream, &message)
+            .await
+            .expect_err("large response should be rejected");
 
         assert!(matches!(error, super::ServerError::Protocol { .. }));
     }

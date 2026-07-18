@@ -10,9 +10,10 @@ protocol does not use request IDs or multiplexing.
 
 ## Framing and handshakes
 
-Every message is one UTF-8 JSON object followed by `\n`. An encoded message may
-not exceed 1 MiB. Malformed, oversized, or out-of-order messages terminate the
-operation.
+Every message is one UTF-8 JSON object followed by `\n`. The server requires an
+encoded message not to exceed 1 MiB and applies that limit to both requests and
+responses. Malformed, oversized, or out-of-order messages terminate the
+operation. Clients rely on the server for frame-size enforcement.
 
 Every connection begins with `hello`:
 

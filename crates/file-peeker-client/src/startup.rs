@@ -1,6 +1,6 @@
 use std::{
     io::ErrorKind,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{
@@ -26,10 +26,7 @@ use crate::{FilePeekerError, SessionConfig, SessionTarget};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(20);
-const STDERR_LIMIT: usize = 64 * 1024;
-const MAX_SOCKET_PATH_BYTES: usize = 100;
-const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const CONNECT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub(super) struct LifecycleHandle {
@@ -42,7 +39,7 @@ pub(super) struct LifecycleHandle {
 struct RunningProcess {
     child: Child,
     control: UnixStream,
-    stderr_task: JoinHandle<Result<BoundedOutput, std::io::Error>>,
+    stderr_task: JoinHandle<Result<Vec<u8>, std::io::Error>>,
     _endpoint: TempDir,
     child_stdin: Option<ChildStdin>,
 }
@@ -90,7 +87,6 @@ async fn start_local(server_executable_path: String) -> Result<LifecycleHandle, 
     let executable = validate_local_executable(&server_executable_path)?;
     let endpoint = create_endpoint()?;
     let socket_path = endpoint.path().join("server.sock");
-    validate_socket_length(&socket_path)?;
 
     let mut command = Command::new(&executable);
     command
@@ -113,7 +109,7 @@ async fn start_local(server_executable_path: String) -> Result<LifecycleHandle, 
         .ok_or_else(|| FilePeekerError::ServerStart {
             message: "server stderr was not available".into(),
         })?;
-    let stderr_task = tokio::spawn(read_bounded(stderr, STDERR_LIMIT));
+    let stderr_task = tokio::spawn(read_all(stderr));
     let deadline = Instant::now() + STARTUP_TIMEOUT;
 
     let mut control = match connect_control(&mut child, &socket_path, deadline).await {
@@ -164,7 +160,6 @@ pub(super) async fn start_remote(destination: String) -> Result<LifecycleHandle,
 
     let endpoint = create_endpoint()?;
     let socket_path = endpoint.path().join("server.sock");
-    validate_socket_length(&socket_path)?;
     let token = endpoint
         .path()
         .file_name()
@@ -230,7 +225,7 @@ async fn start_child(
         .ok_or_else(|| FilePeekerError::ServerStart {
             message: format!("{description} stderr was not available"),
         })?;
-    let stderr_task = tokio::spawn(read_bounded(stderr, STDERR_LIMIT));
+    let stderr_task = tokio::spawn(read_all(stderr));
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let control = loop {
         let mut stream = match connect_control(&mut child, &socket_path, deadline).await {
@@ -296,15 +291,6 @@ fn create_endpoint() -> Result<TempDir, FilePeekerError> {
         }
     })?;
     Ok(endpoint)
-}
-
-fn validate_socket_length(socket_path: &Path) -> Result<(), FilePeekerError> {
-    if socket_path.as_os_str().as_bytes().len() > MAX_SOCKET_PATH_BYTES {
-        return Err(FilePeekerError::ServerStart {
-            message: format!("generated server socket path exceeds {MAX_SOCKET_PATH_BYTES} bytes"),
-        });
-    }
-    Ok(())
 }
 
 async fn connect_control(
@@ -431,11 +417,6 @@ async fn read_server_message(stream: &mut UnixStream) -> Result<ServerMessage, F
         if byte[0] == b'\n' {
             break;
         }
-        if bytes.len() == MAX_FRAME_BYTES {
-            return Err(FilePeekerError::Protocol {
-                message: format!("control response exceeds {MAX_FRAME_BYTES} bytes"),
-            });
-        }
         bytes.push(byte[0]);
     }
 
@@ -446,13 +427,13 @@ async fn read_server_message(stream: &mut UnixStream) -> Result<ServerMessage, F
 
 async fn cleanup_startup_failure(
     mut child: Child,
-    stderr_task: JoinHandle<Result<BoundedOutput, std::io::Error>>,
+    stderr_task: JoinHandle<Result<Vec<u8>, std::io::Error>>,
     error: FilePeekerError,
 ) -> FilePeekerError {
     let _ = child.kill().await;
     let _ = child.wait().await;
     let stderr = join_stderr(stderr_task).await;
-    add_stderr_context(error, stderr.as_ref())
+    add_stderr_context(error, stderr.as_deref())
 }
 
 async fn supervise(
@@ -491,48 +472,23 @@ async fn supervise(
     let _ = stderr_task.await;
 }
 
-#[derive(Debug)]
-struct BoundedOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
+async fn read_all(mut reader: impl AsyncRead + Unpin) -> Result<Vec<u8>, std::io::Error> {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    Ok(bytes)
 }
 
-async fn read_bounded(
-    mut reader: impl AsyncRead + Unpin,
-    limit: usize,
-) -> Result<BoundedOutput, std::io::Error> {
-    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
-    let mut buffer = [0_u8; 8 * 1024];
-    let mut truncated = false;
-
-    loop {
-        let count = reader.read(&mut buffer).await?;
-        if count == 0 {
-            break;
-        }
-        let remaining = limit.saturating_sub(bytes.len());
-        let retained = remaining.min(count);
-        bytes.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < count;
-    }
-
-    Ok(BoundedOutput { bytes, truncated })
-}
-
-async fn join_stderr(
-    task: JoinHandle<Result<BoundedOutput, std::io::Error>>,
-) -> Option<BoundedOutput> {
+async fn join_stderr(task: JoinHandle<Result<Vec<u8>, std::io::Error>>) -> Option<Vec<u8>> {
     task.await.ok().and_then(Result::ok)
 }
 
-fn add_stderr_context(error: FilePeekerError, stderr: Option<&BoundedOutput>) -> FilePeekerError {
-    let Some(stderr) = stderr.filter(|output| !output.bytes.is_empty()) else {
+fn add_stderr_context(error: FilePeekerError, stderr: Option<&[u8]>) -> FilePeekerError {
+    let Some(stderr) = stderr.filter(|output| !output.is_empty()) else {
         return error;
     };
     let suffix = format!(
-        "; server stderr: {}{}",
-        String::from_utf8_lossy(&stderr.bytes).trim(),
-        if stderr.truncated { " [truncated]" } else { "" }
+        "; server stderr: {}",
+        String::from_utf8_lossy(stderr).trim()
     );
 
     match error {
@@ -548,7 +504,7 @@ fn add_stderr_context(error: FilePeekerError, stderr: Option<&BoundedOutput>) ->
     }
 }
 
-fn server_exited_error(status: ExitStatus, stderr: Option<&BoundedOutput>) -> FilePeekerError {
+fn server_exited_error(status: ExitStatus, stderr: Option<&[u8]>) -> FilePeekerError {
     add_stderr_context(
         FilePeekerError::ServerExited {
             message: format!("server exited with {status}"),
@@ -559,44 +515,32 @@ fn server_exited_error(status: ExitStatus, stderr: Option<&BoundedOutput>) -> Fi
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, time::Duration};
+    use std::time::Duration;
 
     use file_peeker_protocol::{ErrorCode, ServerMessage};
     use tokio::{io::AsyncWriteExt, net::UnixStream};
 
-    use crate::FilePeekerError;
-
-    use super::{
-        BoundedOutput, read_bounded, read_server_message, shell_quote, validate_destination,
-        validate_socket_length,
-    };
-
-    #[test]
-    fn rejects_an_overlong_socket_path() {
-        let path = format!("/tmp/{}", "x".repeat(110));
-        assert!(validate_socket_length(Path::new(&path)).is_err());
-    }
+    use super::{read_all, read_server_message, shell_quote, validate_destination};
 
     #[tokio::test]
-    async fn bounded_reader_discards_excess_output() {
+    async fn stderr_reader_retains_all_output() {
         let (mut writer, reader) = tokio::io::duplex(64);
-        let task = tokio::spawn(async move { read_bounded(reader, 4).await });
+        let task = tokio::spawn(async move { read_all(reader).await });
         writer
             .write_all(b"abcdefgh")
             .await
             .expect("fixture output should be written");
         drop(writer);
 
-        let BoundedOutput { bytes, truncated } = task
+        let bytes = task
             .await
             .expect("reader task should finish")
             .expect("reader should succeed");
-        assert_eq!(bytes, b"abcd");
-        assert!(truncated);
+        assert_eq!(bytes, b"abcdefgh");
     }
 
     #[tokio::test]
-    async fn control_handshake_response_cannot_exceed_one_mib() {
+    async fn control_reader_does_not_impose_a_frame_limit() {
         let message = ServerMessage::Error {
             code: ErrorCode::Io,
             message: "x".repeat(1024 * 1024 + 1),
@@ -608,19 +552,22 @@ mod tests {
             UnixStream::pair().expect("socket pair should be created");
 
         let writer = tokio::spawn(async move { server_stream.write_all(&bytes).await });
-        let error = read_server_message(&mut client_stream)
+        let response = read_server_message(&mut client_stream)
             .await
-            .expect_err("large response should be rejected");
-        drop(client_stream);
-        let _ = writer.await.expect("writer task should complete");
+            .expect("server owns frame-size enforcement");
+        writer
+            .await
+            .expect("writer task should complete")
+            .expect("large fixture should be written");
 
-        assert!(matches!(error, FilePeekerError::Protocol { .. }));
+        assert_eq!(response, message);
     }
 
     #[test]
     fn lifecycle_timeouts_are_bounded() {
         assert!(super::STARTUP_TIMEOUT <= Duration::from_secs(10));
         assert!(super::SHUTDOWN_TIMEOUT <= Duration::from_secs(5));
+        assert_eq!(super::CONNECT_RETRY_DELAY, Duration::from_secs(1));
     }
 
     #[test]

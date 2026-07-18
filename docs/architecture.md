@@ -17,6 +17,10 @@ connection defines that lifecycle; every filesystem operation uses a separate
 short-lived Unix stream. Independent operations therefore require neither
 request IDs nor multiplexing.
 
+The server alone enforces the 1 MiB limit for both request and response frames.
+Clients retain newline-delimited responses until completion and rely on the
+server to apply the bound.
+
 The server lists one directory level with `tokio::fs::read_dir`. It accumulates
 one bounded batch, writes it, then resumes enumeration. This makes transport
 backpressure bound server memory while still reducing time to first visible
@@ -32,7 +36,7 @@ the entire directory.
 The client owns all transport concerns:
 
 - Local and SSH startup, installation, and shutdown.
-- Protocol v1 handshakes and 1 MiB NDJSON frame limits.
+- Protocol v1 handshakes and newline-delimited JSON parsing.
 - One persistent buffered reader per streamed `Listing`.
 - Mapping wire errors to public typed errors.
 - Validating names and reconstructing full child paths.

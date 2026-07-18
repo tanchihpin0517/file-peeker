@@ -18,8 +18,6 @@ use tokio::{
 
 use crate::{DirectoryEntry, EntryKind, FilePeekerError, session::Session};
 
-const MAX_FRAME_BYTES: usize = 1024 * 1024;
-
 #[derive(Debug)]
 pub(crate) struct Listing {
     _session: Arc<Session>,
@@ -161,11 +159,6 @@ async fn read_buffered_message(
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let retained = newline.unwrap_or(available.len());
-        if active.frame.len().saturating_add(retained) > MAX_FRAME_BYTES {
-            return Err(FilePeekerError::Protocol {
-                message: format!("server response exceeds {MAX_FRAME_BYTES} bytes"),
-            });
-        }
         active.frame.extend_from_slice(&available[..retained]);
         active
             .reader
@@ -265,11 +258,6 @@ async fn write_message(
     let mut bytes = serde_json::to_vec(message).map_err(|error| FilePeekerError::Protocol {
         message: format!("cannot encode client message: {error}"),
     })?;
-    if bytes.len() > MAX_FRAME_BYTES {
-        return Err(FilePeekerError::Protocol {
-            message: format!("client request exceeds {MAX_FRAME_BYTES} bytes"),
-        });
-    }
     bytes.push(b'\n');
     stream
         .write_all(&bytes)
@@ -294,11 +282,6 @@ async fn read_message(stream: &mut UnixStream) -> Result<ServerMessage, FilePeek
         }
         if byte[0] == b'\n' {
             break;
-        }
-        if bytes.len() == MAX_FRAME_BYTES {
-            return Err(FilePeekerError::Protocol {
-                message: format!("server response exceeds {MAX_FRAME_BYTES} bytes"),
-            });
         }
         bytes.push(byte[0]);
     }
@@ -338,7 +321,10 @@ mod tests {
     use file_peeker_protocol::{EntryKind, ListingEntry, ServerMessage};
     use tokio::{io::AsyncWriteExt, net::UnixStream};
 
-    use super::{ActiveListing, ListingStep, absolute_utf8_path, child_path, read_listing_step};
+    use super::{
+        ActiveListing, ListingStep, absolute_utf8_path, child_path, read_buffered_message,
+        read_listing_step, read_message,
+    };
 
     #[test]
     fn relative_paths_become_absolute() {
@@ -418,5 +404,41 @@ mod tests {
             parent_path: "/fixture".into(),
         };
         assert!(read_listing_step(&mut active).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn operation_reader_does_not_impose_a_frame_limit() {
+        let message = ServerMessage::CurrentRoot {
+            path: format!("/{}", "x".repeat(1024 * 1024)),
+        };
+        let mut encoded = serde_json::to_vec(&message).unwrap();
+        assert!(encoded.len() > 1024 * 1024);
+        encoded.push(b'\n');
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair should be created");
+        let writer = tokio::spawn(async move { server.write_all(&encoded).await });
+
+        assert_eq!(read_message(&mut client).await.unwrap(), message);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn listing_reader_does_not_impose_a_frame_limit() {
+        let message = ServerMessage::Error {
+            code: file_peeker_protocol::ErrorCode::Io,
+            message: "x".repeat(1024 * 1024 + 1),
+        };
+        let mut encoded = serde_json::to_vec(&message).unwrap();
+        assert!(encoded.len() > 1024 * 1024);
+        encoded.push(b'\n');
+        let (client, mut server) = UnixStream::pair().expect("socket pair should be created");
+        let writer = tokio::spawn(async move { server.write_all(&encoded).await });
+        let mut active = ActiveListing {
+            reader: tokio::io::BufReader::new(client),
+            frame: Vec::new(),
+            parent_path: "/fixture".into(),
+        };
+
+        assert_eq!(read_buffered_message(&mut active).await.unwrap(), message);
+        writer.await.unwrap().unwrap();
     }
 }

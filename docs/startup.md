@@ -105,7 +105,7 @@ For a local target, the client:
    file-peeker-server serve --socket <private-socket>
    ```
 
-4. Captures bounded server diagnostics from stderr.
+4. Captures complete server diagnostics from stderr.
 5. Retries the socket connection while also watching for process exit and the
    startup deadline.
 6. Sends the protocol-version and control-role handshake.
