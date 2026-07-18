@@ -1,10 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::path::{Path, PathBuf};
 
 use file_peeker_protocol::{
     ClientMessage, ConnectionRole, EntryKind as ProtocolEntryKind, ErrorCode, MAX_MESSAGE_BYTES,
@@ -13,51 +7,14 @@ use file_peeker_protocol::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
-    sync::{Mutex, mpsc},
-    task::JoinHandle,
 };
 
 use crate::{DirectoryEntry, EntryKind, FilePeekerError};
 
-const LISTING_QUEUE_CAPACITY: usize = 64;
-
-#[derive(Debug)]
-pub(crate) struct DirectoryListing {
-    state: Arc<ListingState>,
-}
-
-impl DirectoryListing {
-    /// Waits for the next directory entry or successful completion.
-    ///
-    /// # Errors
-    ///
-    /// Returns the next streamed entry or `None` when listing is complete.
-    pub(crate) async fn next_entry(&self) -> Result<Option<DirectoryEntry>, FilePeekerError> {
-        next(&self.state).await
-    }
-}
-
-#[derive(Debug)]
-enum ListingItem {
-    Entry(DirectoryEntry),
-    Done,
-    Error(FilePeekerError),
-}
-
-#[derive(Debug)]
-struct ListingState {
-    receiver: Mutex<mpsc::Receiver<ListingItem>>,
-    task: JoinHandle<()>,
-    finished: AtomicBool,
-}
-
-impl Drop for ListingState {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn start(socket_path: PathBuf, path: String) -> Result<Arc<ListingState>, FilePeekerError> {
+pub(crate) async fn collect(
+    socket_path: PathBuf,
+    path: String,
+) -> Result<Vec<DirectoryEntry>, FilePeekerError> {
     let path = absolute_utf8_path(&path)?;
     let mut stream = UnixStream::connect(&socket_path).await.map_err(|error| {
         FilePeekerError::ConnectionClosed {
@@ -65,39 +22,33 @@ async fn start(socket_path: PathBuf, path: String) -> Result<Arc<ListingState>, 
         }
     })?;
     handshake_operation(&mut stream).await?;
+    write_message(&mut stream, &ClientMessage::List { path }).await?;
 
-    let (sender, receiver) = mpsc::channel(LISTING_QUEUE_CAPACITY);
-    let task = tokio::spawn(async move {
-        if let Err(error) = run_listing(stream, path, &sender).await {
-            let _ = sender.send(ListingItem::Error(error)).await;
-        }
-    });
-
-    Ok(Arc::new(ListingState {
-        receiver: Mutex::new(receiver),
-        task,
-        finished: AtomicBool::new(false),
-    }))
-}
-
-pub(crate) async fn list(
-    socket_path: PathBuf,
-    path: String,
-) -> Result<Arc<DirectoryListing>, FilePeekerError> {
-    let state = start(socket_path, path).await?;
-    Ok(Arc::new(DirectoryListing { state }))
-}
-
-pub(crate) async fn collect(
-    socket_path: PathBuf,
-    path: String,
-) -> Result<Vec<DirectoryEntry>, FilePeekerError> {
-    let state = start(socket_path, path).await?;
     let mut entries = Vec::new();
-    while let Some(entry) = next(&state).await? {
-        entries.push(entry);
+    loop {
+        match read_message(&mut stream).await? {
+            ServerMessage::Entry {
+                path,
+                name,
+                kind,
+                navigable,
+            } => entries.push(DirectoryEntry {
+                path,
+                name,
+                kind: map_entry_kind(kind),
+                navigable,
+            }),
+            ServerMessage::Done => return Ok(entries),
+            ServerMessage::Error { code, message } => {
+                return Err(map_server_error(code, message));
+            }
+            message => {
+                return Err(FilePeekerError::Protocol {
+                    message: format!("unexpected listing response: {message:?}"),
+                });
+            }
+        }
     }
-    Ok(entries)
 }
 
 pub(crate) async fn current_root(socket_path: PathBuf) -> Result<String, FilePeekerError> {
@@ -114,30 +65,6 @@ pub(crate) async fn current_root(socket_path: PathBuf) -> Result<String, FilePee
         message => Err(FilePeekerError::Protocol {
             message: format!("unexpected current-root response: {message:?}"),
         }),
-    }
-}
-
-async fn next(state: &ListingState) -> Result<Option<DirectoryEntry>, FilePeekerError> {
-    if state.finished.load(Ordering::Acquire) {
-        return Ok(None);
-    }
-
-    match state.receiver.lock().await.recv().await {
-        Some(ListingItem::Entry(entry)) => Ok(Some(entry)),
-        Some(ListingItem::Done) => {
-            state.finished.store(true, Ordering::Release);
-            Ok(None)
-        }
-        Some(ListingItem::Error(error)) => {
-            state.finished.store(true, Ordering::Release);
-            Err(error)
-        }
-        None => {
-            state.finished.store(true, Ordering::Release);
-            Err(FilePeekerError::ConnectionClosed {
-                message: "listing task ended without a terminal response".into(),
-            })
-        }
     }
 }
 
@@ -180,46 +107,6 @@ async fn handshake_operation(stream: &mut UnixStream) -> Result<(), FilePeekerEr
         message => Err(FilePeekerError::Protocol {
             message: format!("unexpected operation handshake response: {message:?}"),
         }),
-    }
-}
-
-async fn run_listing(
-    mut stream: UnixStream,
-    path: String,
-    sender: &mpsc::Sender<ListingItem>,
-) -> Result<(), FilePeekerError> {
-    write_message(&mut stream, &ClientMessage::List { path }).await?;
-    loop {
-        match read_message(&mut stream).await? {
-            ServerMessage::Entry {
-                path,
-                name,
-                kind,
-                navigable,
-            } => {
-                let entry = DirectoryEntry {
-                    path,
-                    name,
-                    kind: map_entry_kind(kind),
-                    navigable,
-                };
-                sender.send(ListingItem::Entry(entry)).await.map_err(|_| {
-                    FilePeekerError::ConnectionClosed {
-                        message: "listing was cancelled".into(),
-                    }
-                })?;
-            }
-            ServerMessage::Done => {
-                let _ = sender.send(ListingItem::Done).await;
-                return Ok(());
-            }
-            ServerMessage::Error { code, message } => return Err(map_server_error(code, message)),
-            message => {
-                return Err(FilePeekerError::Protocol {
-                    message: format!("unexpected listing response: {message:?}"),
-                });
-            }
-        }
     }
 }
 

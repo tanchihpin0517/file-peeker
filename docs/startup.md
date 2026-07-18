@@ -170,7 +170,7 @@ the same local or forwarded socket and perform an operation-role handshake.
 
 The implemented operations are:
 
-- stream a directory listing through `DirectoryListing::next_entry`;
+- collect directory entries while loading or expanding a browsing state;
 - return the server's current working directory for the diagnostic CLI.
 
 The metadata client method is still a typed `NotImplemented` result.

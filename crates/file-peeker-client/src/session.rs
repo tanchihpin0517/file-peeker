@@ -1,10 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use crate::{
-    FileMetadata, FilePeekerError, SessionConfig, SessionTarget,
-    ops::{self, DirectoryListing},
-    startup,
-    state::State,
+    FileMetadata, FilePeekerError, SessionConfig, SessionTarget, ops, startup, state::State,
 };
 
 #[derive(Debug)]
@@ -56,19 +53,6 @@ impl Session {
     #[must_use]
     pub(crate) fn target(&self) -> SessionTarget {
         self.target.clone()
-    }
-
-    /// Starts a pull-based directory listing operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed path, connection, protocol, or filesystem error.
-    pub(crate) async fn start_listing(
-        &self,
-        path: String,
-    ) -> Result<Arc<DirectoryListing>, FilePeekerError> {
-        self.ensure_open()?;
-        ops::list(self.socket_path().to_path_buf(), path).await
     }
 
     /// Opens a fully loaded browsing state rooted at `path`.

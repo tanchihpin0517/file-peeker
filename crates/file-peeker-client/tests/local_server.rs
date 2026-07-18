@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use file_peeker_client::{Client, EntryKind, Session, SessionConfig, SessionTarget};
+use file_peeker_client::{Client, Session, SessionConfig, SessionTarget};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
@@ -37,28 +37,6 @@ async fn starts_and_stops_the_real_local_server() {
         .expect("nested fixture file should be written");
     std::os::unix::fs::symlink("docs", browse_root.join("docs-link"))
         .expect("fixture symlink should be created");
-
-    let listing = client
-        .start_listing(browse_root.to_string_lossy().into_owned())
-        .await
-        .expect("listing should start");
-    let mut entries = Vec::new();
-    while let Some(entry) = listing
-        .next_entry()
-        .await
-        .expect("listing should stream successfully")
-    {
-        entries.push(entry);
-    }
-    assert!(entries.iter().any(|entry| {
-        entry.name == "notes.txt" && entry.kind == EntryKind::File && !entry.navigable
-    }));
-    assert!(entries.iter().any(|entry| {
-        entry.name == "docs" && entry.kind == EntryKind::Directory && entry.navigable
-    }));
-    assert!(entries.iter().any(|entry| {
-        entry.name == "docs-link" && entry.kind == EntryKind::Symlink && entry.navigable
-    }));
 
     verify_shared_tree(&client, &browse_root).await;
 

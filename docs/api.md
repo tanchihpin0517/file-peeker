@@ -57,7 +57,6 @@ API outline:
   - `connect` creates an independent local or SSH `Session`.
 - `Session`
   - `target` and `current_root` describe the connection.
-  - `start_listing` creates a pull-based `DirectoryListing`.
   - `open_state` creates an independent browsing `State`.
   - `open` and `metadata` operate on paths.
   - `close` shuts down the owned connection lifecycle.
@@ -65,8 +64,6 @@ API outline:
   - `snapshot` returns the current flattened rows.
   - `expand` freshly loads a visible directory.
   - `collapse` discards a directory's visible descendants.
-- `DirectoryListing`
-  - `next_entry` returns the next streamed directory entry.
 - Shared values
   - `SessionConfig` and `SessionTarget` configure connections.
   - `DirectoryEntry`, `FileMetadata`, `StateRow`, and `StateSnapshot` carry results.
@@ -105,11 +102,6 @@ impl Client {
 }
 
 impl Session {
-    pub async fn start_listing(
-        &self,
-        path: String,
-    ) -> Result<Arc<DirectoryListing>, FilePeekerError>;
-
     pub async fn open_state(
         &self,
         path: String,
@@ -133,7 +125,6 @@ impl Session {
 | Method | Behavior | Status |
 | --- | --- | --- |
 | `Client.connect` | Starts a local server or SSH transport, opens the control connection, negotiates protocol v1, and returns an owning session | Implemented |
-| `start_listing` | Normalizes the supplied path, opens one operation connection, and returns a pull-based listing | Implemented |
 | `open_state` | Fully loads one absolute root and returns a new independent browsing state | Implemented |
 | `target` | Returns the immutable local or SSH target used to create the session | Implemented |
 | `current_root` | Returns the server process's absolute current working directory | Implemented |
@@ -141,7 +132,7 @@ impl Session {
 | `open` | Opens a path with the macOS default application for local clients; succeeds without action for SSH clients | Implemented |
 | `metadata` | Intended to return metadata for one path | Reserved; currently returns `FilePeekerError::NotImplemented` without contacting the server |
 
-`start_listing` accepts absolute or relative UTF-8 paths. Relative paths are
+`open_state` accepts absolute or relative UTF-8 paths. Relative paths are
 resolved against the client process's current working directory. An empty or
 non-UTF-8 path is rejected. The normalized absolute path is sent to the server.
 
@@ -184,29 +175,6 @@ others. Directory navigation creates and fully loads a new state; the UI can
 keep displaying its old state until `open_state` succeeds and then swap the
 reference atomically. A state retains its session, so it remains usable even if
 the pane that originally created the session releases its own reference.
-
-### DirectoryListing
-
-```rust
-impl DirectoryListing {
-    pub async fn next_entry(
-        &self,
-    ) -> Result<Option<DirectoryEntry>, FilePeekerError>;
-}
-```
-
-`DirectoryListing` is a pull-based asynchronous stream:
-
-- `Ok(Some(entry))` returns the next direct child.
-- `Ok(None)` means the listing completed successfully. Later calls also return
-  `Ok(None)`.
-- `Err(error)` means the listing failed. Entries returned before the error are
-  still valid.
-- Dropping the listing aborts its operation task and closes that operation's
-  socket.
-
-The internal queue holds up to 64 results, providing backpressure when a UI
-consumes entries more slowly than the server produces them.
 
 ### Data types
 
@@ -379,7 +347,7 @@ sequenceDiagram
     Server-->>Client: hello_ok(version=1)
     Client-->>UI: Session
 
-    UI->>Client: start_listing(path)
+    UI->>Client: open_state(path)
     Client->>Server: open operation socket
     Client->>Server: hello(version=1, role=operation)
     Server-->>Client: hello_ok(version=1)
@@ -388,10 +356,9 @@ sequenceDiagram
     loop each child
         FS-->>Server: directory entry
         Server-->>Client: entry(...)
-        Client-->>UI: next_entry() = Some(entry)
     end
     Server-->>Client: done
-    Client-->>UI: next_entry() = None
+    Client-->>UI: State with complete root snapshot
 
     UI->>Client: close() or drop
     Client--xServer: close control socket

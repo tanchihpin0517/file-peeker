@@ -7,17 +7,15 @@
 //!
 //! The API starts with [`Client`]. A client creates independent [`Session`]
 //! objects for local or SSH targets. A session owns one connection lifecycle,
-//! opens files, reports its current root, and creates [`State`] or
-//! [`DirectoryListing`] objects. A state maintains the expandable browsing
-//! status for one fixed root, while a directory listing provides pull-based
-//! access to entries. All operations return [`FilePeekerError`] on failure.
+//! opens files, reports its current root, and creates [`State`] objects. A state
+//! maintains the expandable browsing status for one fixed root. All operations
+//! return [`FilePeekerError`] on failure.
 //!
 //! Public object API:
 //!
 //! - [`Client::new`] creates the shared API entry point.
 //! - [`Client::connect`] creates an independent local or SSH session.
 //! - [`Session::target`] returns the immutable connection target.
-//! - [`Session::start_listing`] streams the direct children of a directory.
 //! - [`Session::open_state`] creates a browsing state rooted at a path.
 //! - [`Session::current_root`] returns the connected server's working directory.
 //! - [`Session::open`] opens a path with its associated application.
@@ -26,7 +24,6 @@
 //! - [`State::snapshot`] returns the current flattened browsing rows.
 //! - [`State::expand`] freshly loads and expands a visible directory.
 //! - [`State::collapse`] removes a directory's visible descendants.
-//! - [`DirectoryListing::next_entry`] returns the next streamed entry.
 
 use std::sync::Arc;
 
@@ -45,11 +42,6 @@ pub struct Session {
 #[derive(Debug, uniffi::Object)]
 pub struct State {
     inner: Arc<crate::state::State>,
-}
-
-#[derive(Debug, uniffi::Object)]
-pub struct DirectoryListing {
-    inner: Arc<crate::ops::DirectoryListing>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -157,19 +149,6 @@ impl Session {
         self.inner.target()
     }
 
-    /// Starts a pull-based directory listing operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns a path, connection, protocol, or filesystem error.
-    pub async fn start_listing(
-        &self,
-        path: String,
-    ) -> Result<Arc<DirectoryListing>, FilePeekerError> {
-        let inner = self.inner.start_listing(path).await?;
-        Ok(Arc::new(DirectoryListing { inner }))
-    }
-
     /// Opens a fully loaded browsing state rooted at `path`.
     ///
     /// # Errors
@@ -240,18 +219,6 @@ impl State {
     /// Returns an invalid-path error for an unknown or non-navigable row.
     pub fn collapse(&self, path: String) -> Result<StateSnapshot, FilePeekerError> {
         self.inner.collapse(path)
-    }
-}
-
-#[uniffi::export(async_runtime = "tokio")]
-impl DirectoryListing {
-    /// Waits for the next directory entry or successful completion.
-    ///
-    /// # Errors
-    ///
-    /// Returns a connection, protocol, or filesystem error from the listing.
-    pub async fn next_entry(&self) -> Result<Option<DirectoryEntry>, FilePeekerError> {
-        self.inner.next_entry().await
     }
 }
 

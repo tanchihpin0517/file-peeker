@@ -180,9 +180,8 @@ errors close the connection because continuing could misread the stream.
 - An operation connection carries exactly one request.
 - `entry` is valid only while handling `list`.
 - `metadata` is valid only while handling `get_metadata`.
-- The client makes each `entry` available through
-  `DirectoryListing.next_entry()`.
-- `done` makes the next client read return `None`.
+- The client collects each `entry` into the in-flight state load.
+- `done` completes the state load with all collected entries.
 - An operation `error` is returned to the caller.
 - Losing an operation connection fails only that operation.
 - Closing an operation connection cancels that operation.

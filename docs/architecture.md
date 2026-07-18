@@ -71,8 +71,6 @@ impl Client {
 }
 
 impl Session {
-    async fn start_listing(&self, path: String)
-        -> Result<Arc<DirectoryListing>, FilePeekerError>;
     async fn open_state(&self, path: String)
         -> Result<Arc<State>, FilePeekerError>;
     fn target(&self) -> SessionTarget;
@@ -101,18 +99,13 @@ enum SessionTarget {
     Local { server_executable_path: String },
     Ssh { destination: String },
 }
-
-impl DirectoryListing {
-    async fn next_entry(&self)
-        -> Result<Option<DirectoryEntry>, FilePeekerError>;
-}
 ```
 
 These signatures define the API shared by the native Rust facade and UniFFI
-bindings. `Client.connect` launches and connects to the configured local or SSH server,
-listing streams direct children, `open_state` returns a fully loaded browsing
-state, state operations return complete flattened visible snapshots, and
-metadata currently returns a typed `NotImplemented` error.
+bindings. `Client.connect` launches and connects to the configured local or SSH
+server, `open_state` collects direct children and returns a fully loaded
+browsing state, state operations return complete flattened visible snapshots,
+and metadata currently returns a typed `NotImplemented` error.
 
 `Session` represents one connection target and lifecycle. It exposes that
 immutable target and can support multiple independent `State` objects. Each
@@ -128,17 +121,9 @@ pane's session reference does not close a connection still retained by a state
 or another pane. Dropping the last reference closes it; explicitly calling
 `close` invalidates every state backed by that session.
 
-`start_listing` begins the operation and returns a listing object.
-`next_entry` asynchronously waits for one result:
-
-- `Some(entry)` means another entry is available.
-- `None` means the listing completed successfully.
-- `Err` means the listing failed, possibly after earlier entries were returned.
-
-This pull-based stream lets each UI consume results using its own event model.
-It avoids callbacks crossing the language boundary and does not expose Rust
-iterators or channels through UniFFI. Different listing or metadata objects may
-operate concurrently because each owns a separate operation connection.
+Each state load or expansion awaits its complete directory listing before
+publishing a new snapshot. Concurrent state operations remain independent
+because each owns a separate operation connection.
 
 The library provides two bindings over the same implementation:
 
@@ -146,8 +131,8 @@ The library provides two bindings over the same implementation:
 - Swift bindings generated with UniFFI.
 
 The UniFFI boundary exposes only language-neutral records, enums, errors,
-strings, async functions, and client/listing objects. Rust-specific types such
-as `Path`, borrowed references, trait objects, streams, and channels remain
+strings, async functions, and client/state objects. Rust-specific types such as
+`Path`, borrowed references, trait objects, streams, and channels remain
 behind the Rust facade. The exported UniFFI API mirrors the logical interface
 without exposing the server protocol.
 
@@ -224,14 +209,13 @@ State.expand(path)        -> updated visible rows
 State.collapse(path)      -> updated visible rows
 ```
 
-Every state creation or expansion sends the private `list` protocol message and converts
-server responses into `StateRow` values. The lower-level
-`start_listing`/`next_entry` stream remains available for non-tree consumers.
+Every state creation or expansion sends the private `list` protocol message,
+collects responses through `done`, and converts them into `StateRow` values.
 
 ### Inside the shared client
 
 The client separates its public async objects from control-lifecycle management
-and per-operation tasks:
+and per-operation connections:
 
 ```text
 Ratatui or SwiftUI
@@ -240,12 +224,9 @@ Ratatui or SwiftUI
 Session.open_state(path) / State.expand(path)
         │ open operation connection
         ▼
-Listing task ── list message ──> Dedicated server
+Batch collector ── list message ──> Dedicated server
         │
         │ Entry / Done / Error
-        ▼
-bounded listing queue
-        │
         ▼
 StateSnapshot
         │
@@ -253,15 +234,15 @@ StateSnapshot
 Ratatui event or SwiftUI state update
 ```
 
-The public `Client`, `Session`, `State`, and `DirectoryListing` objects are thin
+The public `Client`, `Session`, and `State` objects are thin
 wrappers around crate-private implementations. The client core owns connection
 creation and is the extension point for future session management. All
 UI-facing objects, values, errors, and UniFFI exports are declared in `api.rs`,
 so Rust and Swift consume one allowlisted contract. The objects are shared and
 thread-safe. The
-control worker owns the control connection. Each operation object controls a
-dedicated operation connection through its task and handle, so UI threads never
-read from or write to sockets directly.
+control worker owns the control connection. Each asynchronous state operation
+owns its dedicated operation connection, so UI threads never read from or write
+to sockets directly.
 
 The internal types are conceptually:
 
@@ -277,22 +258,10 @@ struct State {
     session: Arc<Session>,
     tree: Mutex<DirectoryTree>,
 }
-
-struct DirectoryListing {
-    results: AsyncMutex<ListingReceiver>,
-    operation: OperationHandle,
-    finished: AtomicBool,
-}
-
-enum ListingItem {
-    Entry(DirectoryEntry),
-    Done,
-    Error(FilePeekerError),
-}
 ```
 
-These types are illustrative. Channel, mutex, and runtime types remain internal
-and are not exported through UniFFI.
+These types are illustrative. Mutex and runtime types remain internal and are
+not exported through UniFFI.
 
 `Client.connect(config)` performs these steps:
 
@@ -305,46 +274,33 @@ and are not exported through UniFFI.
 6. Keep that connection open for the lifetime of the client.
 7. Return a thread-safe `Session`.
 
-`start_listing(path)`, `open_state(path)`, and `State.expand(path)` use the same
-listing operation path:
+`open_state(path)` and `State.expand(path)` use the same listing operation path:
 
 1. Converts `path` to an absolute UTF-8 path.
 2. Rejects the call if the session or control connection is closed.
-3. Creates a bounded queue for listing results.
-4. Opens a new connection to the dedicated server.
-5. Identifies it as an operation connection and completes its handshake.
-6. Sends one `list` request on that connection.
-7. Starts an operation task that owns the connection and result sender.
-8. Returns a `DirectoryListing`, or collects the results and applies them to a
-   new or existing state before returning it or its snapshot.
+3. Opens a new connection to the dedicated server.
+4. Identifies it as an operation connection and completes its handshake.
+5. Sends one `list` request on that connection.
+6. Collects `entry` messages until `done`, failing on an error or unexpected
+   response.
+7. Applies the complete result to a new or existing state and returns it or its
+   snapshot.
 
-`OperationHandle` lets `DirectoryListing` close its operation connection when
-the listing is abandoned; the socket itself remains owned by the operation
-task.
-
-The operation task handles the server stream:
+The batch collector handles the server response sequence directly:
 
 ```rust
 async fn run_listing(
     socket: &mut ServerConnection,
     path: String,
-    results: ListingSender,
-) -> Result<(), FilePeekerError> {
+) -> Result<Vec<DirectoryEntry>, FilePeekerError> {
     socket.send(ServerRequest::List { path }).await?;
+    let mut entries = Vec::new();
 
     loop {
         match socket.receive().await? {
-            ServerMessage::Entry(entry) => {
-                results.send(ListingItem::Entry(entry)).await?;
-            }
-            ServerMessage::Done => {
-                results.send(ListingItem::Done).await?;
-                return Ok(());
-            }
-            ServerMessage::Error(error) => {
-                results.send(ListingItem::Error(error.into())).await?;
-                return Ok(());
-            }
+            ServerMessage::Entry(entry) => entries.push(entry),
+            ServerMessage::Done => return Ok(entries),
+            ServerMessage::Error(error) => return Err(error.into()),
             message => {
                 return Err(FilePeekerError::UnexpectedMessage(message.kind()));
             }
@@ -353,47 +309,10 @@ async fn run_listing(
 }
 ```
 
-The bounded queue provides backpressure. If a UI consumes entries slowly, its
-operation task eventually waits before reading more server messages rather than
-storing an unlimited directory in memory. Other operation connections continue
-independently. The exact queue capacity is an implementation choice.
-
-`DirectoryListing.next_entry()` translates the internal queue into the public
-contract:
-
-```rust
-async fn next_entry(&self) -> Result<Option<DirectoryEntry>, FilePeekerError> {
-    if self.finished.load() {
-        return Ok(None);
-    }
-
-    match self.results.lock().await.receive().await {
-        Some(ListingItem::Entry(entry)) => Ok(Some(entry)),
-        Some(ListingItem::Done) => {
-            self.finished.store(true);
-            Ok(None)
-        }
-        Some(ListingItem::Error(error)) => {
-            self.finished.store(true);
-            Err(error)
-        }
-        None => {
-            self.finished.store(true);
-            Err(FilePeekerError::ConnectionClosed)
-        }
-    }
-}
-```
-
-Only one `next_entry()` call may wait on a listing at a time. The internal mutex
-enforces this for calls arriving from different threads or Swift tasks.
-Repeated calls after successful completion return `None`.
-
 If an operation connection fails or receives an invalid message, only that
-operation fails unless the control connection or server process also fails. If a
-`DirectoryListing` is dropped before `Done` or `Error`, it closes its operation
-connection. The server stops that operation, while the `Session` and other
-operations remain usable.
+operation fails unless the control connection or server process also fails.
+Cancelling the awaiting state operation drops its connection; the server stops
+that operation while the `Session` and other operations remain usable.
 
 If the control connection closes or the server exits, all operation connections
 fail and the session becomes invalid. Dropping the final `Session` or `State`
@@ -402,37 +321,8 @@ connection; the server then closes active operation connections and exits.
 
 ### Ratatui
 
-The Ratatui integration consumes the listing in a background task and forwards
-results to the main application event loop:
-
-```rust
-enum AppEvent {
-    DirectoryEntry(DirectoryEntry),
-    ListingFinished,
-    ListingFailed(FilePeekerError),
-}
-
-let listing = client.start_listing(path).await?;
-let events = app_event_sender.clone();
-
-spawn(async move {
-    loop {
-        match listing.next_entry().await {
-            Ok(Some(entry)) => {
-                events.send(AppEvent::DirectoryEntry(entry)).await?;
-            }
-            Ok(None) => {
-                events.send(AppEvent::ListingFinished).await?;
-                break;
-            }
-            Err(error) => {
-                events.send(AppEvent::ListingFailed(error)).await?;
-                break;
-            }
-        }
-    }
-});
-```
+The Ratatui integration awaits `Session.open_state` in its application task,
+then forwards the complete state snapshot to the main event loop.
 
 The main event loop owns state and rendering:
 
@@ -444,7 +334,7 @@ loop {
 }
 ```
 
-The background task never calls Ratatui. It only sends application events.
+The loading task never calls Ratatui. It only sends application events.
 
 ### SwiftUI
 
@@ -531,12 +421,11 @@ connection loss, and invalid protocol data become client errors rather than
 panics.
 
 Async client methods suspend while waiting for server I/O; they do not render UI
-or choose a UI thread. The implementation may use one task per operation and
-channels internally. Ratatui and SwiftUI remain responsible for scheduling
+or choose a UI thread. Ratatui and SwiftUI remain responsible for scheduling
 their own state updates.
 
 Closing an operation connection is the v1 cancellation mechanism. Dropping an
-unfinished `DirectoryListing` closes only its connection. Closing the control
+unfinished state-loading future closes only its connection. Closing the control
 connection ends the entire client-server lifetime.
 
 ## Filesystem behavior
