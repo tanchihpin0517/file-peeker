@@ -19,7 +19,7 @@ use super::ssh::{
     AUTHENTICATION_TIMEOUT, change_forward, multiplex_arguments, query_remote_home,
     request_master_exit, shell_quote, validate_destination, wait_for_master,
 };
-use super::{CONNECT_RETRY_DELAY, LifecycleHandle, SHUTDOWN_TIMEOUT, STARTUP_TIMEOUT};
+use super::{CONNECT_RETRY_DELAY, SHUTDOWN_TIMEOUT, STARTUP_TIMEOUT, ServerHandle};
 use crate::FilePeekerError;
 use crate::install::{RemoteInstallConfig, RemoteInstallPolicy, install_remote_server};
 
@@ -38,7 +38,7 @@ struct RemoteProcess {
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) async fn start(destination: String) -> Result<LifecycleHandle, FilePeekerError> {
+pub(super) async fn start(destination: String) -> Result<ServerHandle, FilePeekerError> {
     validate_destination(&destination)?;
     let endpoint = SessionDirectory::create()?;
     let socket_path = endpoint.socket_path();
@@ -208,7 +208,7 @@ pub(super) async fn start(destination: String) -> Result<LifecycleHandle, FilePe
         forward,
         log_path,
     };
-    Ok(LifecycleHandle::spawn(
+    Ok(ServerHandle::spawn(
         socket_path,
         move |mut shutdown| async move {
             supervise(running, &mut shutdown).await;

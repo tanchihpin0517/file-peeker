@@ -7,8 +7,8 @@ mod api;
 mod client;
 mod install;
 mod ops;
+mod server;
 mod session;
-mod startup;
 
 pub use api::{
     Client, DirectoryEntry, EntryKind, FileMetadata, FilePeekerError, Listing, Session,

@@ -73,10 +73,11 @@ development and crates.io for release.
 
 ## Internal module layout
 
-Startup implementation lives under `crates/file-peeker-client/src/startup/`:
+Server ownership and launch code lives under
+`crates/file-peeker-client/src/server/`:
 
-- `mod.rs` is the lifecycle facade. It dispatches `SessionTarget`, owns
-  `LifecycleHandle`, and marks a session closed after its target-specific
+- `mod.rs` is the server-ownership facade. It dispatches `SessionTarget`, owns
+  `ServerHandle`, and marks the server closed after its target-specific
   supervisor finishes.
 - `local.rs` owns the local child process, startup rollback, and supervision.
 - `remote.rs` orchestrates the SSH master, installation, server launcher,
@@ -88,8 +89,8 @@ Startup implementation lives under `crates/file-peeker-client/src/startup/`:
 - `diagnostics.rs` owns bounded stderr capture and session-log writing.
 
 Local and remote process structs remain private to their modules. Each target
-passes its supervisor future to `LifecycleHandle`; there is no shared process
-enum and no process-specific branching in the lifecycle facade.
+passes its supervisor future to `ServerHandle`; there is no shared process enum
+and no process-specific branching in the server-ownership facade.
 
 ## Public client API
 

@@ -27,14 +27,14 @@ pub(super) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 pub(super) const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
-pub(super) struct LifecycleHandle {
+pub(super) struct ServerHandle {
     shutdown: mpsc::UnboundedSender<()>,
     socket_path: PathBuf,
     closed: Arc<AtomicBool>,
     closed_notify: Arc<Notify>,
 }
 
-impl LifecycleHandle {
+impl ServerHandle {
     fn spawn<F, Fut>(socket_path: PathBuf, build_supervisor: F) -> Self
     where
         F: FnOnce(mpsc::UnboundedReceiver<()>) -> Fut,
@@ -88,7 +88,7 @@ impl LifecycleHandle {
     }
 }
 
-pub(super) async fn start(config: SessionConfig) -> Result<LifecycleHandle, FilePeekerError> {
+pub(super) async fn start(config: SessionConfig) -> Result<ServerHandle, FilePeekerError> {
     match config.target {
         SessionTarget::Local {
             server_executable_path,
@@ -102,7 +102,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn lifecycle_timeouts_are_bounded() {
+    fn server_timeouts_are_bounded() {
         assert!(super::STARTUP_TIMEOUT <= Duration::from_secs(10));
         assert!(super::SHUTDOWN_TIMEOUT <= Duration::from_secs(5));
         assert_eq!(super::CONNECT_RETRY_DELAY, Duration::from_millis(100));

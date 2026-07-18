@@ -1,10 +1,10 @@
 use std::{path::Path, sync::Arc};
 
-use crate::{FileMetadata, FilePeekerError, SessionConfig, SessionTarget, ops, startup};
+use crate::{FileMetadata, FilePeekerError, SessionConfig, SessionTarget, ops, server};
 
 #[derive(Debug)]
 pub(crate) struct Session {
-    lifecycle: startup::LifecycleHandle,
+    server: server::ServerHandle,
     mode: SessionMode,
     target: SessionTarget,
 }
@@ -26,7 +26,7 @@ impl From<&SessionTarget> for SessionMode {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.lifecycle.shutdown();
+        self.server.shutdown();
     }
 }
 
@@ -39,9 +39,9 @@ impl Session {
     pub(crate) async fn start(config: SessionConfig) -> Result<Arc<Self>, FilePeekerError> {
         let mode = SessionMode::from(&config.target);
         let target = config.target.clone();
-        let lifecycle = startup::start(config).await?;
+        let server = server::start(config).await?;
         Ok(Arc::new(Self {
-            lifecycle,
+            server,
             mode,
             target,
         }))
@@ -81,7 +81,7 @@ impl Session {
     ///
     /// Returns an error if shutdown does not complete within its bounded timeout.
     pub(crate) async fn close(&self) -> Result<(), FilePeekerError> {
-        self.lifecycle.close().await
+        self.server.close().await
     }
 
     /// Opens a local path with the system default application.
@@ -111,7 +111,7 @@ impl Session {
 
 impl Session {
     pub(super) fn ensure_open(&self) -> Result<(), FilePeekerError> {
-        if self.lifecycle.is_closed() {
+        if self.server.is_closed() {
             return Err(FilePeekerError::ConnectionClosed {
                 message: "server is no longer running".into(),
             });
@@ -120,7 +120,7 @@ impl Session {
     }
 
     pub(super) fn socket_path(&self) -> &Path {
-        self.lifecycle.socket_path()
+        self.server.socket_path()
     }
 }
 

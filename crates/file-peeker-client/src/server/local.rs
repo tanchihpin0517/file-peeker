@@ -12,7 +12,7 @@ use tokio::{
 use super::diagnostics::{add_stderr_context, join, log_event, read};
 use super::protocol::{complete_handshake, connect_control};
 use super::runtime::SessionDirectory;
-use super::{LifecycleHandle, SHUTDOWN_TIMEOUT, STARTUP_TIMEOUT};
+use super::{SHUTDOWN_TIMEOUT, STARTUP_TIMEOUT, ServerHandle};
 use crate::FilePeekerError;
 
 struct LocalProcess {
@@ -22,9 +22,7 @@ struct LocalProcess {
     _endpoint: SessionDirectory,
 }
 
-pub(super) async fn start(
-    server_executable_path: String,
-) -> Result<LifecycleHandle, FilePeekerError> {
+pub(super) async fn start(server_executable_path: String) -> Result<ServerHandle, FilePeekerError> {
     let executable = validate_executable(&server_executable_path)?;
     let endpoint = SessionDirectory::create()?;
     let socket_path = endpoint.socket_path();
@@ -72,7 +70,7 @@ pub(super) async fn start(
         stderr_task,
         _endpoint: endpoint,
     };
-    Ok(LifecycleHandle::spawn(
+    Ok(ServerHandle::spawn(
         socket_path,
         move |mut shutdown| async move {
             supervise(running, &mut shutdown).await;
