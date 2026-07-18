@@ -14,12 +14,12 @@ protocol negotiation, and cleanup remain private client responsibilities.
 ```text
 Local
 
-UI -> BrowserClient -> private Unix socket -> local server -> local filesystem
+UI -> Session -> private Unix socket -> local server -> local filesystem
                          client owns process and endpoint
 
 Remote
 
-UI -> BrowserClient -> local Unix socket -> SSH forward -> remote Unix socket
+UI -> Session -> local Unix socket -> SSH forward -> remote Unix socket
                          client owns SSH              -> remote server
                                                       -> remote filesystem
 ```
@@ -30,12 +30,12 @@ process launch, and Unix-socket forwarding. After the local server process or
 remote SSH process has been launched, both targets converge on the same
 connection and protocol behavior.
 
-Each `BrowserClient` owns exactly one dedicated server lifecycle:
+Each `Session` owns exactly one dedicated server lifecycle:
 
 - one long-lived control connection defines the shared lifetime;
 - each filesystem operation uses its own short-lived connection;
 - closing the control connection asks the dedicated server to exit;
-- dropping or explicitly closing the client cleans up its owned process and
+- dropping the last session/state reference or explicitly closing the session cleans up its owned process and
   private endpoints.
 
 Startup follows the same bounded sequence for either target:
@@ -56,7 +56,7 @@ retry connection while watching timeout and child exit
 complete protocol-version and control-role handshake
         |
         v
-return BrowserClient owning the complete lifecycle
+return Session owning the complete lifecycle
 ```
 
 For SSH targets, compatible server installation is a preparation step before
@@ -67,25 +67,25 @@ workspace packages for development and crates.io for release.
 
 ## Public client API
 
-The client starts either target through `BrowserClient::start`:
+The shared API starts either target through `Client::connect`:
 
 ```rust
-BrowserClient::start(ClientConfig {
-    target: ServerTarget::Local {
+Client::new().connect(SessionConfig {
+    target: SessionTarget::Local {
         server_executable_path,
     },
 })
 ```
 
 ```rust
-BrowserClient::start(ClientConfig {
-    target: ServerTarget::Ssh {
+Client::new().connect(SessionConfig {
+    target: SessionTarget::Ssh {
         destination,
     },
 })
 ```
 
-There is no separate public remote-connect function. `ServerTarget` is exported
+There is no separate public remote-connect function. `SessionTarget` is exported
 through UniFFI, so Rust and Swift callers use the same local/SSH configuration.
 
 The SSH destination is required and has no default. It may be a host alias such
@@ -109,7 +109,7 @@ For a local target, the client:
 5. Retries the socket connection while also watching for process exit and the
    startup deadline.
 6. Sends the protocol-version and control-role handshake.
-7. Returns a `BrowserClient` that owns the server process, control connection,
+7. Returns a `Session` that owns the server process, control connection,
    and temporary endpoint.
 
 The Ratatui application and SwiftUI application currently construct local
@@ -143,7 +143,7 @@ successful installation fail.
 
 ## Remote startup
 
-For an SSH target, `BrowserClient::start`:
+For an SSH target, `Client::connect`:
 
 1. Checks whether the matching remote server is already installed and
    compatible.
@@ -156,7 +156,7 @@ For an SSH target, `BrowserClient::start`:
    on a Unix socket inside it.
 6. Connects to the local end of the forwarded socket and performs the same
    control handshake used by local startup.
-7. Returns the same `BrowserClient` type used for a local target.
+7. Returns the same `Session` type used for a local target.
 
 The server is not exposed on a TCP port. Authentication and encryption are
 provided by SSH, and normal SSH configuration continues to control identities,
@@ -177,7 +177,7 @@ The metadata client method is still a typed `NotImplemented` result.
 
 ## Shutdown and cleanup
 
-`BrowserClient::close` and `BrowserClient` drop both signal the lifecycle
+`Session::close` and `Session` drop both signal the lifecycle
 supervisor. Shutdown:
 
 1. Closes the control connection.
@@ -219,7 +219,7 @@ The implemented routine is covered by:
 - Rust formatting, compilation, Clippy, unit tests, and workspace tests;
 - a real local server startup, listing, shutdown, and cleanup test;
 - a non-interactive local Ratatui smoke test;
-- UniFFI generation and Swift tests for both `ServerTarget` variants;
+- UniFFI generation and Swift tests for both `SessionTarget` variants;
 - a Swift client test that starts the bundled server and lists a directory;
 - an Xcode build of the SwiftUI application;
 - a remote package installation script for unpublished crates;

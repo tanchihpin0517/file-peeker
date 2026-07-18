@@ -2,7 +2,7 @@
 
 ## Objective
 
-Implement one `BrowserClient.start` lifecycle that can start a dedicated File
+Implement one `Client.connect` lifecycle that can start a dedicated File
 Peeker server in either of two locations:
 
 - **Local:** spawn `file-peeker-server` on the client machine and connect directly
@@ -35,13 +35,13 @@ protocol.
 ```text
 Local
 
-BrowserClient ── Unix socket ──> local file-peeker-server
+Session ── Unix socket ──> local file-peeker-server
       │
       └── owns local server child process and private socket directory
 
 Remote over SSH
 
-BrowserClient ── local Unix socket ──> SSH forward ──> remote Unix socket
+Session ── local Unix socket ──> SSH forward ──> remote Unix socket
       │                                                   │
       └── owns SSH child process                    remote file-peeker-server
 ```
@@ -61,9 +61,9 @@ feature and is not part of this startup change.
 The repository is currently a compilable skeleton:
 
 - `crates/file-peeker-client/src/lib.rs`
-  - `ClientConfig` contains only `server_executable_path`.
-  - `BrowserClient::start` always returns `ClientError::NotImplemented`.
-  - `ClientError` already has useful startup/lifecycle categories:
+  - `SessionConfig` contains only `server_executable_path`.
+  - `Client::connect` always returns `FilePeekerError::NotImplemented`.
+  - `FilePeekerError` already has useful startup/lifecycle categories:
     `ServerStart`, `ServerExited`, `ConnectionClosed`, `Protocol`, and `Io`.
 - `crates/file-peeker-server/src/main.rs`
   - `ServerConfig` contains one `socket_path`.
@@ -76,7 +76,7 @@ The repository is currently a compilable skeleton:
   - The protocol already permits multiple simultaneous connections to one
     dedicated server socket, which also works through an SSH Unix-socket forward.
 - `docs/architecture.md`
-  - Specifies a dedicated server per `BrowserClient`, a long-lived control
+  - Specifies a dedicated server per `Session`, a long-lived control
     connection, and one connection per operation.
   - Currently describes only local process ownership and explicitly defers
     remote support.
@@ -88,7 +88,7 @@ The repository is currently a compilable skeleton:
   - Does not call the client yet. It only reads an optional start path and
     prints the skeleton message.
 - `swift/ClientIntegrationTests/main.swift`
-  - Constructs the current `ClientConfig` and verifies the placeholder typed
+  - Constructs the current `SessionConfig` and verifies the placeholder typed
     error crosses UniFFI.
 
 The workspace uses Rust 2024 with Rust 1.88. `tokio` currently enables only
@@ -98,14 +98,14 @@ when implementation begins.
 
 ## Public configuration
 
-Replace the single-path `ClientConfig` with a language-neutral target
+Replace the single-path `SessionConfig` with a language-neutral target
 configuration. Prefer a rich UniFFI enum so invalid local/remote field
 combinations cannot be constructed.
 
 Conceptually:
 
 ```rust
-enum ServerTarget {
+enum SessionTarget {
     Local {
         server_executable_path: String,
     },
@@ -117,8 +117,8 @@ enum ServerTarget {
     },
 }
 
-struct ClientConfig {
-    target: ServerTarget,
+struct SessionConfig {
+    target: SessionTarget,
     startup_timeout_ms: u64,
     shutdown_timeout_ms: u64,
 }
@@ -164,7 +164,7 @@ Startup:
 client -> SSH -> invoke verified server -> forward socket -> handshake
 ```
 
-Do not silently run `cargo install` during every `BrowserClient.start`. The
+Do not silently run `cargo install` during every `Client.connect`. The
 private helper has no public or UI-facing entry point in this implementation.
 
 ### Production installation contract
@@ -272,7 +272,7 @@ continues to use the pinned crates.io command described above.
 
 ## Shared startup state machine
 
-`BrowserClient::start` should use one bounded state machine for both targets:
+`Client::connect` should use one bounded state machine for both targets:
 
 ```text
 validate configuration
@@ -290,7 +290,7 @@ retry connection while watching for child exit and startup timeout
 open control connection and complete version/role handshake
         │
         ▼
-return BrowserClient owning child, endpoint lease, and control connection
+return Session owning child, endpoint lease, and control connection
 ```
 
 Recommended internal responsibilities:
@@ -306,7 +306,7 @@ Recommended internal responsibilities:
   requires `hello_ok` before startup succeeds.
 - `RunningServer` owns the child process, the private local endpoint directory,
   stderr collection, and shutdown behavior.
-- `BrowserClient` owns `RunningServer`, the control connection, and the shared
+- `Session` owns `RunningServer`, the control connection, and the shared
   closed/failed state used by later operations.
 
 Do not introduce a public transport trait. Internally, either a small
@@ -342,7 +342,7 @@ without starting SSH.
    a typed error containing the executable, exit status when known, and bounded
    stderr context.
 7. On success, retain the child and temporary-directory lease inside
-   `BrowserClient`.
+   `Session`.
 
 The client should not treat appearance of the socket file alone as readiness.
 The successful control handshake is the readiness signal.
@@ -390,7 +390,7 @@ The successful control handshake is the readiness signal.
    must remove its socket/runtime directory during normal exit and should also
    clean stale socket state when it receives termination caused by SSH loss.
 9. On success, retain the SSH child and local temporary-directory lease inside
-   `BrowserClient`. Every later operation opens another connection to the same
+   `Session`. Every later operation opens another connection to the same
    local forwarded socket; SSH forwards each connection to the one remote server.
 
 Do not expose the remote socket over TCP. Do not disable SSH server-key checking.
@@ -437,18 +437,18 @@ root restriction.
 Map startup failures consistently:
 
 - Invalid target, executable path, destination, timeout, or socket path:
-  `ClientError::ServerStart`.
+  `FilePeekerError::ServerStart`.
 - Failure to spawn the local server or SSH:
-  `ClientError::ServerStart`.
+  `FilePeekerError::ServerStart`.
 - Child exits before or during the initial handshake:
-  `ClientError::ServerExited`.
+  `FilePeekerError::ServerExited`.
 - Startup deadline expires:
   add a distinct timeout variant or return `ServerStart` with an explicit timeout
   message; a distinct variant is preferable if UIs need tailored messaging.
 - Unsupported protocol version or invalid handshake:
-  `ClientError::Protocol`.
+  `FilePeekerError::Protocol`.
 - Control connection disappears after successful startup:
-  `ClientError::ConnectionClosed` and invalidate all operations.
+  `FilePeekerError::ConnectionClosed` and invalidate all operations.
 
 Diagnostics must:
 
@@ -498,7 +498,7 @@ safety net.
 - Password-entry or SSH credential-management UI.
 - Git-, path-, archive-, or ad hoc binary-based production installation.
 - Automatically installing the server as a side effect of every startup.
-- SSH connection pooling across multiple `BrowserClient` instances.
+- SSH connection pooling across multiple `Session` instances.
 - Automatic reconnection after SSH or server failure.
 - Sharing one server among multiple clients.
 - Filesystem allowlists/chroot/sandbox policy.
@@ -509,7 +509,7 @@ safety net.
 ## Implementation steps
 
 1. **Lock down the startup contract in documentation.**
-   - Update `docs/architecture.md` to describe `ServerTarget`, the shared startup
+   - Update `docs/architecture.md` to describe `SessionTarget`, the shared startup
      state machine, local ownership, SSH forwarding, and shutdown behavior.
    - Update `docs/protocol.md` to clarify that NDJSON remains on Unix streams;
      remote use is the same private protocol carried through authenticated SSH,
@@ -537,7 +537,7 @@ safety net.
 4. **Expand public configuration and generated-binding tests.**
    - In `crates/file-peeker-client/src/lib.rs`, add the local/SSH target types,
      startup/shutdown timeouts, and any new typed errors.
-   - Update the Rust tests around `BrowserClient::start`.
+   - Update the Rust tests around `Client::connect`.
    - Update `swift/ClientIntegrationTests/main.swift` to construct both target
      variants and verify their values/errors survive UniFFI.
    - Run binding generation immediately to catch unsupported UniFFI enum shapes
@@ -577,7 +577,7 @@ safety net.
    - Race connection retries against child exit and startup timeout.
    - On every failure path, terminate/reap the child and release endpoint state.
 
-9. **Complete `BrowserClient::start`.**
+9. **Complete `Client::connect`.**
    - Use the shared state machine for both target variants.
    - Connect to the prepared local endpoint, perform the control handshake, and
      return a thread-safe client owning `RunningServer`.
@@ -585,7 +585,7 @@ safety net.
      connection later dies so all operations observe consistent invalidation.
 
 10. **Implement graceful and forced shutdown.**
-   - Closing/dropping `BrowserClient` closes control first.
+   - Closing/dropping `Session` closes control first.
    - Wait only up to the configured shutdown timeout.
    - Kill and reap a server/SSH process that does not exit.
    - Verify local and remote endpoint cleanup, including cancellation during
@@ -601,7 +601,7 @@ safety net.
 
 12. **Wire the application shells only after the client contract is stable.**
    - Update `crates/file-peeker-tui/src/main.rs` to construct a local or SSH
-     target from its eventual CLI options and call `BrowserClient::start`.
+     target from its eventual CLI options and call `Client::connect`.
    - Update the Swift shell/model when it gains functional startup UI.
    - Keep all process and SSH logic inside `file-peeker-client`.
 
@@ -630,7 +630,7 @@ safety net.
 
 ### Local integration tests
 
-- Build `file-peeker-server`, start `BrowserClient` locally, complete the control
+- Build `file-peeker-server`, start `Session` locally, complete the control
   handshake, and confirm the server remains alive.
 - Drop/close the client and confirm the server exits and the temporary directory
   disappears.
@@ -677,8 +677,8 @@ make xcode-build
 
 ### Acceptance criteria
 
-- One `BrowserClient.start` API starts either a local server or an SSH-based
-  remote server based only on `ClientConfig`.
+- One `Client.connect` API starts either a local server or an SSH-based
+  remote server based only on `SessionConfig`.
 - Production installation obtains an exact pinned server version only from
   crates.io.
 - An unpublished packaged release can be transferred and installed over SSH
@@ -713,5 +713,5 @@ make xcode-build
    account. If File Peeker needs a narrower security boundary, add an explicit
    server-side allowed-root configuration as a separate, reviewed feature.
 6. **Public close method:** decide whether UI callers need an awaitable
-   `BrowserClient.close()` that can report shutdown errors, or whether
+   `Session.close()` that can report shutdown errors, or whether
    best-effort drop semantics are sufficient for the first functional version.

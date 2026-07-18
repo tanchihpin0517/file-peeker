@@ -11,19 +11,19 @@ struct ClientIntegrationTests {
     }
 
     private static func testGeneratedValueTypes() {
-        let localConfig = ClientConfig(
+        let localConfig = SessionConfig(
             target: .local(serverExecutablePath: "/tmp/file-peeker-server")
         )
         require(
             localConfig.target
                 == .local(serverExecutablePath: "/tmp/file-peeker-server"),
-            "ClientConfig did not preserve its local target"
+            "SessionConfig did not preserve its local target"
         )
 
-        let sshConfig = ClientConfig(target: .ssh(destination: "example-host"))
+        let sshConfig = SessionConfig(target: .ssh(destination: "example-host"))
         require(
             sshConfig.target == .ssh(destination: "example-host"),
-            "ClientConfig did not preserve its SSH target"
+            "SessionConfig did not preserve its SSH target"
         )
 
         let entry = DirectoryEntry(
@@ -36,15 +36,19 @@ struct ClientIntegrationTests {
         require(entry.kind == .directory, "DirectoryEntry did not preserve kind")
         require(entry.navigable, "DirectoryEntry did not preserve navigable")
 
-        let row = DirectoryTreeRow(
+        let row = StateRow(
             entry: entry,
             parentPath: "/tmp/example",
             depth: 1,
             expanded: false,
             errorMessage: nil
         )
-        require(row.entry == entry, "DirectoryTreeRow did not preserve its entry")
-        require(row.depth == 1, "DirectoryTreeRow did not preserve depth")
+        require(row.entry == entry, "StateRow did not preserve its entry")
+        require(row.depth == 1, "StateRow did not preserve depth")
+
+        let snapshot = StateSnapshot(path: "/tmp/example", rows: [row])
+        require(snapshot.path == "/tmp/example", "StateSnapshot did not preserve its path")
+        require(snapshot.rows == [row], "StateSnapshot did not preserve its rows")
 
         let metadata = FileMetadata(
             path: "/tmp/example/docs",
@@ -60,15 +64,15 @@ struct ClientIntegrationTests {
 
     private static func testAsyncTypedErrorRoundTrip() async {
         do {
-            _ = try await BrowserClient.start(
-                config: ClientConfig(
+            _ = try await Client().connect(
+                config: SessionConfig(
                     target: .local(
                         serverExecutablePath: "/definitely/missing/file-peeker-server"
                     )
                 )
             )
-            fail("BrowserClient.start unexpectedly succeeded")
-        } catch ClientError.ServerStart(let message) {
+            fail("Client.connect unexpectedly succeeded")
+        } catch FilePeekerError.ServerStart(let message) {
             require(
                 message.contains("cannot launch"),
                 "received ServerStart with an unexpected message"
@@ -110,12 +114,17 @@ struct ClientIntegrationTests {
             let nestedFile = nested.appendingPathComponent("child.txt")
             try Data().write(to: nestedFile)
 
-            let client = try await BrowserClient.start(
-                config: ClientConfig(
+            let client = Client()
+            let session = try await client.connect(
+                config: SessionConfig(
                     target: .local(serverExecutablePath: serverPath)
                 )
             )
-            let currentRoot = try await client.currentRoot()
+            require(
+                session.target() == .local(serverExecutablePath: serverPath),
+                "Session did not preserve its target"
+            )
+            let currentRoot = try await session.currentRoot()
             let expectedRoot = URL(
                 fileURLWithPath: FileManager.default.currentDirectoryPath,
                 isDirectory: true
@@ -126,15 +135,17 @@ struct ClientIntegrationTests {
                 "real server current root did not match its working directory"
             )
 
-            let rootRows = try await client.loadTree(path: directory.path)
-            let names = rootRows.map(\.entry.name)
+            let state = try await session.openState(path: directory.path)
+            let independentState = try await session.openState(path: directory.path)
+            let rootSnapshot = state.snapshot()
+            let names = rootSnapshot.rows.map(\.entry.name)
 
             require(
                 names.contains(expectedName),
                 "real server listing did not return the test file"
             )
-            let firstExpandedRows = try await client.expandTree(path: nested.path)
-            let firstNestedNames = firstExpandedRows
+            let firstExpandedSnapshot = try await state.expand(path: nested.path)
+            let firstNestedNames = firstExpandedSnapshot.rows
                 .filter { $0.parentPath == nested.path }
                 .map(\.entry.name)
             require(
@@ -142,17 +153,22 @@ struct ClientIntegrationTests {
                 "first shared-tree expansion returned unexpected contents"
             )
 
-            let collapsedRows = try client.collapseTree(path: nested.path)
             require(
-                collapsedRows.allSatisfy { $0.parentPath != nested.path },
+                independentState.snapshot() == rootSnapshot,
+                "independent states on one session did not remain isolated"
+            )
+
+            let collapsedSnapshot = try state.collapse(path: nested.path)
+            require(
+                collapsedSnapshot.rows.allSatisfy { $0.parentPath != nested.path },
                 "collapse did not discard nested rows"
             )
 
             let addedLater = nested.appendingPathComponent("added-later.txt")
             try Data().write(to: addedLater)
-            let secondExpandedRows = try await client.expandTree(path: nested.path)
+            let secondExpandedSnapshot = try await state.expand(path: nested.path)
             let secondNestedNames = Set(
-                secondExpandedRows
+                secondExpandedSnapshot.rows
                     .filter { $0.parentPath == nested.path }
                     .map(\.entry.name)
             )
@@ -161,10 +177,10 @@ struct ClientIntegrationTests {
                 "second shared-tree expansion did not reload fresh contents"
             )
             require(
-                client.treeRows() == secondExpandedRows,
-                "treeRows did not return the current shared-tree snapshot"
+                state.snapshot() == secondExpandedSnapshot,
+                "State.snapshot did not return the current browsing snapshot"
             )
-            print("PASS shared client tree load, collapse, and fresh re-expansion from Swift")
+            print("PASS session target and independent browsing states from Swift")
         } catch {
             fail("real server startup and listing failed: \(error)")
         }

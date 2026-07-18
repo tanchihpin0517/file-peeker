@@ -2,31 +2,31 @@ use std::path::Path;
 
 use tokio::process::Command;
 
-use crate::{ClientError, ClientMode};
+use crate::{FilePeekerError, session::SessionMode};
 
 const SYSTEM_OPENER: &str = "/usr/bin/open";
 
-pub(super) async fn open(mode: ClientMode, path: String) -> Result<(), ClientError> {
+pub(crate) async fn open(mode: SessionMode, path: String) -> Result<(), FilePeekerError> {
     match mode {
-        ClientMode::Local => open_local(Path::new(SYSTEM_OPENER), path).await,
-        ClientMode::Ssh => Ok(()),
+        SessionMode::Local => open_local(Path::new(SYSTEM_OPENER), path).await,
+        SessionMode::Ssh => Ok(()),
     }
 }
 
-async fn open_local(opener: &Path, path: String) -> Result<(), ClientError> {
+async fn open_local(opener: &Path, path: String) -> Result<(), FilePeekerError> {
     let status = Command::new(opener)
         .arg("--")
         .arg(&path)
         .status()
         .await
-        .map_err(|error| ClientError::Io {
+        .map_err(|error| FilePeekerError::Io {
             message: format!("cannot open `{path}` with the system application: {error}"),
         })?;
 
     if status.success() {
         Ok(())
     } else {
-        Err(ClientError::Io {
+        Err(FilePeekerError::Io {
             message: format!("system application failed to open `{path}`: {status}"),
         })
     }
@@ -41,11 +41,11 @@ mod tests {
     };
 
     use super::{open, open_local};
-    use crate::{ClientError, ClientMode};
+    use crate::{FilePeekerError, session::SessionMode};
 
     #[tokio::test]
     async fn ssh_open_is_a_successful_no_op() {
-        open(ClientMode::Ssh, "/remote/report.txt".into())
+        open(SessionMode::Ssh, "/remote/report.txt".into())
             .await
             .expect("SSH open should succeed without launching a process");
     }
@@ -83,7 +83,7 @@ mod tests {
         .await
         .expect_err("missing opener should fail");
 
-        assert!(matches!(error, ClientError::Io { .. }));
+        assert!(matches!(error, FilePeekerError::Io { .. }));
     }
 
     #[tokio::test]
@@ -92,7 +92,7 @@ mod tests {
             .await
             .expect_err("unsuccessful opener should fail");
 
-        assert!(matches!(error, ClientError::Io { .. }));
+        assert!(matches!(error, FilePeekerError::Io { .. }));
     }
 
     fn write_executable(path: &PathBuf, contents: &str) {

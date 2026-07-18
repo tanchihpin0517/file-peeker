@@ -17,22 +17,38 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{ClientError, DirectoryEntry, EntryKind};
+use crate::{DirectoryEntry, EntryKind, FilePeekerError};
 
 const LISTING_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Debug)]
-pub(super) enum ListingItem {
-    Entry(DirectoryEntry),
-    Done,
-    Error(ClientError),
+pub(crate) struct DirectoryListing {
+    state: Arc<ListingState>,
+}
+
+impl DirectoryListing {
+    /// Waits for the next directory entry or successful completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns the next streamed entry or `None` when listing is complete.
+    pub(crate) async fn next_entry(&self) -> Result<Option<DirectoryEntry>, FilePeekerError> {
+        next(&self.state).await
+    }
 }
 
 #[derive(Debug)]
-pub(super) struct ListingState {
-    pub(super) receiver: Mutex<mpsc::Receiver<ListingItem>>,
+enum ListingItem {
+    Entry(DirectoryEntry),
+    Done,
+    Error(FilePeekerError),
+}
+
+#[derive(Debug)]
+struct ListingState {
+    receiver: Mutex<mpsc::Receiver<ListingItem>>,
     task: JoinHandle<()>,
-    pub(super) finished: AtomicBool,
+    finished: AtomicBool,
 }
 
 impl Drop for ListingState {
@@ -41,17 +57,13 @@ impl Drop for ListingState {
     }
 }
 
-pub(super) async fn start(
-    socket_path: PathBuf,
-    path: String,
-) -> Result<Arc<ListingState>, ClientError> {
+async fn start(socket_path: PathBuf, path: String) -> Result<Arc<ListingState>, FilePeekerError> {
     let path = absolute_utf8_path(&path)?;
-    let mut stream =
-        UnixStream::connect(&socket_path)
-            .await
-            .map_err(|error| ClientError::ConnectionClosed {
-                message: format!("cannot open listing connection: {error}"),
-            })?;
+    let mut stream = UnixStream::connect(&socket_path).await.map_err(|error| {
+        FilePeekerError::ConnectionClosed {
+            message: format!("cannot open listing connection: {error}"),
+        }
+    })?;
     handshake_operation(&mut stream).await?;
 
     let (sender, receiver) = mpsc::channel(LISTING_QUEUE_CAPACITY);
@@ -68,10 +80,18 @@ pub(super) async fn start(
     }))
 }
 
-pub(super) async fn collect(
+pub(crate) async fn list(
     socket_path: PathBuf,
     path: String,
-) -> Result<Vec<DirectoryEntry>, ClientError> {
+) -> Result<Arc<DirectoryListing>, FilePeekerError> {
+    let state = start(socket_path, path).await?;
+    Ok(Arc::new(DirectoryListing { state }))
+}
+
+pub(crate) async fn collect(
+    socket_path: PathBuf,
+    path: String,
+) -> Result<Vec<DirectoryEntry>, FilePeekerError> {
     let state = start(socket_path, path).await?;
     let mut entries = Vec::new();
     while let Some(entry) = next(&state).await? {
@@ -80,25 +100,24 @@ pub(super) async fn collect(
     Ok(entries)
 }
 
-pub(super) async fn current_root(socket_path: PathBuf) -> Result<String, ClientError> {
-    let mut stream =
-        UnixStream::connect(&socket_path)
-            .await
-            .map_err(|error| ClientError::ConnectionClosed {
-                message: format!("cannot open current-root connection: {error}"),
-            })?;
+pub(crate) async fn current_root(socket_path: PathBuf) -> Result<String, FilePeekerError> {
+    let mut stream = UnixStream::connect(&socket_path).await.map_err(|error| {
+        FilePeekerError::ConnectionClosed {
+            message: format!("cannot open current-root connection: {error}"),
+        }
+    })?;
     handshake_operation(&mut stream).await?;
     write_message(&mut stream, &ClientMessage::CurrentRoot).await?;
     match read_message(&mut stream).await? {
         ServerMessage::CurrentRoot { path } => Ok(path),
         ServerMessage::Error { code, message } => Err(map_server_error(code, message)),
-        message => Err(ClientError::Protocol {
+        message => Err(FilePeekerError::Protocol {
             message: format!("unexpected current-root response: {message:?}"),
         }),
     }
 }
 
-pub(super) async fn next(state: &ListingState) -> Result<Option<DirectoryEntry>, ClientError> {
+async fn next(state: &ListingState) -> Result<Option<DirectoryEntry>, FilePeekerError> {
     if state.finished.load(Ordering::Acquire) {
         return Ok(None);
     }
@@ -115,16 +134,16 @@ pub(super) async fn next(state: &ListingState) -> Result<Option<DirectoryEntry>,
         }
         None => {
             state.finished.store(true, Ordering::Release);
-            Err(ClientError::ConnectionClosed {
+            Err(FilePeekerError::ConnectionClosed {
                 message: "listing task ended without a terminal response".into(),
             })
         }
     }
 }
 
-fn absolute_utf8_path(path: &str) -> Result<String, ClientError> {
+pub(crate) fn absolute_utf8_path(path: &str) -> Result<String, FilePeekerError> {
     if path.is_empty() {
-        return Err(ClientError::InvalidPath {
+        return Err(FilePeekerError::InvalidPath {
             message: "path is required".into(),
         });
     }
@@ -133,7 +152,7 @@ fn absolute_utf8_path(path: &str) -> Result<String, ClientError> {
         path.to_path_buf()
     } else {
         std::env::current_dir()
-            .map_err(|error| ClientError::Io {
+            .map_err(|error| FilePeekerError::Io {
                 message: format!("cannot read current directory: {error}"),
             })?
             .join(path)
@@ -141,12 +160,12 @@ fn absolute_utf8_path(path: &str) -> Result<String, ClientError> {
     absolute
         .to_str()
         .map(str::to_owned)
-        .ok_or_else(|| ClientError::InvalidPath {
+        .ok_or_else(|| FilePeekerError::InvalidPath {
             message: "path must be valid UTF-8".into(),
         })
 }
 
-async fn handshake_operation(stream: &mut UnixStream) -> Result<(), ClientError> {
+async fn handshake_operation(stream: &mut UnixStream) -> Result<(), FilePeekerError> {
     write_message(
         stream,
         &ClientMessage::Hello {
@@ -158,7 +177,7 @@ async fn handshake_operation(stream: &mut UnixStream) -> Result<(), ClientError>
     match read_message(stream).await? {
         ServerMessage::HelloOk { version } if version == PROTOCOL_VERSION => Ok(()),
         ServerMessage::Error { code, message } => Err(map_server_error(code, message)),
-        message => Err(ClientError::Protocol {
+        message => Err(FilePeekerError::Protocol {
             message: format!("unexpected operation handshake response: {message:?}"),
         }),
     }
@@ -168,7 +187,7 @@ async fn run_listing(
     mut stream: UnixStream,
     path: String,
     sender: &mpsc::Sender<ListingItem>,
-) -> Result<(), ClientError> {
+) -> Result<(), FilePeekerError> {
     write_message(&mut stream, &ClientMessage::List { path }).await?;
     loop {
         match read_message(&mut stream).await? {
@@ -185,7 +204,7 @@ async fn run_listing(
                     navigable,
                 };
                 sender.send(ListingItem::Entry(entry)).await.map_err(|_| {
-                    ClientError::ConnectionClosed {
+                    FilePeekerError::ConnectionClosed {
                         message: "listing was cancelled".into(),
                     }
                 })?;
@@ -196,7 +215,7 @@ async fn run_listing(
             }
             ServerMessage::Error { code, message } => return Err(map_server_error(code, message)),
             message => {
-                return Err(ClientError::Protocol {
+                return Err(FilePeekerError::Protocol {
                     message: format!("unexpected listing response: {message:?}"),
                 });
             }
@@ -207,20 +226,20 @@ async fn run_listing(
 async fn write_message(
     stream: &mut UnixStream,
     message: &ClientMessage,
-) -> Result<(), ClientError> {
-    let mut bytes = serde_json::to_vec(message).map_err(|error| ClientError::Protocol {
+) -> Result<(), FilePeekerError> {
+    let mut bytes = serde_json::to_vec(message).map_err(|error| FilePeekerError::Protocol {
         message: format!("cannot encode client message: {error}"),
     })?;
     bytes.push(b'\n');
     stream
         .write_all(&bytes)
         .await
-        .map_err(|error| ClientError::ConnectionClosed {
+        .map_err(|error| FilePeekerError::ConnectionClosed {
             message: format!("cannot write server request: {error}"),
         })
 }
 
-async fn read_message(stream: &mut UnixStream) -> Result<ServerMessage, ClientError> {
+async fn read_message(stream: &mut UnixStream) -> Result<ServerMessage, FilePeekerError> {
     let mut bytes = Vec::new();
     loop {
         let mut byte = [0_u8; 1];
@@ -228,11 +247,11 @@ async fn read_message(stream: &mut UnixStream) -> Result<ServerMessage, ClientEr
             stream
                 .read(&mut byte)
                 .await
-                .map_err(|error| ClientError::ConnectionClosed {
+                .map_err(|error| FilePeekerError::ConnectionClosed {
                     message: format!("cannot read server response: {error}"),
                 })?;
         if count == 0 {
-            return Err(ClientError::ConnectionClosed {
+            return Err(FilePeekerError::ConnectionClosed {
                 message: "server closed the operation connection".into(),
             });
         }
@@ -241,12 +260,12 @@ async fn read_message(stream: &mut UnixStream) -> Result<ServerMessage, ClientEr
         }
         bytes.push(byte[0]);
         if bytes.len() > MAX_MESSAGE_BYTES {
-            return Err(ClientError::Protocol {
+            return Err(FilePeekerError::Protocol {
                 message: "server response exceeds the size limit".into(),
             });
         }
     }
-    serde_json::from_slice(&bytes).map_err(|error| ClientError::Protocol {
+    serde_json::from_slice(&bytes).map_err(|error| FilePeekerError::Protocol {
         message: format!("server returned invalid JSON: {error}"),
     })
 }
@@ -260,14 +279,14 @@ fn map_entry_kind(kind: ProtocolEntryKind) -> EntryKind {
     }
 }
 
-fn map_server_error(code: ErrorCode, message: String) -> ClientError {
+fn map_server_error(code: ErrorCode, message: String) -> FilePeekerError {
     match code {
-        ErrorCode::InvalidPath => ClientError::InvalidPath { message },
+        ErrorCode::InvalidPath => FilePeekerError::InvalidPath { message },
         ErrorCode::NotFound
         | ErrorCode::PermissionDenied
         | ErrorCode::NotDirectory
-        | ErrorCode::Io => ClientError::Io { message },
-        ErrorCode::UnsupportedVersion => ClientError::Protocol { message },
+        | ErrorCode::Io => FilePeekerError::Io { message },
+        ErrorCode::UnsupportedVersion => FilePeekerError::Protocol { message },
     }
 }
 

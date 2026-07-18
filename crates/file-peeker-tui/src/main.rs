@@ -8,7 +8,7 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use file_peeker_client::{
-    BrowserClient, ClientConfig, ClientError, DirectoryTreeRow, ServerTarget,
+    Client, FilePeekerError, Session, SessionConfig, SessionTarget, State, StateRow, StateSnapshot,
 };
 use ratatui::{
     DefaultTerminal, Frame,
@@ -21,11 +21,11 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 #[derive(Debug)]
 enum AppEvent {
-    TreeLoaded(u64, Vec<DirectoryTreeRow>),
-    Failed(u64, ClientError),
-    OpenFailed(u64, ClientError),
-    ExpansionFinished(u64, String, Vec<DirectoryTreeRow>),
-    ExpansionFailed(u64, String, Vec<DirectoryTreeRow>),
+    StateOpened(u64, Arc<State>, StateSnapshot),
+    Failed(u64, FilePeekerError),
+    OpenFailed(u64, FilePeekerError),
+    ExpansionFinished(u64, String, StateSnapshot),
+    ExpansionFailed(u64, String, StateSnapshot),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -34,11 +34,18 @@ enum OpenAction {
     File(String),
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum RightAction {
+    Expand,
+    Select(usize),
+}
+
 #[derive(Debug)]
 struct App {
-    client: Arc<BrowserClient>,
+    session: Arc<Session>,
+    state: Option<Arc<State>>,
     path: String,
-    rows: Vec<DirectoryTreeRow>,
+    rows: Vec<StateRow>,
     selected: usize,
     loading: bool,
     loading_tree_paths: HashSet<String>,
@@ -51,21 +58,19 @@ impl App {
     fn open_directory(&mut self, path: String, events: mpsc::UnboundedSender<AppEvent>) {
         self.generation += 1;
         let generation = self.generation;
-        self.path.clone_from(&path);
-        self.rows.clear();
         self.loading_tree_paths.clear();
         for (_, task) in self.expansion_tasks.drain() {
             task.abort();
         }
-        self.selected = 0;
         self.loading = true;
         self.error = None;
-        let client = Arc::clone(&self.client);
+        let session = Arc::clone(&self.session);
 
         tokio::spawn(async move {
-            match client.load_tree(path).await {
-                Ok(rows) => {
-                    let _ = events.send(AppEvent::TreeLoaded(generation, rows));
+            match session.open_state(path).await {
+                Ok(state) => {
+                    let snapshot = state.snapshot();
+                    let _ = events.send(AppEvent::StateOpened(generation, state, snapshot));
                 }
                 Err(error) => {
                     let _ = events.send(AppEvent::Failed(generation, error));
@@ -84,9 +89,9 @@ impl App {
             OpenAction::File(path) => {
                 self.error = None;
                 let generation = self.generation;
-                let client = Arc::clone(&self.client);
+                let session = Arc::clone(&self.session);
                 tokio::spawn(async move {
-                    if let Err(error) = client.open(path).await {
+                    if let Err(error) = session.open(path).await {
                         let _ = events.send(AppEvent::OpenFailed(generation, error));
                     }
                 });
@@ -102,9 +107,12 @@ impl App {
             return;
         }
 
+        let Some(state) = self.state.as_ref().map(Arc::clone) else {
+            return;
+        };
         if row.expanded {
-            match self.client.collapse_tree(row.entry.path.clone()) {
-                Ok(rows) => self.replace_rows(rows),
+            match state.collapse(row.entry.path.clone()) {
+                Ok(snapshot) => self.replace_snapshot(snapshot),
                 Err(error) => self.error = Some(error.to_string()),
             }
             return;
@@ -114,11 +122,11 @@ impl App {
         let task_path = path.clone();
         self.loading_tree_paths.insert(path.clone());
         let generation = self.generation;
-        let client = Arc::clone(&self.client);
+        let state = Arc::clone(&state);
         let task = tokio::spawn(async move {
-            let event = match client.expand_tree(path.clone()).await {
-                Ok(rows) => AppEvent::ExpansionFinished(generation, path, rows),
-                Err(_) => AppEvent::ExpansionFailed(generation, path, client.tree_rows()),
+            let event = match state.expand(path.clone()).await {
+                Ok(snapshot) => AppEvent::ExpansionFinished(generation, path, snapshot),
+                Err(_) => AppEvent::ExpansionFailed(generation, path, state.snapshot()),
             };
             let _ = events.send(event);
         });
@@ -127,8 +135,10 @@ impl App {
 
     fn update(&mut self, event: AppEvent) {
         match event {
-            AppEvent::TreeLoaded(generation, rows) if generation == self.generation => {
-                self.replace_rows(rows);
+            AppEvent::StateOpened(generation, state, snapshot) if generation == self.generation => {
+                self.state = Some(state);
+                self.selected = 0;
+                self.replace_snapshot(snapshot);
                 self.loading = false;
             }
             AppEvent::Failed(generation, error) if generation == self.generation => {
@@ -138,17 +148,19 @@ impl App {
             AppEvent::OpenFailed(generation, error) if generation == self.generation => {
                 self.error = Some(error.to_string());
             }
-            AppEvent::ExpansionFinished(generation, path, rows)
+            AppEvent::ExpansionFinished(generation, path, snapshot)
                 if generation == self.generation =>
             {
                 self.loading_tree_paths.remove(&path);
                 self.expansion_tasks.remove(&path);
-                self.replace_rows(rows);
+                self.replace_snapshot(snapshot);
             }
-            AppEvent::ExpansionFailed(generation, path, rows) if generation == self.generation => {
+            AppEvent::ExpansionFailed(generation, path, snapshot)
+                if generation == self.generation =>
+            {
                 self.loading_tree_paths.remove(&path);
                 self.expansion_tasks.remove(&path);
-                self.replace_rows(rows);
+                self.replace_snapshot(snapshot);
             }
             _ => {}
         }
@@ -170,18 +182,24 @@ impl App {
         }
     }
 
-    fn move_to_first_child(&mut self) {
-        if let Some(index) = first_child_index(&self.rows, self.selected) {
-            self.selected = index;
+    fn move_right(&mut self, events: mpsc::UnboundedSender<AppEvent>) {
+        match right_action(&self.rows, self.selected, &self.loading_tree_paths) {
+            Some(RightAction::Expand) => self.toggle_selected(events),
+            Some(RightAction::Select(index)) => self.selected = index,
+            None => {}
         }
     }
 
-    fn replace_rows(&mut self, rows: Vec<DirectoryTreeRow>) {
+    fn replace_snapshot(&mut self, snapshot: StateSnapshot) {
         let selected_path = self
             .rows
             .get(self.selected)
             .map(|row| row.entry.path.clone());
-        let visible_paths: HashSet<&str> = rows.iter().map(|row| row.entry.path.as_str()).collect();
+        let visible_paths: HashSet<&str> = snapshot
+            .rows
+            .iter()
+            .map(|row| row.entry.path.as_str())
+            .collect();
         let removed_loading_paths: Vec<String> = self
             .expansion_tasks
             .keys()
@@ -194,7 +212,8 @@ impl App {
                 task.abort();
             }
         }
-        self.rows = rows;
+        self.path = snapshot.path;
+        self.rows = snapshot.rows;
         self.selected = selected_path
             .and_then(|path| self.rows.iter().position(|row| row.entry.path == path))
             .unwrap_or_else(|| self.selected.min(self.rows.len().saturating_sub(1)));
@@ -252,7 +271,8 @@ impl App {
                 if self.loading {
                     "Loading…".into()
                 } else {
-                    "j/k: select  h/l: parent/child  o: toggle  Enter: open  q/Esc: quit".into()
+                    "j/k: select  h: parent  l: expand/child  o: toggle  Enter: open  q/Esc: quit"
+                        .into()
                 }
             },
             |error| format!("Error: {error}"),
@@ -277,21 +297,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .to_str()
         .ok_or("start path must be valid UTF-8")?
         .to_owned();
-    let client = BrowserClient::start(ClientConfig {
-        target: ServerTarget::Local {
-            server_executable_path: server.to_string_lossy().into_owned(),
-        },
-    })
-    .await?;
+    let session = Client::new()
+        .connect(SessionConfig {
+            target: SessionTarget::Local {
+                server_executable_path: server.to_string_lossy().into_owned(),
+            },
+        })
+        .await?;
     if smoke {
-        let count = client.load_tree(path).await?.len();
+        let count = Arc::clone(&session)
+            .open_state(path)
+            .await?
+            .snapshot()
+            .rows
+            .len();
         println!("PASS local TUI listing smoke test ({count} entries)");
         return Ok(());
     }
 
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let mut app = App {
-        client,
+        session,
+        state: None,
         path: path.clone(),
         rows: Vec::new(),
         selected: 0,
@@ -330,7 +357,7 @@ fn run(
                 KeyCode::Down | KeyCode::Char('j') => app.move_selection(true),
                 KeyCode::Up | KeyCode::Char('k') => app.move_selection(false),
                 KeyCode::Char('h') => app.move_to_parent(),
-                KeyCode::Char('l') => app.move_to_first_child(),
+                KeyCode::Char('l') => app.move_right(sender.clone()),
                 KeyCode::Char('o') => app.toggle_selected(sender.clone()),
                 KeyCode::Enter => app.open_selected(sender.clone()),
                 _ => {}
@@ -347,7 +374,7 @@ fn sibling_server() -> Result<PathBuf, Box<dyn Error>> {
         .join("file-peeker-server"))
 }
 
-fn open_action(rows: &[DirectoryTreeRow], selected: usize) -> Option<OpenAction> {
+fn open_action(rows: &[StateRow], selected: usize) -> Option<OpenAction> {
     rows.get(selected).map(|row| {
         if row.entry.navigable {
             OpenAction::Directory(row.entry.path.clone())
@@ -357,25 +384,45 @@ fn open_action(rows: &[DirectoryTreeRow], selected: usize) -> Option<OpenAction>
     })
 }
 
-fn parent_index(rows: &[DirectoryTreeRow], selected: usize) -> Option<usize> {
+fn parent_index(rows: &[StateRow], selected: usize) -> Option<usize> {
     let parent_path = rows.get(selected)?.parent_path.as_deref()?;
     rows.iter().position(|row| row.entry.path == parent_path)
 }
 
-fn first_child_index(rows: &[DirectoryTreeRow], selected: usize) -> Option<usize> {
+fn first_child_index(rows: &[StateRow], selected: usize) -> Option<usize> {
     let path = rows.get(selected)?.entry.path.as_str();
     rows.iter()
         .position(|row| row.parent_path.as_deref() == Some(path))
 }
 
+fn right_action(
+    rows: &[StateRow],
+    selected: usize,
+    loading_paths: &HashSet<String>,
+) -> Option<RightAction> {
+    let row = rows.get(selected)?;
+    if !row.entry.navigable || loading_paths.contains(&row.entry.path) {
+        return None;
+    }
+    if row.expanded {
+        first_child_index(rows, selected).map(RightAction::Select)
+    } else {
+        Some(RightAction::Expand)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use file_peeker_client::{DirectoryEntry, DirectoryTreeRow, EntryKind};
+    use std::collections::HashSet;
 
-    use super::{OpenAction, first_child_index, open_action, parent_index};
+    use file_peeker_client::{DirectoryEntry, EntryKind, StateRow};
 
-    fn row(path: &str, parent_path: Option<&str>, navigable: bool) -> DirectoryTreeRow {
-        DirectoryTreeRow {
+    use super::{
+        OpenAction, RightAction, first_child_index, open_action, parent_index, right_action,
+    };
+
+    fn row(path: &str, parent_path: Option<&str>, navigable: bool) -> StateRow {
+        StateRow {
             entry: DirectoryEntry {
                 path: path.into(),
                 name: path.rsplit('/').next().unwrap_or(path).into(),
@@ -420,5 +467,43 @@ mod tests {
         assert_eq!(parent_index(&rows, 2), Some(0));
         assert_eq!(parent_index(&rows, 0), None);
         assert_eq!(first_child_index(&rows, 1), None);
+    }
+
+    #[test]
+    fn right_navigation_expands_closed_directories_then_selects_their_first_child() {
+        let mut rows = vec![
+            row("/root/a", None, true),
+            row("/root/a/one", Some("/root/a"), false),
+        ];
+        rows[0].expanded = false;
+
+        assert_eq!(
+            right_action(&rows[..1], 0, &HashSet::new()),
+            Some(RightAction::Expand)
+        );
+
+        rows[0].expanded = true;
+        assert_eq!(
+            right_action(&rows, 0, &HashSet::new()),
+            Some(RightAction::Select(1))
+        );
+    }
+
+    #[test]
+    fn right_navigation_ignores_files_empty_directories_and_loading_rows() {
+        let mut directory = row("/root/a", None, true);
+        directory.expanded = true;
+        assert_eq!(right_action(&[directory], 0, &HashSet::new()), None);
+
+        let file = row("/root/file", None, false);
+        assert_eq!(right_action(&[file], 0, &HashSet::new()), None);
+        assert_eq!(right_action(&[], 0, &HashSet::new()), None);
+
+        let mut loading = row("/root/loading", None, true);
+        loading.expanded = false;
+        assert_eq!(
+            right_action(&[loading], 0, &HashSet::from(["/root/loading".to_owned()])),
+            None
+        );
     }
 }

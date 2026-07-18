@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use file_peeker_client::{BrowserClient, ClientConfig, EntryKind, ServerTarget};
+use file_peeker_client::{Client, EntryKind, Session, SessionConfig, SessionTarget};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
@@ -20,13 +20,14 @@ async fn starts_and_stops_the_real_local_server() {
     let fixture = tempfile::tempdir().expect("fixture directory should be created");
     let wrapper = create_wrapper(&fixture, &real_server);
 
-    let client = BrowserClient::start(ClientConfig {
-        target: ServerTarget::Local {
-            server_executable_path: wrapper.to_string_lossy().into_owned(),
-        },
-    })
-    .await
-    .expect("client startup should complete");
+    let client = Client::new()
+        .connect(SessionConfig {
+            target: SessionTarget::Local {
+                server_executable_path: wrapper.to_string_lossy().into_owned(),
+            },
+        })
+        .await
+        .expect("client startup should complete");
 
     let browse_root = fixture.path().join("browse");
     fs::create_dir(&browse_root).expect("browse directory should be created");
@@ -110,37 +111,94 @@ async fn starts_and_stops_the_real_local_server() {
     );
 }
 
-async fn verify_shared_tree(client: &BrowserClient, browse_root: &Path) {
-    let root_rows = client
-        .load_tree(browse_root.to_string_lossy().into_owned())
-        .await
-        .expect("shared tree should load");
-    let docs_path = browse_root.join("docs").to_string_lossy().into_owned();
-    assert!(root_rows.iter().any(|row| row.entry.path == docs_path));
+#[tokio::test]
+#[ignore = "run through scripts/test-local-client-server.sh"]
+async fn separate_sessions_have_independent_lifecycles() {
+    let real_server = PathBuf::from(
+        std::env::var_os("FILE_PEEKER_TEST_SERVER")
+            .expect("FILE_PEEKER_TEST_SERVER must point to the built server executable"),
+    );
+    let first_fixture = tempfile::tempdir().expect("first fixture should be created");
+    let second_fixture = tempfile::tempdir().expect("second fixture should be created");
+    let first_wrapper = create_wrapper(&first_fixture, &real_server);
+    let second_wrapper = create_wrapper(&second_fixture, &real_server);
 
-    let expanded_rows = client
-        .expand_tree(docs_path.clone())
+    let client = Client::new();
+    let first = client
+        .connect(SessionConfig {
+            target: SessionTarget::Local {
+                server_executable_path: first_wrapper.to_string_lossy().into_owned(),
+            },
+        })
+        .await
+        .expect("first session should start");
+    let second = client
+        .connect(SessionConfig {
+            target: SessionTarget::Local {
+                server_executable_path: second_wrapper.to_string_lossy().into_owned(),
+            },
+        })
+        .await
+        .expect("second session should start");
+    let second_state = std::sync::Arc::clone(&second)
+        .open_state(second_fixture.path().to_string_lossy().into_owned())
+        .await
+        .expect("second session should open a state");
+
+    first.close().await.expect("first session should close");
+    assert!(second.current_root().await.is_ok());
+    assert_eq!(
+        second_state.snapshot().path,
+        second_fixture.path().to_string_lossy()
+    );
+    second.close().await.expect("second session should close");
+}
+
+async fn verify_shared_tree(client: &std::sync::Arc<Session>, browse_root: &Path) {
+    let state = std::sync::Arc::clone(client)
+        .open_state(browse_root.to_string_lossy().into_owned())
+        .await
+        .expect("browsing state should open");
+    let independent_state = std::sync::Arc::clone(client)
+        .open_state(browse_root.to_string_lossy().into_owned())
+        .await
+        .expect("an independent browsing state should open");
+    let root_snapshot = state.snapshot();
+    let docs_path = browse_root.join("docs").to_string_lossy().into_owned();
+    assert!(
+        root_snapshot
+            .rows
+            .iter()
+            .any(|row| row.entry.path == docs_path)
+    );
+
+    let expanded_snapshot = state
+        .expand(docs_path.clone())
         .await
         .expect("nested directory should expand");
-    assert!(expanded_rows.iter().any(|row| {
+    assert!(expanded_snapshot.rows.iter().any(|row| {
         row.parent_path.as_deref() == Some(docs_path.as_str()) && row.entry.name == "first.txt"
     }));
-    let collapsed_rows = client
-        .collapse_tree(docs_path.clone())
+    assert_eq!(independent_state.snapshot().rows, root_snapshot.rows);
+
+    let collapsed_snapshot = state
+        .collapse(docs_path.clone())
         .expect("nested directory should collapse");
     assert!(
-        collapsed_rows
+        collapsed_snapshot
+            .rows
             .iter()
             .all(|row| row.parent_path.as_deref() != Some(docs_path.as_str()))
     );
 
     fs::write(browse_root.join("docs/added-later.txt"), "later")
         .expect("new nested fixture file should be written");
-    let reexpanded_rows = client
-        .expand_tree(docs_path.clone())
+    let reexpanded_snapshot = state
+        .expand(docs_path.clone())
         .await
         .expect("nested directory should freshly re-expand");
-    let nested_names: std::collections::HashSet<&str> = reexpanded_rows
+    let nested_names: std::collections::HashSet<&str> = reexpanded_snapshot
+        .rows
         .iter()
         .filter(|row| row.parent_path.as_deref() == Some(docs_path.as_str()))
         .map(|row| row.entry.name.as_str())
@@ -149,7 +207,7 @@ async fn verify_shared_tree(client: &BrowserClient, browse_root: &Path) {
         nested_names,
         std::collections::HashSet::from(["first.txt", "added-later.txt"])
     );
-    assert_eq!(client.tree_rows(), reexpanded_rows);
+    assert_eq!(state.snapshot(), reexpanded_snapshot);
 }
 
 fn create_wrapper(fixture: &TempDir, real_server: &Path) -> PathBuf {

@@ -4,18 +4,18 @@ extension DirectoryEntry: Identifiable {
     public var id: String { path }
 }
 
-extension DirectoryTreeRow: Identifiable {
+extension StateRow: Identifiable {
     public var id: String { entry.path }
 }
 
 struct ContentView: View {
     @StateObject private var model = BrowserModel()
-    @State private var selection: String?
-    @State private var viewStyle = ViewStyle.list
-    @State private var sortOrder = SortOrder.name
-    @State private var searchText = ""
-    @State private var isMorePresented = false
-    @State private var isConnectToServerPresented = false
+    @SwiftUI.State private var selection: String?
+    @SwiftUI.State private var viewStyle = ViewStyle.list
+    @SwiftUI.State private var sortOrder = SortOrder.name
+    @SwiftUI.State private var searchText = ""
+    @SwiftUI.State private var isMorePresented = false
+    @SwiftUI.State private var isConnectToServerPresented = false
 
     var body: some View {
         NavigationSplitView {
@@ -141,10 +141,10 @@ struct ContentView: View {
 private struct ConnectToServerView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: BrowserModel
-    @State private var destination = ""
-    @State private var errorMessage: String?
-    @State private var isConnecting = false
-    @State private var connectionTask: Task<Void, Never>?
+    @SwiftUI.State private var destination = ""
+    @SwiftUI.State private var errorMessage: String?
+    @SwiftUI.State private var isConnecting = false
+    @SwiftUI.State private var connectionTask: Task<Void, Never>?
     @FocusState private var isDestinationFocused: Bool
 
     var body: some View {
@@ -305,13 +305,13 @@ private struct FinderContent: View {
                             .help(errorMessage)
                     }
                 }
-                .frame(height: 10)
+                .frame(height: 12)
             }
 
             TableColumn("Kind") { row in
                 Text(kindName(for: row.entry))
                     .foregroundStyle(.secondary)
-                    .frame(height: 10)
+                    .frame(height: 12)
             }
             .width(min: 100, ideal: 150)
         }
@@ -362,17 +362,17 @@ private struct FinderContent: View {
         model.entries.sorted(by: entryComesBefore)
     }
 
-    private var visibleTreeRows: [DirectoryTreeRow] {
+    private var visibleTreeRows: [StateRow] {
         let rowsByParent = Dictionary(grouping: model.treeRows, by: \.parentPath)
-        var result: [DirectoryTreeRow] = []
+        var result: [StateRow] = []
         appendRows(parentPath: nil, from: rowsByParent, to: &result)
         return result
     }
 
     private func appendRows(
         parentPath: String?,
-        from rowsByParent: [String?: [DirectoryTreeRow]],
-        to result: inout [DirectoryTreeRow]
+        from rowsByParent: [String?: [StateRow]],
+        to result: inout [StateRow]
     ) {
         let rows = (rowsByParent[parentPath] ?? []).sorted {
             entryComesBefore($0.entry, $1.entry)

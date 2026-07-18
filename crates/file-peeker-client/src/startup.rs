@@ -24,7 +24,7 @@ use tokio::{
 };
 
 use crate::install::{RemoteInstallConfig, RemoteInstallPolicy, install_remote_server};
-use crate::{ClientConfig, ClientError, ServerTarget};
+use crate::{FilePeekerError, SessionConfig, SessionTarget};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -53,7 +53,7 @@ impl LifecycleHandle {
         let _ = self.shutdown.send(());
     }
 
-    pub(super) async fn close(&self) -> Result<(), ClientError> {
+    pub(super) async fn close(&self) -> Result<(), FilePeekerError> {
         if self.is_closed() {
             return Ok(());
         }
@@ -64,7 +64,7 @@ impl LifecycleHandle {
         }
         timeout(SHUTDOWN_TIMEOUT + Duration::from_secs(1), notified)
             .await
-            .map_err(|_| ClientError::ConnectionClosed {
+            .map_err(|_| FilePeekerError::ConnectionClosed {
                 message: "timed out waiting for server shutdown".into(),
             })
     }
@@ -78,16 +78,16 @@ impl LifecycleHandle {
     }
 }
 
-pub(super) async fn start(config: ClientConfig) -> Result<LifecycleHandle, ClientError> {
+pub(super) async fn start(config: SessionConfig) -> Result<LifecycleHandle, FilePeekerError> {
     match config.target {
-        ServerTarget::Local {
+        SessionTarget::Local {
             server_executable_path,
         } => start_local(server_executable_path).await,
-        ServerTarget::Ssh { destination } => start_remote(destination).await,
+        SessionTarget::Ssh { destination } => start_remote(destination).await,
     }
 }
 
-async fn start_local(server_executable_path: String) -> Result<LifecycleHandle, ClientError> {
+async fn start_local(server_executable_path: String) -> Result<LifecycleHandle, FilePeekerError> {
     let executable = validate_local_executable(&server_executable_path)?;
     let endpoint = create_endpoint()?;
     let socket_path = endpoint.path().join("server.sock");
@@ -103,13 +103,15 @@ async fn start_local(server_executable_path: String) -> Result<LifecycleHandle, 
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = command.spawn().map_err(|error| ClientError::ServerStart {
-        message: format!("cannot launch `{}`: {error}", executable.display()),
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| FilePeekerError::ServerStart {
+            message: format!("cannot launch `{}`: {error}", executable.display()),
+        })?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| ClientError::ServerStart {
+        .ok_or_else(|| FilePeekerError::ServerStart {
             message: "server stderr was not available".into(),
         })?;
     let stderr_task = tokio::spawn(read_bounded(stderr, STDERR_LIMIT));
@@ -150,14 +152,14 @@ async fn start_local(server_executable_path: String) -> Result<LifecycleHandle, 
     })
 }
 
-pub(super) async fn start_remote(destination: String) -> Result<LifecycleHandle, ClientError> {
+pub(super) async fn start_remote(destination: String) -> Result<LifecycleHandle, FilePeekerError> {
     validate_destination(&destination)?;
     install_remote_server(&RemoteInstallConfig::for_current_build(
         destination.clone(),
         RemoteInstallPolicy::ReuseExisting,
     ))
     .await
-    .map_err(|error| ClientError::ServerStart {
+    .map_err(|error| FilePeekerError::ServerStart {
         message: error.to_string(),
     })?;
 
@@ -168,7 +170,7 @@ pub(super) async fn start_remote(destination: String) -> Result<LifecycleHandle,
         .path()
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| ClientError::ServerStart {
+        .ok_or_else(|| FilePeekerError::ServerStart {
             message: "generated endpoint name is not valid UTF-8".into(),
         })?;
     let remote_directory = format!("/tmp/{token}-remote");
@@ -198,9 +200,9 @@ pub(super) async fn start_remote(destination: String) -> Result<LifecycleHandle,
     start_child(command, endpoint, socket_path, "SSH remote server").await
 }
 
-fn validate_destination(destination: &str) -> Result<(), ClientError> {
+fn validate_destination(destination: &str) -> Result<(), FilePeekerError> {
     if destination.is_empty() || destination.starts_with('-') {
-        return Err(ClientError::ServerStart {
+        return Err(FilePeekerError::ServerStart {
             message: "SSH destination is required and must not begin with `-`".into(),
         });
     }
@@ -216,15 +218,17 @@ async fn start_child(
     endpoint: TempDir,
     socket_path: PathBuf,
     description: &str,
-) -> Result<LifecycleHandle, ClientError> {
-    let mut child = command.spawn().map_err(|error| ClientError::ServerStart {
-        message: format!("cannot launch {description}: {error}"),
-    })?;
+) -> Result<LifecycleHandle, FilePeekerError> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| FilePeekerError::ServerStart {
+            message: format!("cannot launch {description}: {error}"),
+        })?;
     let child_stdin = child.stdin.take();
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| ClientError::ServerStart {
+        .ok_or_else(|| FilePeekerError::ServerStart {
             message: format!("{description} stderr was not available"),
         })?;
     let stderr_task = tokio::spawn(read_bounded(stderr, STDERR_LIMIT));
@@ -236,7 +240,7 @@ async fn start_child(
         };
         match complete_handshake(&mut child, &mut stream, deadline).await {
             Ok(()) => break stream,
-            Err(ClientError::ConnectionClosed { .. }) if Instant::now() < deadline => {
+            Err(FilePeekerError::ConnectionClosed { .. }) if Instant::now() < deadline => {
                 sleep(CONNECT_RETRY_DELAY).await;
             }
             Err(error) => return Err(cleanup_startup_failure(child, stderr_task, error).await),
@@ -265,39 +269,39 @@ async fn start_child(
     })
 }
 
-fn validate_local_executable(server_executable_path: &str) -> Result<PathBuf, ClientError> {
+fn validate_local_executable(server_executable_path: &str) -> Result<PathBuf, FilePeekerError> {
     if server_executable_path.is_empty() {
-        return Err(ClientError::ServerStart {
+        return Err(FilePeekerError::ServerStart {
             message: "server executable path is required".into(),
         });
     }
     Ok(PathBuf::from(server_executable_path))
 }
 
-fn create_endpoint() -> Result<TempDir, ClientError> {
+fn create_endpoint() -> Result<TempDir, FilePeekerError> {
     let endpoint = tempfile::Builder::new()
         .prefix("fp-")
         .tempdir_in("/tmp")
-        .map_err(|error| ClientError::ServerStart {
+        .map_err(|error| FilePeekerError::ServerStart {
             message: format!("cannot create private server directory: {error}"),
         })?;
     let mut permissions = std::fs::metadata(endpoint.path())
-        .map_err(|error| ClientError::ServerStart {
+        .map_err(|error| FilePeekerError::ServerStart {
             message: format!("cannot inspect private server directory: {error}"),
         })?
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(endpoint.path(), permissions).map_err(|error| {
-        ClientError::ServerStart {
+        FilePeekerError::ServerStart {
             message: format!("cannot secure private server directory: {error}"),
         }
     })?;
     Ok(endpoint)
 }
 
-fn validate_socket_length(socket_path: &Path) -> Result<(), ClientError> {
+fn validate_socket_length(socket_path: &Path) -> Result<(), FilePeekerError> {
     if socket_path.as_os_str().as_bytes().len() > MAX_SOCKET_PATH_BYTES {
-        return Err(ClientError::ServerStart {
+        return Err(FilePeekerError::ServerStart {
             message: format!("generated server socket path exceeds {MAX_SOCKET_PATH_BYTES} bytes"),
         });
     }
@@ -308,15 +312,18 @@ async fn connect_control(
     child: &mut Child,
     socket_path: &Path,
     deadline: Instant,
-) -> Result<UnixStream, ClientError> {
+) -> Result<UnixStream, FilePeekerError> {
     loop {
-        if let Some(status) = child.try_wait().map_err(|error| ClientError::ServerStart {
-            message: format!("cannot inspect server process: {error}"),
-        })? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| FilePeekerError::ServerStart {
+                message: format!("cannot inspect server process: {error}"),
+            })?
+        {
             return Err(server_exited_error(status, None));
         }
         if Instant::now() >= deadline {
-            return Err(ClientError::ServerStart {
+            return Err(FilePeekerError::ServerStart {
                 message: format!(
                     "timed out after {} ms waiting for the server socket",
                     STARTUP_TIMEOUT.as_millis()
@@ -335,7 +342,7 @@ async fn connect_control(
                 sleep(CONNECT_RETRY_DELAY).await;
             }
             Err(error) => {
-                return Err(ClientError::ServerStart {
+                return Err(FilePeekerError::ServerStart {
                     message: format!("cannot connect to server socket: {error}"),
                 });
             }
@@ -347,13 +354,13 @@ async fn complete_handshake(
     child: &mut Child,
     stream: &mut UnixStream,
     deadline: Instant,
-) -> Result<(), ClientError> {
+) -> Result<(), FilePeekerError> {
     let handshake = handshake_control(stream);
     tokio::pin!(handshake);
 
     tokio::select! {
         result = timeout_at(deadline, &mut handshake) => {
-            result.map_err(|_| ClientError::ServerStart {
+            result.map_err(|_| FilePeekerError::ServerStart {
                 message: format!(
                     "timed out after {} ms during the control handshake",
                     STARTUP_TIMEOUT.as_millis()
@@ -361,7 +368,7 @@ async fn complete_handshake(
             })?
         }
         status = child.wait() => {
-            let status = status.map_err(|error| ClientError::ServerStart {
+            let status = status.map_err(|error| FilePeekerError::ServerStart {
                 message: format!("cannot wait for server process: {error}"),
             })?;
             Err(server_exited_error(status, None))
@@ -369,72 +376,72 @@ async fn complete_handshake(
     }
 }
 
-async fn handshake_control(stream: &mut UnixStream) -> Result<(), ClientError> {
+async fn handshake_control(stream: &mut UnixStream) -> Result<(), FilePeekerError> {
     let hello = ClientMessage::Hello {
         version: PROTOCOL_VERSION,
         role: ConnectionRole::Control,
     };
-    let mut bytes = serde_json::to_vec(&hello).map_err(|error| ClientError::Protocol {
+    let mut bytes = serde_json::to_vec(&hello).map_err(|error| FilePeekerError::Protocol {
         message: format!("cannot encode control hello: {error}"),
     })?;
     bytes.push(b'\n');
     stream
         .write_all(&bytes)
         .await
-        .map_err(|error| ClientError::ConnectionClosed {
+        .map_err(|error| FilePeekerError::ConnectionClosed {
             message: format!("cannot send control hello: {error}"),
         })?;
     stream
         .flush()
         .await
-        .map_err(|error| ClientError::ConnectionClosed {
+        .map_err(|error| FilePeekerError::ConnectionClosed {
             message: format!("cannot flush control hello: {error}"),
         })?;
 
     let response = read_server_message(stream).await?;
     match response {
         ServerMessage::HelloOk { version } if version == PROTOCOL_VERSION => Ok(()),
-        ServerMessage::HelloOk { version } => Err(ClientError::Protocol {
+        ServerMessage::HelloOk { version } => Err(FilePeekerError::Protocol {
             message: format!("server accepted unexpected protocol version {version}"),
         }),
-        ServerMessage::Error { code, message } => Err(ClientError::Protocol {
+        ServerMessage::Error { code, message } => Err(FilePeekerError::Protocol {
             message: format!("server rejected control handshake ({code:?}): {message}"),
         }),
-        response => Err(ClientError::Protocol {
+        response => Err(FilePeekerError::Protocol {
             message: format!("unexpected control handshake response: {response:?}"),
         }),
     }
 }
 
-async fn read_server_message(stream: &mut UnixStream) -> Result<ServerMessage, ClientError> {
+async fn read_server_message(stream: &mut UnixStream) -> Result<ServerMessage, FilePeekerError> {
     let reader = BufReader::new(stream);
     let mut bytes = Vec::new();
     let count = reader
         .take((MAX_MESSAGE_BYTES + 2) as u64)
         .read_until(b'\n', &mut bytes)
         .await
-        .map_err(|error| ClientError::ConnectionClosed {
+        .map_err(|error| FilePeekerError::ConnectionClosed {
             message: format!("cannot read control handshake: {error}"),
         })?;
 
     if count == 0 {
-        return Err(ClientError::ConnectionClosed {
+        return Err(FilePeekerError::ConnectionClosed {
             message: "server closed during the control handshake".into(),
         });
     }
     if bytes.last() != Some(&b'\n') {
-        return Err(ClientError::Protocol {
+        return Err(FilePeekerError::Protocol {
             message: "server response is not newline terminated".into(),
         });
     }
     bytes.pop();
     if bytes.len() > MAX_MESSAGE_BYTES {
-        return Err(ClientError::Protocol {
+        return Err(FilePeekerError::Protocol {
             message: "server response exceeds the size limit".into(),
         });
     }
 
-    serde_json::from_slice(&bytes).map_err(|error| ClientError::Protocol {
+    serde_json::from_slice(&bytes).map_err(|error| FilePeekerError::Protocol {
         message: format!("server returned invalid JSON: {error}"),
     })
 }
@@ -442,8 +449,8 @@ async fn read_server_message(stream: &mut UnixStream) -> Result<ServerMessage, C
 async fn cleanup_startup_failure(
     mut child: Child,
     stderr_task: JoinHandle<Result<BoundedOutput, std::io::Error>>,
-    error: ClientError,
-) -> ClientError {
+    error: FilePeekerError,
+) -> FilePeekerError {
     let _ = child.kill().await;
     let _ = child.wait().await;
     let stderr = join_stderr(stderr_task).await;
@@ -520,7 +527,7 @@ async fn join_stderr(
     task.await.ok().and_then(Result::ok)
 }
 
-fn add_stderr_context(error: ClientError, stderr: Option<&BoundedOutput>) -> ClientError {
+fn add_stderr_context(error: FilePeekerError, stderr: Option<&BoundedOutput>) -> FilePeekerError {
     let Some(stderr) = stderr.filter(|output| !output.bytes.is_empty()) else {
         return error;
     };
@@ -531,21 +538,21 @@ fn add_stderr_context(error: ClientError, stderr: Option<&BoundedOutput>) -> Cli
     );
 
     match error {
-        ClientError::ServerStart { mut message } => {
+        FilePeekerError::ServerStart { mut message } => {
             message.push_str(&suffix);
-            ClientError::ServerStart { message }
+            FilePeekerError::ServerStart { message }
         }
-        ClientError::ServerExited { mut message } => {
+        FilePeekerError::ServerExited { mut message } => {
             message.push_str(&suffix);
-            ClientError::ServerExited { message }
+            FilePeekerError::ServerExited { message }
         }
         other => other,
     }
 }
 
-fn server_exited_error(status: ExitStatus, stderr: Option<&BoundedOutput>) -> ClientError {
+fn server_exited_error(status: ExitStatus, stderr: Option<&BoundedOutput>) -> FilePeekerError {
     add_stderr_context(
-        ClientError::ServerExited {
+        FilePeekerError::ServerExited {
             message: format!("server exited with {status}"),
         },
         stderr,

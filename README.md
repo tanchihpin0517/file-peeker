@@ -5,8 +5,9 @@ filesystem logic can run locally at first and on another machine in the future.
 
 This repository contains a minimal functional local browser and an SSH client
 diagnostic. The shared client starts and supervises a dedicated server over a
-private Unix socket, maintains the visible directory tree, and is used by both
-Ratatui and SwiftUI frontends.
+private Unix socket. Its `Session` type owns a connection lifecycle, while
+independent `State` objects maintain visible directory trees for Ratatui and
+SwiftUI frontends.
 
 ## Design
 
@@ -33,10 +34,15 @@ The client produces filesystem results asynchronously but does not update or
 render either UI. Ratatui forwards results into its application event loop;
 SwiftUI applies them to observable state on the main actor.
 
-Each `BrowserClient` owns one dedicated server process. A long-lived control
+Each `Session` owns one dedicated server process. A long-lived control
 connection defines their shared lifetime, while each filesystem operation uses
 its own short-lived connection. This permits independent operations without
 request IDs or response routing on one socket.
+
+A session can create multiple independent browsing states. Each state has a
+fixed root path and retains its session; navigation fully loads a replacement
+state before a UI swaps to it. Different panes or tabs can therefore share a
+session or own separate sessions connected to different servers.
 
 ## First version
 
@@ -122,6 +128,16 @@ make client-integration-test
                     # Compile, link, and test generated Swift types and an async call
 make xcode-build    # Generate and compile the SwiftUI project
 make verify         # Run the complete verification sequence
+scripts/relaunch-app.sh
+                    # Close, rebuild, and reopen the SwiftUI app
+```
+
+Run the Rust programs directly from any working directory:
+
+```text
+scripts/run-tui.sh [PATH]
+scripts/run-server.sh serve --socket SOCKET_PATH
+scripts/run-client-cli.sh COMMAND [ARGS]
 ```
 
 To exercise unpublished remote server installation through Cargo, use an SSH

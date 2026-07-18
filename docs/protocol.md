@@ -10,7 +10,7 @@ future native Swift UI use the same client library and its UI-independent
 interface. Swift reaches that interface through UniFFI-generated bindings;
 UniFFI is not part of the server wire protocol.
 
-Each `BrowserClient` owns one server. They use one long-lived control connection
+Each `Session` owns one server. They use one long-lived control connection
 and one connection per filesystem operation. Each operation connection carries
 exactly one request, so messages do not need request IDs or multiplexing.
 
@@ -61,7 +61,7 @@ Or rejects it and closes the connection:
 No other message may be sent before `hello_ok`.
 
 Exactly one control connection exists. It stays open for the lifetime of
-`BrowserClient` and carries no filesystem operations in v1. If it closes, the
+`Session` and carries no filesystem operations in v1. If it closes, the
 server closes all operation connections and exits.
 
 Each operation connection sends exactly one `list`, `current_root`, or
@@ -186,8 +186,8 @@ errors close the connection because continuing could misread the stream.
 - An operation `error` is returned to the caller.
 - Losing an operation connection fails only that operation.
 - Closing an operation connection cancels that operation.
-- Losing the control connection or server process invalidates the client and all
-  active operations.
+- Losing the control connection or server process invalidates the session, all
+  states backed by it, and all active operations.
 
 Closing the control connection is the shutdown mechanism. There is no separate
 shutdown request.

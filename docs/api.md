@@ -15,7 +15,7 @@ flowchart LR
     SwiftUI[SwiftUI app]
     Model[BrowserModel]
     Bindings[UniFFI Swift bindings]
-    Client[BrowserClient\nRust client library]
+    Client[Session\nRust client library]
     Control[Control socket]
     Operation[Operation socket]
     Server[file-peeker-server]
@@ -37,26 +37,50 @@ flowchart LR
 | Component | Responsibility | Communicates with |
 | --- | --- | --- |
 | UI | Presents entries, accepts navigation, and displays loading or error state | Public client API only |
-| Client | Starts and owns a server, maintains the active visible directory tree, normalizes paths, performs handshakes, maps protocol data to UI-safe types, and supervises shutdown | UI through Rust/UniFFI; server through private sockets |
+| Session | Owns one connection and server lifecycle, normalizes paths, performs handshakes, maps protocol data to UI-safe types, and supervises shutdown | UI and `State` objects through Rust/UniFFI; server through private sockets |
+| State | Owns the browsing status for one fixed root path, including its expandable visible tree | UI and its owning `Session` |
 | Server | Reads the filesystem and streams results | Client through the private wire protocol; local filesystem through OS APIs |
 
 The UI never opens a socket or encodes protocol messages. The server never
-contains rendering or navigation state. One `BrowserClient` owns one dedicated
-server lifecycle.
+contains rendering or navigation state. One `Session` owns one dedicated
+server lifecycle and may support multiple independent `State` objects.
 
 ## Public client API
 
 The `file-peeker-client` crate is the supported API for a UI. The same objects,
 records, enums, errors, and asynchronous methods are exported through UniFFI.
 
+API outline:
+
+- `Client`
+  - `new` creates the shared API entry point.
+  - `connect` creates an independent local or SSH `Session`.
+- `Session`
+  - `target` and `current_root` describe the connection.
+  - `start_listing` creates a pull-based `DirectoryListing`.
+  - `open_state` creates an independent browsing `State`.
+  - `open` and `metadata` operate on paths.
+  - `close` shuts down the owned connection lifecycle.
+- `State`
+  - `snapshot` returns the current flattened rows.
+  - `expand` freshly loads a visible directory.
+  - `collapse` discards a directory's visible descendants.
+- `DirectoryListing`
+  - `next_entry` returns the next streamed directory entry.
+- Shared values
+  - `SessionConfig` and `SessionTarget` configure connections.
+  - `DirectoryEntry`, `FileMetadata`, `StateRow`, and `StateSnapshot` carry results.
+  - `EntryKind` identifies filesystem entry types.
+  - `FilePeekerError` reports typed failures across Rust and UniFFI.
+
 ### Configuration
 
 ```rust
-pub struct ClientConfig {
-    pub target: ServerTarget,
+pub struct SessionConfig {
+    pub target: SessionTarget,
 }
 
-pub enum ServerTarget {
+pub enum SessionTarget {
     Local { server_executable_path: String },
     Ssh { destination: String },
 }
@@ -68,74 +92,98 @@ pub enum ServerTarget {
   when necessary, and forwards a local Unix socket to the remote server.
 - For both targets, the returned client has the same API and protocol behavior.
 
-### BrowserClient
+### Client and Session
 
 ```rust
-impl BrowserClient {
-    pub async fn start(
-        config: ClientConfig,
-    ) -> Result<Arc<BrowserClient>, ClientError>;
+impl Client {
+    pub fn new() -> Arc<Client>;
 
+    pub async fn connect(
+        &self,
+        config: SessionConfig,
+    ) -> Result<Arc<Session>, FilePeekerError>;
+}
+
+impl Session {
     pub async fn start_listing(
         &self,
         path: String,
-    ) -> Result<Arc<DirectoryListing>, ClientError>;
+    ) -> Result<Arc<DirectoryListing>, FilePeekerError>;
 
-    pub async fn load_tree(
+    pub async fn open_state(
         &self,
         path: String,
-    ) -> Result<Vec<DirectoryTreeRow>, ClientError>;
+    ) -> Result<Arc<State>, FilePeekerError>;
 
-    pub async fn expand_tree(
-        &self,
-        path: String,
-    ) -> Result<Vec<DirectoryTreeRow>, ClientError>;
+    pub fn target(&self) -> SessionTarget;
 
-    pub fn collapse_tree(
-        &self,
-        path: String,
-    ) -> Result<Vec<DirectoryTreeRow>, ClientError>;
+    pub async fn current_root(&self) -> Result<String, FilePeekerError>;
 
-    pub fn tree_rows(&self) -> Vec<DirectoryTreeRow>;
+    pub async fn close(&self) -> Result<(), FilePeekerError>;
 
-    pub async fn current_root(&self) -> Result<String, ClientError>;
-
-    pub async fn close(&self) -> Result<(), ClientError>;
-
-    pub async fn open(&self, path: String) -> Result<(), ClientError>;
+    pub async fn open(&self, path: String) -> Result<(), FilePeekerError>;
 
     pub async fn metadata(
         &self,
         path: String,
-    ) -> Result<FileMetadata, ClientError>;
+    ) -> Result<FileMetadata, FilePeekerError>;
 }
 ```
 
 | Method | Behavior | Status |
 | --- | --- | --- |
-| `start` | Starts a local server or SSH transport, opens the control connection, negotiates protocol v1, and returns an owning client | Implemented |
+| `Client.connect` | Starts a local server or SSH transport, opens the control connection, negotiates protocol v1, and returns an owning session | Implemented |
 | `start_listing` | Normalizes the supplied path, opens one operation connection, and returns a pull-based listing | Implemented |
-| `load_tree` | Replaces the active tree root, collects its direct entries, and returns the complete visible snapshot | Implemented |
-| `expand_tree` | Freshly lists one visible directory, inserts its children, and returns the complete visible snapshot | Implemented |
-| `collapse_tree` | Removes all recursive descendants of one visible directory and returns the complete visible snapshot | Implemented |
-| `tree_rows` | Returns the current complete visible tree snapshot | Implemented |
+| `open_state` | Fully loads one absolute root and returns a new independent browsing state | Implemented |
+| `target` | Returns the immutable local or SSH target used to create the session | Implemented |
 | `current_root` | Returns the server process's absolute current working directory | Implemented |
 | `close` | Closes control, waits for the owned server/SSH process, and cleans up private endpoints | Implemented; idempotent |
 | `open` | Opens a path with the macOS default application for local clients; succeeds without action for SSH clients | Implemented |
-| `metadata` | Intended to return metadata for one path | Reserved; currently returns `ClientError::NotImplemented` without contacting the server |
+| `metadata` | Intended to return metadata for one path | Reserved; currently returns `FilePeekerError::NotImplemented` without contacting the server |
 
 `start_listing` accepts absolute or relative UTF-8 paths. Relative paths are
 resolved against the client process's current working directory. An empty or
 non-UTF-8 path is rejected. The normalized absolute path is sent to the server.
 
-Dropping the last `BrowserClient` also initiates shutdown. Calls that begin
-after the lifecycle has closed return `ConnectionClosed`.
+Dropping the last reference to a `Session`, including references held by its
+states, initiates shutdown. Calls that begin after the lifecycle has closed
+return `ConnectionClosed`. Explicitly closing a session invalidates all of its
+states.
 
-Each `BrowserClient` owns one active directory tree. `DirectoryTreeRow` carries
-the entry, parent path, depth, expansion state, and optional listing error.
-Collapsing discards descendants, so every later expansion performs a fresh
-listing. Root generations and per-directory revisions prevent stale operations
-from modifying a newer root or repopulating a collapsed directory.
+### State
+
+```rust
+impl State {
+    pub fn snapshot(&self) -> StateSnapshot;
+
+    pub async fn expand(
+        &self,
+        path: String,
+    ) -> Result<StateSnapshot, FilePeekerError>;
+
+    pub fn collapse(
+        &self,
+        path: String,
+    ) -> Result<StateSnapshot, FilePeekerError>;
+}
+
+pub struct StateSnapshot {
+    pub path: String,
+    pub rows: Vec<StateRow>,
+}
+```
+
+A `State` has one fixed, normalized root path and owns the browsing status for
+that root. `StateRow` carries the entry, parent path, depth, expansion state,
+and optional listing error. Collapsing discards descendants, so every later
+expansion performs a fresh listing. Per-directory revisions prevent stale
+operations from repopulating a collapsed branch.
+
+A session can create any number of states. Expanding one does not change the
+others. Directory navigation creates and fully loads a new state; the UI can
+keep displaying its old state until `open_state` succeeds and then swap the
+reference atomically. A state retains its session, so it remains usable even if
+the pane that originally created the session releases its own reference.
 
 ### DirectoryListing
 
@@ -143,7 +191,7 @@ from modifying a newer root or repopulating a collapsed directory.
 impl DirectoryListing {
     pub async fn next_entry(
         &self,
-    ) -> Result<Option<DirectoryEntry>, ClientError>;
+    ) -> Result<Option<DirectoryEntry>, FilePeekerError>;
 }
 ```
 
@@ -196,7 +244,7 @@ implemented public operation currently returns it.
 ### Errors
 
 ```rust
-pub enum ClientError {
+pub enum FilePeekerError {
     NotImplemented { operation: String },
     InvalidPath { message: String },
     ServerStart { message: String },
@@ -227,20 +275,22 @@ UniFFI exposes the same API using Swift naming conventions. The SwiftUI app
 currently uses:
 
 ```swift
-let client = try await BrowserClient.start(
-    config: ClientConfig(
+let client = Client()
+let session = try await client.connect(
+    config: SessionConfig(
         target: .local(serverExecutablePath: serverURL.path)
     )
 )
 
-let rows = try await client.loadTree(path: path)
-let expandedRows = try await client.expandTree(path: "/tmp/example")
-let collapsedRows = try client.collapseTree(path: "/tmp/example")
-let currentRows = client.treeRows()
+let state = try await session.openState(path: path)
+let initial = state.snapshot()
+let expanded = try await state.expand(path: "/tmp/example")
+let collapsed = try state.collapse(path: "/tmp/example")
 
-let root = try await client.currentRoot()
-try await client.open(path: "/tmp/example/report.txt")
-try await client.close()
+let root = try await session.currentRoot()
+let target = session.target()
+try await session.open(path: "/tmp/example/report.txt")
+try await session.close()
 ```
 
 The metadata call is exposed as `metadata(path:)`, subject to the same
@@ -256,17 +306,18 @@ library API of their own.
 `ContentView` owns a main-actor `BrowserModel`. When the view task starts:
 
 1. `BrowserModel.start()` locates the bundled `file-peeker-server` executable.
-2. It calls `BrowserClient.start` with a local target.
-3. It calls `loadTree` for the user's home directory and publishes the returned snapshot.
-4. Disclosure controls call `expandTree` or `collapseTree` and replace that snapshot.
+2. It calls `Client.connect` with a local target.
+3. It calls `openState` for the user's home directory and publishes its snapshot.
+4. Disclosure controls call `State.expand` or `State.collapse` and replace that snapshot.
 5. Double-clicking an entry or choosing `Open` from its right-click menu opens
    it: navigable entries start a new listing, while other entries call
-   `BrowserClient.open`.
+   `Session.open`.
 
 The model uses a generation counter and cancels the previous Swift task when a
-new directory is opened. Results from an older generation are ignored.
+new directory is opened. It leaves the old state visible until the new state is
+fully loaded, and ignores results from older generations.
 Tree insertion, recursive collapse, depths, errors, and stale-result protection
-are maintained by the client. The model only tracks presentation state such as
+are maintained by `State`. The model only tracks presentation state such as
 loading paths and renders recursively indented rows without changing
 `currentPath`. Collapsing removes descendants, so later expansion always reloads.
 `ContentView` observes the visible rows, loading paths, and root loading/error
@@ -275,14 +326,14 @@ state on the main actor.
 ### Ratatui
 
 The terminal UI locates a sibling `file-peeker-server`, starts a local
-`BrowserClient`, and spawns Tokio tasks for tree loads, expansion, and file
-opening. Those tasks forward complete client-maintained tree snapshots to the
+`Session`, and spawns Tokio tasks for state creation, expansion, and file
+opening. Those tasks forward complete state-maintained tree snapshots to the
 main loop, which owns only presentation state and rendering.
 
 The terminal UI accepts an optional starting path. Arrow keys or `j`/`k` move
 the selection, `h`/`l` select a visible parent/child, `o` toggles directory
 expansion, Enter navigates into directories or opens non-navigable entries with
-`BrowserClient.open`, and `q` or Escape exits. Its `--smoke [PATH]` mode
+`Session.open`, and `q` or Escape exits. Its `--smoke [PATH]` mode
 consumes one listing without interactive rendering and is intended for
 verification.
 
@@ -316,15 +367,17 @@ Multiple operation connections may run concurrently.
 ```mermaid
 sequenceDiagram
     participant UI
-    participant Client as BrowserClient
+    participant API as Client
+    participant Client as Session
     participant Server
     participant FS as Filesystem
 
-    UI->>Client: start(config)
+    UI->>API: connect(config)
+    API->>Client: create session
     Client->>Server: launch process / SSH transport
     Client->>Server: hello(version=1, role=control)
     Server-->>Client: hello_ok(version=1)
-    Client-->>UI: BrowserClient
+    Client-->>UI: Session
 
     UI->>Client: start_listing(path)
     Client->>Server: open operation socket
@@ -483,7 +536,7 @@ file-peeker-client open PATH
 - `install` overwrites and verifies the versioned remote server installation,
   then prints its remote executable path to stdout.
 - `open` starts the sibling local server, opens `PATH` with the macOS default
-  application through `BrowserClient.open`, and shuts the server down.
+  application through `Session.open`, and shuts the server down.
 - Progress and diagnostics are written to stderr.
 
 ### Terminal UI

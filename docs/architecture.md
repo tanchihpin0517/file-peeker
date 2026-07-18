@@ -19,7 +19,7 @@ flowchart LR
     Server --> FS[macOS filesystem]
 ```
 
-V1 is local, macOS-only, read-only, and one-to-one: each `BrowserClient` owns one
+V1 is local, macOS-only, read-only, and one-to-one: each `Session` owns one
 dedicated server process. Local launch, control and operation handshakes,
 directory listing, and drop-managed shutdown are implemented. Remote
 connections and metadata are future work.
@@ -40,7 +40,7 @@ The server is the only component that reads browser data from the filesystem. It
 
 It contains no terminal or navigation logic.
 
-The server is never shared by different `BrowserClient` instances. Because every
+The server is never shared by different `Session` instances. Because every
 connection to its private socket belongs to the one owning client, v1 does not
 use session IDs or session tokens.
 
@@ -49,7 +49,7 @@ use session IDs or session tokens.
 The shared Rust client library is the only interface between a UI and the server.
 It owns the dedicated local or SSH server lifecycle and:
 
-- Accepts one `ServerTarget` configuration for either a local executable or an
+- Accepts one `SessionTarget` configuration for either a local executable or an
   SSH destination.
 - Creates a private temporary Unix socket path.
 - Starts the server locally or provisions and starts it through SSH forwarding.
@@ -58,54 +58,75 @@ It owns the dedicated local or SSH server lifecycle and:
 - Converts paths to absolute UTF-8 paths before sending them.
 - Converts protocol messages into UI-independent asynchronous operations and
   data types.
-- Maintains the active flattened directory tree for every UI.
+- Creates independent browsing states with fixed roots for its UIs.
 - Closes the control connection and waits for the server when dropped.
 
-The logical UI-facing interface is:
+The logical UI-facing interface is defined centrally in `api.rs`:
 
 ```rust
-impl BrowserClient {
-    async fn start(config: ClientConfig)
-        -> Result<Arc<BrowserClient>, ClientError>;
+impl Client {
+    fn new() -> Arc<Client>;
+    async fn connect(&self, config: SessionConfig)
+        -> Result<Arc<Session>, FilePeekerError>;
+}
+
+impl Session {
     async fn start_listing(&self, path: String)
-        -> Result<Arc<DirectoryListing>, ClientError>;
-    async fn load_tree(&self, path: String)
-        -> Result<Vec<DirectoryTreeRow>, ClientError>;
-    async fn expand_tree(&self, path: String)
-        -> Result<Vec<DirectoryTreeRow>, ClientError>;
-    fn collapse_tree(&self, path: String)
-        -> Result<Vec<DirectoryTreeRow>, ClientError>;
-    fn tree_rows(&self) -> Vec<DirectoryTreeRow>;
+        -> Result<Arc<DirectoryListing>, FilePeekerError>;
+    async fn open_state(&self, path: String)
+        -> Result<Arc<State>, FilePeekerError>;
+    fn target(&self) -> SessionTarget;
     async fn metadata(&self, path: String)
-        -> Result<FileMetadata, ClientError>;
+        -> Result<FileMetadata, FilePeekerError>;
 }
 
-struct ClientConfig {
-    target: ServerTarget,
+impl State {
+    fn snapshot(&self) -> StateSnapshot;
+    async fn expand(&self, path: String)
+        -> Result<StateSnapshot, FilePeekerError>;
+    fn collapse(&self, path: String)
+        -> Result<StateSnapshot, FilePeekerError>;
 }
 
-enum ServerTarget {
+struct StateSnapshot {
+    path: String,
+    rows: Vec<StateRow>,
+}
+
+struct SessionConfig {
+    target: SessionTarget,
+}
+
+enum SessionTarget {
     Local { server_executable_path: String },
     Ssh { destination: String },
 }
 
 impl DirectoryListing {
     async fn next_entry(&self)
-        -> Result<Option<DirectoryEntry>, ClientError>;
+        -> Result<Option<DirectoryEntry>, FilePeekerError>;
 }
 ```
 
 These signatures define the API shared by the native Rust facade and UniFFI
-bindings. `start` launches and connects to the configured local or SSH server,
-listing streams direct children, tree operations return complete flattened
-visible snapshots, and metadata currently returns a typed `NotImplemented`
-error.
+bindings. `Client.connect` launches and connects to the configured local or SSH server,
+listing streams direct children, `open_state` returns a fully loaded browsing
+state, state operations return complete flattened visible snapshots, and
+metadata currently returns a typed `NotImplemented` error.
 
-Each `BrowserClient` owns one active visible directory tree. Loading a root
-replaces it; expanding freshly lists and inserts direct children; collapsing
-discards every recursive descendant. Generations and per-path revisions prevent
-late operations from changing a newer root or a collapsed branch. UIs own only
-presentation state and their latest snapshot.
+`Session` represents one connection target and lifecycle. It exposes that
+immutable target and can support multiple independent `State` objects. Each
+state has one fixed root: expanding freshly lists and inserts direct children,
+while collapsing discards every recursive descendant. Per-path revisions
+prevent late operations from repopulating a collapsed branch. Navigation never
+mutates a state's root; it opens a new state, and the UI swaps to it only after
+loading succeeds.
+
+Each state retains its session. Different panes may share one session through
+separate states or use different sessions for different servers. Releasing a
+pane's session reference does not close a connection still retained by a state
+or another pane. Dropping the last reference closes it; explicitly calling
+`close` invalidates every state backed by that session.
 
 `start_listing` begins the operation and returns a listing object.
 `next_entry` asynchronously waits for one result:
@@ -134,9 +155,9 @@ Objects exported through UniFFI must be safe for calls from different threads.
 The client therefore uses shared ownership and internal synchronization rather
 than exposing mutable references.
 
-Starting and closing the client are also part of this shared interface.
+Starting and closing the session are also part of this shared interface.
 Configuration supplies the server executable path. Startup uses bounded internal
-timeouts, and dropping the final client closes control and supervises server
+timeouts, and dropping the final session reference closes control and supervises server
 exit. Packaging and automatic server discovery remain deferred.
 
 ### Ratatui terminal UI
@@ -157,8 +178,9 @@ The Rust TUI uses Ratatui for rendering and terminal interaction. It passes
 - Remains responsive to terminal and quit events while an operation is active.
 - Allows selection movement and Enter to navigate into a directory or open a
   non-navigable entry with the system default application.
-- Allows `o` to expand or collapse a directory and `h`/`l` to select its visible
-  parent or first child without navigating.
+- Allows `o` to expand or collapse a directory, `h` to select its visible
+  parent, and `l` to expand a closed directory or select the first child of an
+  expanded directory without navigating to a new root.
 - Allows `q` or Escape to quit.
 - Displays errors returned by the client.
 
@@ -191,19 +213,19 @@ definition. The future Swift integration will include the UniFFI-generated
 Swift source, module map, and native library artifacts through settings defined
 by XcodeGen.
 
-## Directory tree and listing example
+## Browsing state and listing example
 
-Both UIs use the shared tree sequence:
+Both UIs use the shared state sequence:
 
 ```text
-load_tree(path)      -> visible rows
-expand_tree(path)    -> updated visible rows
-collapse_tree(path)  -> updated visible rows
-tree_rows()          -> current visible rows
+Session.open_state(path) -> State with fully loaded root
+State.snapshot()          -> current visible rows
+State.expand(path)        -> updated visible rows
+State.collapse(path)      -> updated visible rows
 ```
 
-Every load or expansion sends the private `list` protocol message and converts
-server responses into `DirectoryTreeRow` values. The lower-level
+Every state creation or expansion sends the private `list` protocol message and converts
+server responses into `StateRow` values. The lower-level
 `start_listing`/`next_entry` stream remains available for non-tree consumers.
 
 ### Inside the shared client
@@ -215,7 +237,7 @@ and per-operation tasks:
 Ratatui or SwiftUI
         │
         ▼
-BrowserClient.load_tree(path) / expand_tree(path)
+Session.open_state(path) / State.expand(path)
         │ open operation connection
         ▼
 Listing task ── list message ──> Dedicated server
@@ -225,13 +247,18 @@ Listing task ── list message ──> Dedicated server
 bounded listing queue
         │
         ▼
-DirectoryTree snapshot
+StateSnapshot
         │
         ▼
 Ratatui event or SwiftUI state update
 ```
 
-`BrowserClient` and `DirectoryListing` are shared, thread-safe objects. The
+The public `Client`, `Session`, `State`, and `DirectoryListing` objects are thin
+wrappers around crate-private implementations. The client core owns connection
+creation and is the extension point for future session management. All
+UI-facing objects, values, errors, and UniFFI exports are declared in `api.rs`,
+so Rust and Swift consume one allowlisted contract. The objects are shared and
+thread-safe. The
 control worker owns the control connection. Each operation object controls a
 dedicated operation connection through its task and handle, so UI threads never
 read from or write to sockets directly.
@@ -239,10 +266,15 @@ read from or write to sockets directly.
 The internal types are conceptually:
 
 ```rust
-struct BrowserClient {
+struct Session {
     socket_path: String,
     control: ControlConnection,
     process: ChildProcess, // the local server or SSH process
+    target: SessionTarget,
+}
+
+struct State {
+    session: Arc<Session>,
     tree: Mutex<DirectoryTree>,
 }
 
@@ -255,14 +287,14 @@ struct DirectoryListing {
 enum ListingItem {
     Entry(DirectoryEntry),
     Done,
-    Error(ClientError),
+    Error(FilePeekerError),
 }
 ```
 
 These types are illustrative. Channel, mutex, and runtime types remain internal
 and are not exported through UniFFI.
 
-`BrowserClient.start(config)` performs these steps:
+`Client.connect(config)` performs these steps:
 
 1. Validate the selected local or SSH target.
 2. For SSH, ensure the compatible remote server is installed.
@@ -271,20 +303,20 @@ and are not exported through UniFFI.
    remote server socket.
 5. Open a control connection and identify it during the version handshake.
 6. Keep that connection open for the lifetime of the client.
-7. Return a thread-safe `BrowserClient`.
+7. Return a thread-safe `Session`.
 
-`start_listing(path)`, `load_tree(path)`, and `expand_tree(path)` use the same
-operation path:
+`start_listing(path)`, `open_state(path)`, and `State.expand(path)` use the same
+listing operation path:
 
 1. Converts `path` to an absolute UTF-8 path.
-2. Rejects the call if the client or control connection is closed.
+2. Rejects the call if the session or control connection is closed.
 3. Creates a bounded queue for listing results.
 4. Opens a new connection to the dedicated server.
 5. Identifies it as an operation connection and completes its handshake.
 6. Sends one `list` request on that connection.
 7. Starts an operation task that owns the connection and result sender.
-8. Returns a `DirectoryListing`, or collects the results and applies them to
-   the active tree before returning its snapshot.
+8. Returns a `DirectoryListing`, or collects the results and applies them to a
+   new or existing state before returning it or its snapshot.
 
 `OperationHandle` lets `DirectoryListing` close its operation connection when
 the listing is abandoned; the socket itself remains owned by the operation
@@ -297,7 +329,7 @@ async fn run_listing(
     socket: &mut ServerConnection,
     path: String,
     results: ListingSender,
-) -> Result<(), ClientError> {
+) -> Result<(), FilePeekerError> {
     socket.send(ServerRequest::List { path }).await?;
 
     loop {
@@ -314,7 +346,7 @@ async fn run_listing(
                 return Ok(());
             }
             message => {
-                return Err(ClientError::UnexpectedMessage(message.kind()));
+                return Err(FilePeekerError::UnexpectedMessage(message.kind()));
             }
         }
     }
@@ -330,7 +362,7 @@ independently. The exact queue capacity is an implementation choice.
 contract:
 
 ```rust
-async fn next_entry(&self) -> Result<Option<DirectoryEntry>, ClientError> {
+async fn next_entry(&self) -> Result<Option<DirectoryEntry>, FilePeekerError> {
     if self.finished.load() {
         return Ok(None);
     }
@@ -347,7 +379,7 @@ async fn next_entry(&self) -> Result<Option<DirectoryEntry>, ClientError> {
         }
         None => {
             self.finished.store(true);
-            Err(ClientError::ConnectionClosed)
+            Err(FilePeekerError::ConnectionClosed)
         }
     }
 }
@@ -360,11 +392,12 @@ Repeated calls after successful completion return `None`.
 If an operation connection fails or receives an invalid message, only that
 operation fails unless the control connection or server process also fails. If a
 `DirectoryListing` is dropped before `Done` or `Error`, it closes its operation
-connection. The server stops that operation, while the `BrowserClient` and other
+connection. The server stops that operation, while the `Session` and other
 operations remain usable.
 
 If the control connection closes or the server exits, all operation connections
-fail and the client becomes invalid. Dropping `BrowserClient` closes the control
+fail and the session becomes invalid. Dropping the final `Session` or `State`
+reference closes the control
 connection; the server then closes active operation connections and exits.
 
 ### Ratatui
@@ -376,7 +409,7 @@ results to the main application event loop:
 enum AppEvent {
     DirectoryEntry(DirectoryEntry),
     ListingFinished,
-    ListingFailed(ClientError),
+    ListingFailed(FilePeekerError),
 }
 
 let listing = client.start_listing(path).await?;
@@ -415,26 +448,28 @@ The background task never calls Ratatui. It only sends application events.
 
 ### SwiftUI
 
-UniFFI generates Swift methods for the same client and shared tree rows. The
+UniFFI generates Swift methods for the same session, state, and shared tree rows. The
 SwiftUI model replaces its published snapshot on the main actor:
 
 ```swift
 @MainActor
 final class BrowserModel: ObservableObject {
-    @Published var treeRows: [DirectoryTreeRow] = []
+    @Published var snapshot: StateSnapshot?
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    private let client: BrowserClient
+    private let session: Session
+    private var state: State?
 
     func openDirectory(_ path: String) {
-        treeRows = []
         isLoading = true
         errorMessage = nil
 
         Task {
             do {
-                treeRows = try await client.loadTree(path: path)
+                let nextState = try await session.openState(path: path)
+                state = nextState
+                snapshot = nextState.snapshot()
                 isLoading = false
             } catch {
                 errorMessage = String(describing: error)
@@ -446,9 +481,13 @@ final class BrowserModel: ObservableObject {
 ```
 
 Because the model is isolated to `MainActor`, its state changes occur in the UI
-context and SwiftUI redraws affected views automatically. The client maintains
-tree structure but does not know about `ObservableObject`, selection, loading
+context and SwiftUI redraws affected views automatically. The old snapshot
+remains visible while the replacement state loads. `State` maintains tree
+structure but does not know about `ObservableObject`, selection, loading
 indicators, views, sorting, or rendering.
+
+The exported Rust object named `State` shares a name with SwiftUI's property
+wrapper. Views disambiguate the latter as `@SwiftUI.State`.
 
 The examples are illustrative. Exact runtime, channel, observation, and
 generated UniFFI syntax will be chosen during implementation.
@@ -464,11 +503,11 @@ sequenceDiagram
     participant FS as Filesystem
 
     User->>TUI: Start with optional path
-    TUI->>Client: start(config)
+    TUI->>Client: connect(config)
     Client->>Server: Launch with socket path
     Client->>Server: Open control connection
     Server-->>Client: Control connection accepted
-    TUI->>Client: load_tree(path)
+    TUI->>Client: open_state(path)
     Client->>Server: Open operation connection
     Server-->>Client: Operation connection accepted
     Client->>Server: list request on operation connection
@@ -478,10 +517,10 @@ sequenceDiagram
     end
     Server-->>Client: done or error
     Client->>Server: Close operation connection
-    Client-->>TUI: Visible tree rows
+    Client-->>TUI: Loaded State and snapshot
     TUI-->>User: Display entries
     User->>TUI: Quit
-    TUI->>Client: Drop client
+    TUI->>Client: Drop final Session/State references
     Client->>Server: Close control connection
     Server-->>Client: Close remaining operations
     Server-->>Client: Exit

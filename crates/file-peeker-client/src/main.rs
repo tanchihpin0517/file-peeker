@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use file_peeker_client::{BrowserClient, ClientConfig, ServerTarget};
+use file_peeker_client::{Client, SessionConfig, SessionTarget};
 
 #[allow(dead_code)]
 mod install;
@@ -55,18 +55,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ));
             verbose("connect: checking remote installation and installing only if needed");
             verbose("connect: opening SSH transport");
-            let client = BrowserClient::start(ClientConfig {
-                target: ServerTarget::Ssh { destination },
-            })
-            .await?;
+            let session = Client::new()
+                .connect(SessionConfig {
+                    target: SessionTarget::Ssh { destination },
+                })
+                .await?;
             verbose("connect: control handshake completed");
             verbose("connect: requesting remote current root");
-            let root = client.current_root().await;
+            let root = session.current_root().await;
             if let Ok(path) = &root {
                 verbose(format!("connect: remote current root={path}"));
             }
             verbose("connect: closing control connection and SSH transport");
-            let closed = client.close().await;
+            let closed = session.close().await;
             let root = root?;
             closed?;
             verbose("connect: shutdown completed");
@@ -101,14 +102,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Open { path } => {
             let server = sibling_server()?;
             verbose(format!("open: path={path} server={}", server.display()));
-            let client = BrowserClient::start(ClientConfig {
-                target: ServerTarget::Local {
-                    server_executable_path: server.to_string_lossy().into_owned(),
-                },
-            })
-            .await?;
-            let opened = client.open(path).await;
-            let closed = client.close().await;
+            let session = Client::new()
+                .connect(SessionConfig {
+                    target: SessionTarget::Local {
+                        server_executable_path: server.to_string_lossy().into_owned(),
+                    },
+                })
+                .await?;
+            let opened = session.open(path).await;
+            let closed = session.close().await;
             opened?;
             closed?;
             verbose("open: system application accepted the path");
