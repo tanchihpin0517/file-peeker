@@ -5,7 +5,7 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use file_peeker_protocol::{
-    ClientMessage, ConnectionRole, ErrorCode, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServerMessage,
+    ClientMessage, ConnectionRole, ErrorCode, ListingEntry, PROTOCOL_VERSION, ServerMessage,
 };
 use thiserror::Error;
 use tokio::{
@@ -216,11 +216,6 @@ async fn read_client_message(stream: &mut UnixStream) -> Result<ClientMessage, S
             break;
         }
         bytes.push(byte[0]);
-        if bytes.len() > MAX_MESSAGE_BYTES {
-            return Err(ServerError::Protocol {
-                message: "message exceeds the size limit".into(),
-            });
-        }
     }
 
     serde_json::from_slice(&bytes).map_err(|error| ServerError::Protocol {
@@ -318,12 +313,13 @@ async fn handle_listing(stream: &mut UnixStream, path: &str) -> Result<(), Serve
         .await;
     }
 
-    let entries = match std::fs::read_dir(path) {
+    let directory_entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) => return write_io_error(stream, error).await,
     };
+    let mut entries = Vec::new();
 
-    for entry in entries {
+    for entry in directory_entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => return write_io_error(stream, error).await,
@@ -364,19 +360,15 @@ async fn handle_listing(stream: &mut UnixStream, path: &str) -> Result<(), Serve
             (file_peeker_protocol::EntryKind::Other, false)
         };
 
-        write_server_message(
-            stream,
-            &ServerMessage::Entry {
-                path: path.to_owned(),
-                name,
-                kind,
-                navigable,
-            },
-        )
-        .await?;
+        entries.push(ListingEntry {
+            path: path.to_owned(),
+            name,
+            kind,
+            navigable,
+        });
     }
 
-    write_server_message(stream, &ServerMessage::Done).await
+    write_server_message(stream, &ServerMessage::ListResult { entries }).await
 }
 
 async fn write_io_error(stream: &mut UnixStream, error: std::io::Error) -> Result<(), ServerError> {
@@ -443,10 +435,12 @@ impl Drop for SocketLease {
 
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, path::Path};
+    use std::{collections::HashSet, os::unix::fs::PermissionsExt, path::Path};
 
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use file_peeker_protocol::{ClientMessage, ConnectionRole, PROTOCOL_VERSION, ServerMessage};
+    use file_peeker_protocol::{
+        ClientMessage, ConnectionRole, ErrorCode, PROTOCOL_VERSION, ServerMessage,
+    };
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -454,7 +448,7 @@ mod tests {
         time::{Duration, sleep},
     };
 
-    use super::{Cli, ServerCommand, VersionFormat, serve};
+    use super::{Cli, ServerCommand, VersionFormat, handle_listing, read_client_message, serve};
 
     #[test]
     fn parses_serve_command() {
@@ -562,6 +556,98 @@ mod tests {
             .expect("server task should complete")
             .expect("server should exit cleanly");
         assert!(!socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn listing_sends_one_atomic_result() {
+        let directory = private_tempdir();
+        std::fs::write(directory.path().join("notes.txt"), "hello")
+            .expect("fixture file should be created");
+        std::fs::create_dir(directory.path().join("docs"))
+            .expect("fixture directory should be created");
+        let listing_path = directory.path().to_string_lossy().into_owned();
+        let (mut server_stream, mut client_stream) =
+            UnixStream::pair().expect("socket pair should be created");
+
+        let server =
+            tokio::spawn(async move { handle_listing(&mut server_stream, &listing_path).await });
+        let mut response = String::new();
+        client_stream
+            .read_to_string(&mut response)
+            .await
+            .expect("listing response should be readable");
+        server
+            .await
+            .expect("listing task should complete")
+            .expect("listing should succeed");
+
+        assert_eq!(response.lines().count(), 1);
+        let message: ServerMessage =
+            serde_json::from_str(response.trim_end()).expect("listing response should decode");
+        let ServerMessage::ListResult { entries } = message else {
+            panic!("listing should return one list_result message");
+        };
+        let names: HashSet<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, HashSet::from(["docs", "notes.txt"]));
+    }
+
+    #[tokio::test]
+    async fn listing_error_sends_only_an_error_result() {
+        let directory = private_tempdir();
+        let listing_path = directory
+            .path()
+            .join("missing")
+            .to_string_lossy()
+            .into_owned();
+        let (mut server_stream, mut client_stream) =
+            UnixStream::pair().expect("socket pair should be created");
+
+        let server =
+            tokio::spawn(async move { handle_listing(&mut server_stream, &listing_path).await });
+        let mut response = String::new();
+        client_stream
+            .read_to_string(&mut response)
+            .await
+            .expect("listing error should be readable");
+        server
+            .await
+            .expect("listing task should complete")
+            .expect("listing error should be written");
+
+        assert_eq!(response.lines().count(), 1);
+        let message: ServerMessage =
+            serde_json::from_str(response.trim_end()).expect("listing error should decode");
+        assert!(matches!(
+            message,
+            ServerMessage::Error {
+                code: ErrorCode::NotFound,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_message_may_exceed_one_mib() {
+        let path = format!("/{}", "x".repeat(1024 * 1024));
+        let message = ClientMessage::List { path };
+        let mut bytes = serde_json::to_vec(&message).expect("large request should encode");
+        assert!(bytes.len() > 1024 * 1024);
+        bytes.push(b'\n');
+        let (mut server_stream, mut client_stream) =
+            UnixStream::pair().expect("socket pair should be created");
+
+        let writer = tokio::spawn(async move {
+            client_stream
+                .write_all(&bytes)
+                .await
+                .expect("large request should be writable");
+        });
+        let decoded = read_client_message(&mut server_stream)
+            .await
+            .expect("large request should be readable");
+        writer.await.expect("writer task should complete");
+
+        assert_eq!(decoded, message);
     }
 
     fn private_tempdir() -> TempDir {

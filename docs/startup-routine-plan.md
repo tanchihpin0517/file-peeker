@@ -544,11 +544,10 @@ safety net.
      before building internal startup code.
 
 5. **Add protocol framing and connection handshake primitives.**
-   - Implement bounded NDJSON send/receive around the types in
+   - Implement NDJSON send/receive around the types in
      `crates/file-peeker-protocol/src/lib.rs`, either in that crate or in small
      server/client transport modules with shared framing tests.
-   - Enforce `MAX_MESSAGE_BYTES`, required hello ordering, version 1, and
-     connection roles.
+   - Enforce required hello ordering, version 1, and connection roles.
    - Keep the framing independent of how the Unix stream became reachable.
 
 6. **Implement the server CLI and private endpoint lifecycle.**
@@ -618,8 +617,7 @@ safety net.
 - Invalid destinations and empty executable paths fail before spawning.
 - Endpoint paths obey the target platform's Unix socket path limit.
 - Existing files/sockets are never removed unless owned by the current startup.
-- Framing rejects malformed, oversized, out-of-order, and wrong-version
-  messages.
+- Framing rejects malformed, out-of-order, and wrong-version messages.
 - Bounded stderr capture retains useful tail output without unbounded growth.
 - Production installer argv contains no `--git`, `--path`, `--index`, or
   alternate `--registry` option.

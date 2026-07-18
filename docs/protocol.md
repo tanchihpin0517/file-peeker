@@ -14,6 +14,20 @@ Each `Session` owns one server. They use one long-lived control connection
 and one connection per filesystem operation. Each operation connection carries
 exactly one request, so messages do not need request IDs or multiplexing.
 
+## Protocol overview
+
+| Exchange | Connection | Client message | Successful server message | Status |
+| --- | --- | --- | --- | --- |
+| Session handshake | Control | `hello` with role `control` | `hello_ok` | Implemented |
+| Operation handshake | Operation | `hello` with role `operation` | `hello_ok` | Implemented |
+| Current root | Operation | `current_root` | `current_root` | Implemented |
+| Directory listing | Operation | `list` | `list_result` | Implemented |
+| File metadata | Operation | `get_metadata` | `metadata` | Reserved |
+
+The server can send `error` instead of the expected success message. After its
+handshake, a control connection carries no further messages; an operation
+connection carries exactly one request and one response.
+
 ## Transport
 
 The server listens on one private Unix domain stream socket and accepts the
@@ -21,9 +35,9 @@ owning client's control and operation connections. Each message is one UTF-8
 JSON object followed by a newline (NDJSON).
 
 - The receiver handles each complete line immediately.
-- A message must be no larger than 1 MiB.
-- Unknown, malformed, or oversized messages cause the receiver to close the
-  connection.
+- Messages have no fixed size limit; the receiver reads a complete line before
+  decoding it.
+- Unknown or malformed messages cause the receiver to close the connection.
 - Extra JSON fields are ignored for forward compatibility.
 
 Paths are absolute UTF-8 strings in v1. The client converts relative input
@@ -66,7 +80,7 @@ server closes all operation connections and exits.
 
 Each operation connection sends exactly one `list`, `current_root`, or
 `get_metadata` request
-after `hello_ok`, receives that operation's responses, and then closes. Multiple
+after `hello_ok`, receives that operation's response, and then closes. Multiple
 operation connections may be active at once.
 
 The control connection must be established first. The server rejects operation
@@ -101,18 +115,11 @@ Request:
 {"type":"list","path":"/tmp/example"}
 ```
 
-The server sends one `entry` for every direct child:
+After it finishes enumerating the directory, the server sends one response
+containing every direct child in filesystem enumeration order:
 
 ```json
-{"type":"entry","path":"/tmp/example/docs","name":"docs","kind":"directory","navigable":true}
-```
-
-It then sends exactly one terminal message.
-
-Successful completion:
-
-```json
-{"type":"done"}
+{"type":"list_result","entries":[{"path":"/tmp/example/docs","name":"docs","kind":"directory","navigable":true}]}
 ```
 
 Failure:
@@ -121,9 +128,9 @@ Failure:
 {"type":"error","code":"permission_denied","message":"Cannot read directory"}
 ```
 
-An empty directory produces only `done`. A failure can occur after some
-entries; those entries remain valid. The server flushes entries promptly so the
-UI can display them before the whole directory has been read.
+An empty directory produces `{"type":"list_result","entries":[]}`. If any
+part of enumeration fails, the server discards the entries collected so far and
+sends only the error; partial listings are never returned.
 
 `kind` is one of:
 
@@ -175,13 +182,12 @@ Clients use the code for control flow.
 An `error` is terminal for the current operation. Framing or message-order
 errors close the connection because continuing could misread the stream.
 
-## Stream rules
+## Operation rules
 
 - An operation connection carries exactly one request.
-- `entry` is valid only while handling `list`.
+- `list_result` is valid only while handling `list`.
 - `metadata` is valid only while handling `get_metadata`.
-- The client collects each `entry` into the in-flight state load.
-- `done` completes the state load with all collected entries.
+- The client converts the complete `list_result` into the in-flight state load.
 - An operation `error` is returned to the caller.
 - Losing an operation connection fails only that operation.
 - Closing an operation connection cancels that operation.

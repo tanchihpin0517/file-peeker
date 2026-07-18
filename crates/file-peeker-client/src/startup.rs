@@ -10,9 +10,7 @@ use std::{
     time::Duration,
 };
 
-use file_peeker_protocol::{
-    ClientMessage, ConnectionRole, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServerMessage,
-};
+use file_peeker_protocol::{ClientMessage, ConnectionRole, PROTOCOL_VERSION, ServerMessage};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -414,10 +412,8 @@ async fn handshake_control(stream: &mut UnixStream) -> Result<(), FilePeekerErro
 }
 
 async fn read_server_message(stream: &mut UnixStream) -> Result<ServerMessage, FilePeekerError> {
-    let reader = BufReader::new(stream);
     let mut bytes = Vec::new();
-    let count = reader
-        .take((MAX_MESSAGE_BYTES + 2) as u64)
+    let count = BufReader::new(stream)
         .read_until(b'\n', &mut bytes)
         .await
         .map_err(|error| FilePeekerError::ConnectionClosed {
@@ -435,11 +431,6 @@ async fn read_server_message(stream: &mut UnixStream) -> Result<ServerMessage, F
         });
     }
     bytes.pop();
-    if bytes.len() > MAX_MESSAGE_BYTES {
-        return Err(FilePeekerError::Protocol {
-            message: "server response exceeds the size limit".into(),
-        });
-    }
 
     serde_json::from_slice(&bytes).map_err(|error| FilePeekerError::Protocol {
         message: format!("server returned invalid JSON: {error}"),
@@ -563,10 +554,12 @@ fn server_exited_error(status: ExitStatus, stderr: Option<&BoundedOutput>) -> Fi
 mod tests {
     use std::{path::Path, time::Duration};
 
-    use tokio::io::AsyncWriteExt;
+    use file_peeker_protocol::{ErrorCode, ServerMessage};
+    use tokio::{io::AsyncWriteExt, net::UnixStream};
 
     use super::{
-        BoundedOutput, read_bounded, shell_quote, validate_destination, validate_socket_length,
+        BoundedOutput, read_bounded, read_server_message, shell_quote, validate_destination,
+        validate_socket_length,
     };
 
     #[test]
@@ -591,6 +584,32 @@ mod tests {
             .expect("reader should succeed");
         assert_eq!(bytes, b"abcd");
         assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn control_handshake_response_may_exceed_one_mib() {
+        let message = ServerMessage::Error {
+            code: ErrorCode::Io,
+            message: "x".repeat(1024 * 1024 + 1),
+        };
+        let mut bytes = serde_json::to_vec(&message).expect("large response should encode");
+        assert!(bytes.len() > 1024 * 1024);
+        bytes.push(b'\n');
+        let (mut client_stream, mut server_stream) =
+            UnixStream::pair().expect("socket pair should be created");
+
+        let writer = tokio::spawn(async move {
+            server_stream
+                .write_all(&bytes)
+                .await
+                .expect("large response should be writable");
+        });
+        let decoded = read_server_message(&mut client_stream)
+            .await
+            .expect("large response should be readable");
+        writer.await.expect("writer task should complete");
+
+        assert_eq!(decoded, message);
     }
 
     #[test]

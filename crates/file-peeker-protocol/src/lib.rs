@@ -9,9 +9,6 @@ use serde::{Deserialize, Serialize};
 /// The only protocol version understood by the v1 skeleton.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Maximum size of one newline-delimited JSON message.
-pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionRole {
@@ -49,16 +46,21 @@ pub enum ClientMessage {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListingEntry {
+    pub path: String,
+    pub name: String,
+    pub kind: EntryKind,
+    pub navigable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     HelloOk {
         version: u32,
     },
-    Entry {
-        path: String,
-        name: String,
-        kind: EntryKind,
-        navigable: bool,
+    ListResult {
+        entries: Vec<ListingEntry>,
     },
     Metadata {
         path: String,
@@ -70,7 +72,6 @@ pub enum ServerMessage {
     CurrentRoot {
         path: String,
     },
-    Done,
     Error {
         code: ErrorCode,
         message: String,
@@ -79,7 +80,9 @@ pub enum ServerMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientMessage, ConnectionRole, PROTOCOL_VERSION};
+    use super::{
+        ClientMessage, ConnectionRole, EntryKind, ListingEntry, PROTOCOL_VERSION, ServerMessage,
+    };
 
     #[test]
     fn hello_shape_matches_protocol_document() {
@@ -91,5 +94,33 @@ mod tests {
         let json = serde_json::to_string(&message).expect("hello should serialize");
 
         assert_eq!(json, r#"{"type":"hello","version":1,"role":"control"}"#);
+    }
+
+    #[test]
+    fn list_result_shape_matches_protocol_document() {
+        let message = ServerMessage::ListResult {
+            entries: vec![ListingEntry {
+                path: "/tmp/example/docs".into(),
+                name: "docs".into(),
+                kind: EntryKind::Directory,
+                navigable: true,
+            }],
+        };
+
+        let json = serde_json::to_string(&message).expect("list result should serialize");
+
+        assert_eq!(
+            json,
+            r#"{"type":"list_result","entries":[{"path":"/tmp/example/docs","name":"docs","kind":"directory","navigable":true}]}"#
+        );
+    }
+
+    #[test]
+    fn empty_list_result_has_an_empty_entries_array() {
+        let message = ServerMessage::ListResult { entries: vec![] };
+
+        let json = serde_json::to_string(&message).expect("empty list result should serialize");
+
+        assert_eq!(json, r#"{"type":"list_result","entries":[]}"#);
     }
 }

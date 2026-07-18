@@ -34,7 +34,8 @@ The server is the only component that reads browser data from the filesystem. It
 - Accepts one control connection and multiple operation connections from that
   client.
 - Handles each operation connection independently.
-- Streams direct directory children in filesystem enumeration order.
+- Returns direct directory children as one complete result in filesystem
+  enumeration order.
 - Returns basic metadata when requested.
 - Stops active operations and exits when the control connection closes.
 
@@ -210,7 +211,7 @@ State.collapse(path)      -> updated visible rows
 ```
 
 Every state creation or expansion sends the private `list` protocol message,
-collects responses through `done`, and converts them into `StateRow` values.
+receives one complete `list_result`, and converts it into `StateRow` values.
 
 ### Inside the shared client
 
@@ -226,7 +227,7 @@ Session.open_state(path) / State.expand(path)
         ▼
 Batch collector ── list message ──> Dedicated server
         │
-        │ Entry / Done / Error
+        │ ListResult / Error
         ▼
 StateSnapshot
         │
@@ -281,8 +282,7 @@ not exported through UniFFI.
 3. Opens a new connection to the dedicated server.
 4. Identifies it as an operation connection and completes its handshake.
 5. Sends one `list` request on that connection.
-6. Collects `entry` messages until `done`, failing on an error or unexpected
-   response.
+6. Receives one `list_result`, failing on an error or unexpected response.
 7. Applies the complete result to a new or existing state and returns it or its
    snapshot.
 
@@ -294,16 +294,11 @@ async fn run_listing(
     path: String,
 ) -> Result<Vec<DirectoryEntry>, FilePeekerError> {
     socket.send(ServerRequest::List { path }).await?;
-    let mut entries = Vec::new();
-
-    loop {
-        match socket.receive().await? {
-            ServerMessage::Entry(entry) => entries.push(entry),
-            ServerMessage::Done => return Ok(entries),
-            ServerMessage::Error(error) => return Err(error.into()),
-            message => {
-                return Err(FilePeekerError::UnexpectedMessage(message.kind()));
-            }
+    match socket.receive().await? {
+        ServerMessage::ListResult { entries } => Ok(entries),
+        ServerMessage::Error(error) => Err(error.into()),
+        message => {
+            Err(FilePeekerError::UnexpectedMessage(message.kind()))
         }
     }
 }
@@ -401,11 +396,10 @@ sequenceDiagram
     Client->>Server: Open operation connection
     Server-->>Client: Operation connection accepted
     Client->>Server: list request on operation connection
-    loop Direct children
+    loop Read direct children
         Server->>FS: Read next entry
-        Server-->>Client: entry
     end
-    Server-->>Client: done or error
+    Server-->>Client: list_result(entries) or error
     Client->>Server: Close operation connection
     Client-->>TUI: Loaded State and snapshot
     TUI-->>User: Display entries
@@ -438,8 +432,8 @@ connection ends the entire client-server lifetime.
 - A symlink remains type `symlink` and is navigable only when its target is a
   directory.
 - Broken symlinks and symlinks to files are not navigable.
-- A listing can return some entries and then end with an error. Already returned
-  entries remain visible.
+- A listing is atomic: an enumeration error discards entries collected so far
+  and returns only the error.
 
 The starting path is only the initial location, not a security boundary. Access
 is limited by the permissions of the account running the server. The UI simply

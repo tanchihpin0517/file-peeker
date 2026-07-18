@@ -39,7 +39,7 @@ flowchart LR
 | UI | Presents entries, accepts navigation, and displays loading or error state | Public client API only |
 | Session | Owns one connection and server lifecycle, normalizes paths, performs handshakes, maps protocol data to UI-safe types, and supervises shutdown | UI and `State` objects through Rust/UniFFI; server through private sockets |
 | State | Owns the browsing status for one fixed root path, including its expandable visible tree | UI and its owning `Session` |
-| Server | Reads the filesystem and streams results | Client through the private wire protocol; local filesystem through OS APIs |
+| Server | Reads the filesystem and returns complete operation results | Client through the private wire protocol; local filesystem through OS APIs |
 
 The UI never opens a socket or encodes protocol messages. The server never
 contains rendering or navigation state. One `Session` owns one dedicated
@@ -316,7 +316,7 @@ should not depend on it directly.
   forwarding; it does not expose a TCP listener.
 - Encoding: one UTF-8 JSON object followed by `\n` (NDJSON).
 - Protocol version: `1`.
-- Maximum message payload: 1 MiB, excluding the newline delimiter.
+- Messages have no fixed payload-size limit.
 - Paths: absolute UTF-8 strings.
 - One client owns one server and one private, owner-only socket directory.
 - There is no authentication token or request ID because the endpoint is
@@ -329,7 +329,7 @@ performs a handshake and then carries no more messages. Closing it is the
 shutdown signal for the dedicated server.
 
 Every filesystem operation opens a separate connection, performs an operation
-handshake, sends exactly one request, receives its responses, and closes.
+handshake, sends exactly one request, receives one response, and closes.
 Multiple operation connections may run concurrently.
 
 ```mermaid
@@ -355,9 +355,8 @@ sequenceDiagram
     Server->>FS: read_dir(path)
     loop each child
         FS-->>Server: directory entry
-        Server-->>Client: entry(...)
     end
-    Server-->>Client: done
+    Server-->>Client: list_result(entries)
     Client-->>UI: State with complete root snapshot
 
     UI->>Client: close() or drop
@@ -407,7 +406,7 @@ Successful response:
 {"type":"current_root","path":"/home/example"}
 ```
 
-The response is terminal; there is no following `done` message.
+The response is terminal.
 
 ### Directory-listing operation
 
@@ -417,20 +416,15 @@ Request:
 {"type":"list","path":"/tmp/example"}
 ```
 
-The server sends zero or more entries in filesystem enumeration order:
+After enumeration finishes, the server sends one response containing zero or
+more entries in filesystem enumeration order:
 
 ```json
-{"type":"entry","path":"/tmp/example/docs","name":"docs","kind":"directory","navigable":true}
+{"type":"list_result","entries":[{"path":"/tmp/example/docs","name":"docs","kind":"directory","navigable":true}]}
 ```
 
-Success terminates with:
-
-```json
-{"type":"done"}
-```
-
-Failure terminates with an error and may occur after entries have already been
-sent:
+An empty directory returns an empty `entries` array. If enumeration fails, the
+server discards entries collected so far and sends only an error:
 
 ```json
 {"type":"error","code":"permission_denied","message":"Permission denied"}
@@ -449,8 +443,8 @@ Entry `kind` is `file`, `directory`, `symlink`, or `other`.
 | `io` | Another filesystem I/O error occurred |
 | `unsupported_version` | Protocol negotiation failed |
 
-An operation error is terminal. Malformed JSON, an oversized message, or an
-invalid message sequence causes a protocol failure and connection closure.
+An operation error is terminal. Malformed JSON or an invalid message sequence
+causes a protocol failure and connection closure.
 
 ### Reserved metadata messages
 
