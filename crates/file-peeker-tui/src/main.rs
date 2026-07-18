@@ -12,8 +12,8 @@ use file_peeker_client::{
 };
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout},
-    style::{Modifier, Style},
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
@@ -51,10 +51,30 @@ enum RightAction {
     Select(usize),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivePane {
+    Sidebar,
+    Browser,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputAction {
+    Quit,
+    TogglePane,
+    OpenHome,
+    MoveSelection(bool),
+    MoveToParent,
+    MoveRight,
+    ToggleSelected,
+    OpenSelected,
+}
+
 #[derive(Debug)]
 struct App {
     session: Arc<Session>,
     path: String,
+    home_path: String,
+    active_pane: ActivePane,
     rows: Vec<DisplayRow>,
     selected: usize,
     loading: bool,
@@ -333,6 +353,24 @@ impl App {
             header,
         );
 
+        let [sidebar, browser] = body_layout(body);
+        let sidebar_style = pane_border_style(self.active_pane == ActivePane::Sidebar);
+        let mut sidebar_state = ListState::default()
+            .with_selected((self.active_pane == ActivePane::Sidebar).then_some(0));
+        frame.render_stateful_widget(
+            List::new([ListItem::new("Home")])
+                .block(
+                    Block::default()
+                        .title(" Locations ")
+                        .borders(Borders::ALL)
+                        .border_style(sidebar_style),
+                )
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                .highlight_symbol("> "),
+            sidebar,
+            &mut sidebar_state,
+        );
+
         let items = self.rows.iter().map(|row| {
             let indent = "  ".repeat(row.depth as usize);
             let marker = if self.loading_tree_paths.contains(&row.entry.path) {
@@ -354,9 +392,15 @@ impl App {
             ListState::default().with_selected((!self.rows.is_empty()).then_some(self.selected));
         frame.render_stateful_widget(
             List::new(items)
+                .block(
+                    Block::default()
+                        .title(" Files ")
+                        .borders(Borders::ALL)
+                        .border_style(pane_border_style(self.active_pane == ActivePane::Browser)),
+                )
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("> "),
-            body,
+            browser,
             &mut state,
         );
 
@@ -369,8 +413,12 @@ impl App {
                 if self.loading {
                     "Loading…".into()
                 } else {
-                    "j/k: select  h: parent  l: expand/child  o: toggle  Enter: open  q/Esc: quit"
-                        .into()
+                    match self.active_pane {
+                        ActivePane::Sidebar => {
+                            "Enter: open Home  Tab/Shift-Tab: files  q/Esc: quit".into()
+                        }
+                        ActivePane::Browser => "j/k: select  h/l: navigate  o: toggle  Enter: open  Tab/Shift-Tab: locations  q/Esc: quit".into(),
+                    }
                 }
             },
             |error| format!("Error: {error}"),
@@ -416,6 +464,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App {
         session,
         path: path.clone(),
+        home_path: home_path(&path),
+        active_pane: ActivePane::Browser,
         rows: Vec::new(),
         selected: 0,
         loading: false,
@@ -449,17 +499,80 @@ fn run(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Down | KeyCode::Char('j') => app.move_selection(true),
-                KeyCode::Up | KeyCode::Char('k') => app.move_selection(false),
-                KeyCode::Char('h') => app.move_to_parent(),
-                KeyCode::Char('l') => app.move_right(sender.clone()),
-                KeyCode::Char('o') => app.toggle_selected(sender.clone()),
-                KeyCode::Enter => app.open_selected(sender.clone()),
-                _ => {}
+            match input_action(app.active_pane, key.code) {
+                Some(InputAction::Quit) => return Ok(()),
+                Some(InputAction::TogglePane) => {
+                    app.active_pane = match app.active_pane {
+                        ActivePane::Sidebar => ActivePane::Browser,
+                        ActivePane::Browser => ActivePane::Sidebar,
+                    };
+                }
+                Some(InputAction::OpenHome) => {
+                    app.open_directory(app.home_path.clone(), sender.clone());
+                    app.active_pane = ActivePane::Browser;
+                }
+                Some(InputAction::MoveSelection(down)) => app.move_selection(down),
+                Some(InputAction::MoveToParent) => app.move_to_parent(),
+                Some(InputAction::MoveRight) => app.move_right(sender.clone()),
+                Some(InputAction::ToggleSelected) => app.toggle_selected(sender.clone()),
+                Some(InputAction::OpenSelected) => app.open_selected(sender.clone()),
+                None => {}
             }
         }
+    }
+}
+
+fn home_path(fallback: &str) -> String {
+    std::env::var("HOME")
+        .ok()
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn sidebar_width(total_width: u16) -> u16 {
+    if total_width < 38 {
+        return total_width / 3;
+    }
+
+    (total_width / 4)
+        .clamp(18, 30)
+        .min(total_width.saturating_sub(20))
+}
+
+fn body_layout(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([
+        Constraint::Length(sidebar_width(area.width)),
+        Constraint::Min(1),
+    ])
+    .areas(area)
+}
+
+fn pane_border_style(active: bool) -> Style {
+    if active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    }
+}
+
+fn input_action(active_pane: ActivePane, key_code: KeyCode) -> Option<InputAction> {
+    match key_code {
+        KeyCode::Char('q') | KeyCode::Esc => Some(InputAction::Quit),
+        KeyCode::Tab | KeyCode::BackTab => Some(InputAction::TogglePane),
+        KeyCode::Enter if active_pane == ActivePane::Sidebar => Some(InputAction::OpenHome),
+        KeyCode::Down | KeyCode::Char('j') if active_pane == ActivePane::Browser => {
+            Some(InputAction::MoveSelection(true))
+        }
+        KeyCode::Up | KeyCode::Char('k') if active_pane == ActivePane::Browser => {
+            Some(InputAction::MoveSelection(false))
+        }
+        KeyCode::Char('h') if active_pane == ActivePane::Browser => Some(InputAction::MoveToParent),
+        KeyCode::Char('l') if active_pane == ActivePane::Browser => Some(InputAction::MoveRight),
+        KeyCode::Char('o') if active_pane == ActivePane::Browser => {
+            Some(InputAction::ToggleSelected)
+        }
+        KeyCode::Enter if active_pane == ActivePane::Browser => Some(InputAction::OpenSelected),
+        _ => None,
     }
 }
 
@@ -512,11 +625,12 @@ fn right_action(
 mod tests {
     use std::collections::HashSet;
 
+    use crossterm::event::KeyCode;
     use file_peeker_client::{DirectoryEntry, EntryKind};
 
     use super::{
-        DisplayRow, OpenAction, RightAction, first_child_index, open_action, parent_index,
-        right_action,
+        ActivePane, DisplayRow, InputAction, OpenAction, RightAction, first_child_index,
+        input_action, open_action, parent_index, right_action, sidebar_width,
     };
 
     fn row(path: &str, parent_path: Option<&str>, navigable: bool) -> DisplayRow {
@@ -602,6 +716,47 @@ mod tests {
         assert_eq!(
             right_action(&[loading], 0, &HashSet::from(["/root/loading".to_owned()])),
             None
+        );
+    }
+
+    #[test]
+    fn sidebar_width_is_responsive_and_capped() {
+        assert_eq!(sidebar_width(30), 10);
+        assert_eq!(sidebar_width(40), 18);
+        assert_eq!(sidebar_width(80), 20);
+        assert_eq!(sidebar_width(120), 30);
+        assert_eq!(sidebar_width(200), 30);
+    }
+
+    #[test]
+    fn global_keys_work_from_either_pane() {
+        for pane in [ActivePane::Sidebar, ActivePane::Browser] {
+            assert_eq!(
+                input_action(pane, KeyCode::Tab),
+                Some(InputAction::TogglePane)
+            );
+            assert_eq!(
+                input_action(pane, KeyCode::BackTab),
+                Some(InputAction::TogglePane)
+            );
+            assert_eq!(input_action(pane, KeyCode::Esc), Some(InputAction::Quit));
+        }
+    }
+
+    #[test]
+    fn pane_specific_keys_are_routed_to_the_focused_pane() {
+        assert_eq!(
+            input_action(ActivePane::Sidebar, KeyCode::Enter),
+            Some(InputAction::OpenHome)
+        );
+        assert_eq!(input_action(ActivePane::Sidebar, KeyCode::Char('j')), None);
+        assert_eq!(
+            input_action(ActivePane::Browser, KeyCode::Enter),
+            Some(InputAction::OpenSelected)
+        );
+        assert_eq!(
+            input_action(ActivePane::Browser, KeyCode::Char('j')),
+            Some(InputAction::MoveSelection(true))
         );
     }
 }
