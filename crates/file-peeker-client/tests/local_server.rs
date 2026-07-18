@@ -129,6 +129,76 @@ async fn separate_sessions_have_independent_lifecycles() {
     second.close().await.expect("second session should close");
 }
 
+#[test]
+#[ignore = "run through scripts/test-local-client-server.sh"]
+fn list_command_prints_local_child_paths() {
+    let fixture = tempfile::tempdir().expect("fixture directory should be created");
+    let browse_root = fixture.path().join("report drafts");
+    fs::create_dir(&browse_root).expect("browse directory should be created");
+    fs::write(browse_root.join("notes.txt"), "hello").expect("fixture file should be written");
+    fs::create_dir(browse_root.join("docs")).expect("fixture directory should be created");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_file-peeker-client"))
+        .args(["list", &browse_root.to_string_lossy()])
+        .output()
+        .expect("list command should run");
+    assert!(
+        output.status.success(),
+        "list command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let paths = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let paths: std::collections::HashSet<&str> = paths.lines().collect();
+    assert_eq!(
+        paths,
+        std::collections::HashSet::from([
+            browse_root.join("notes.txt").to_str().unwrap(),
+            browse_root.join("docs").to_str().unwrap(),
+        ])
+    );
+    let diagnostics = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    let stats = diagnostics
+        .lines()
+        .last()
+        .expect("list command should print performance stats");
+    assert!(
+        stats.starts_with("[file-peeker-client] list: stats entries=2 batches="),
+        "unexpected stats: {stats}"
+    );
+    assert!(stats.contains(" elapsed_ms="));
+    assert!(stats.contains(" entries_per_second="));
+
+    let empty = fixture.path().join("empty");
+    fs::create_dir(&empty).expect("empty directory should be created");
+    let output = Command::new(env!("CARGO_BIN_EXE_file-peeker-client"))
+        .args(["list", &empty.to_string_lossy()])
+        .output()
+        .expect("empty list command should run");
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .last()
+            .is_some_and(|line| line
+                .starts_with("[file-peeker-client] list: stats entries=0 batches=0 elapsed_ms=")),
+        "empty listing did not print zero-valued stats"
+    );
+
+    let missing = fixture.path().join("missing");
+    let output = Command::new(env!("CARGO_BIN_EXE_file-peeker-client"))
+        .args(["list", &missing.to_string_lossy()])
+        .output()
+        .expect("invalid list command should run");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("filesystem I/O error"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 async fn verify_shared_tree(client: &std::sync::Arc<Session>, browse_root: &Path) {
     let listing = std::sync::Arc::clone(client)
         .list(browse_root.to_string_lossy().into_owned())

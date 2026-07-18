@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 use clap::{Parser, Subcommand};
 use file_peeker_client::{Client, SessionConfig, SessionTarget};
@@ -28,6 +28,15 @@ enum Command {
         /// SSH destination, resolved through the user's SSH configuration.
         #[arg(value_name = "SSH_DESTINATION")]
         destination: String,
+    },
+    /// List the direct children of a local or remote directory.
+    List {
+        /// Directory path to list.
+        #[arg(value_name = "PATH")]
+        path: String,
+        /// SSH destination, resolved through the user's SSH configuration.
+        #[arg(long, value_name = "SSH_DESTINATION")]
+        remote: Option<String>,
     },
     /// Open a local path with the system default application.
     Open {
@@ -99,6 +108,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("{path}");
         }
+        Command::List { path, remote } => {
+            run_list(path, remote).await?;
+        }
         Command::Open { path } => {
             let server = sibling_server()?;
             verbose(format!("open: path={path} server={}", server.display()));
@@ -116,6 +128,48 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             verbose("open: system application accepted the path");
         }
     }
+    Ok(())
+}
+
+async fn run_list(path: String, remote: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let target = if let Some(destination) = remote {
+        verbose(format!("list: path={path} remote={destination}"));
+        SessionTarget::Ssh { destination }
+    } else {
+        let server = sibling_server()?;
+        verbose(format!("list: path={path} server={}", server.display()));
+        SessionTarget::Local {
+            server_executable_path: server.to_string_lossy().into_owned(),
+        }
+    };
+    let session = Client::new().connect(SessionConfig { target }).await?;
+    let listed = async {
+        let started = Instant::now();
+        let mut batch_count = 0_u64;
+        let mut entry_count = 0_u64;
+        let listing = session.list(path).await?;
+        while let Some(batch) = listing.next_batch().await? {
+            batch_count += 1;
+            entry_count += batch.len() as u64;
+            for entry in batch {
+                println!("{}", entry.path);
+            }
+        }
+        Ok::<_, file_peeker_client::FilePeekerError>((entry_count, batch_count, started.elapsed()))
+    }
+    .await;
+    let closed = session.close().await;
+    let (entry_count, batch_count, elapsed) = listed?;
+    closed?;
+    let entries_per_second = if elapsed.is_zero() {
+        0
+    } else {
+        u128::from(entry_count) * 1_000_000_000 / elapsed.as_nanos()
+    };
+    verbose(format!(
+        "list: stats entries={entry_count} batches={batch_count} elapsed_ms={:.3} entries_per_second={entries_per_second}",
+        elapsed.as_secs_f64() * 1_000.0,
+    ));
     Ok(())
 }
 
@@ -177,6 +231,49 @@ mod tests {
         let error = Cli::try_parse_from(["file-peeker-client", "install"])
             .expect_err("destination must be required");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_local_list_path() {
+        let cli = Cli::try_parse_from(["file-peeker-client", "list", "/tmp/report drafts"])
+            .expect("local list command should parse");
+        assert!(matches!(
+            cli.command,
+            Command::List { path, remote: None } if path == "/tmp/report drafts"
+        ));
+    }
+
+    #[test]
+    fn parses_remote_list_path() {
+        let cli = Cli::try_parse_from([
+            "file-peeker-client",
+            "list",
+            "--remote",
+            "ntu",
+            "/srv/report drafts",
+        ])
+        .expect("remote list command should parse");
+        assert!(matches!(
+            cli.command,
+            Command::List {
+                path,
+                remote: Some(destination),
+            } if path == "/srv/report drafts" && destination == "ntu"
+        ));
+    }
+
+    #[test]
+    fn list_requires_path() {
+        let error =
+            Cli::try_parse_from(["file-peeker-client", "list"]).expect_err("path must be required");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn list_remote_requires_destination() {
+        let error = Cli::try_parse_from(["file-peeker-client", "list", "--remote"])
+            .expect_err("remote destination must be required");
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
     }
 
     #[test]

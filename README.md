@@ -84,6 +84,17 @@ cargo build -p file-peeker-server
 cargo run -p file-peeker-client -- open PATH
 ```
 
+To print the absolute paths of a directory's direct children, one per line,
+list locally by default or select an SSH destination with `--remote`:
+
+```text
+cargo run -p file-peeker-client -- list PATH
+cargo run -p file-peeker-client -- list --remote SSH_DESTINATION PATH
+```
+
+After a successful listing, stderr reports the entry and batch counts, elapsed
+listing time, and entries processed per second. Stdout remains paths only.
+
 `install` always overwrites the versioned server installation and prints its
 remote executable path. Local servers are bundled or supplied directly and are
 never installed by the client.

@@ -192,8 +192,9 @@ has closed.
 
 ## Diagnostic CLI
 
-The client crate provides two Clap commands. Both require an explicit SSH
-destination and emit verbose progress to stderr.
+The client crate provides Clap commands for remote connection and installation,
+local or remote directory listing, and local file opening. They emit verbose
+progress to stderr.
 
 Normal startup checks and reuses a compatible installation:
 
@@ -211,6 +212,17 @@ cargo run -p file-peeker-client -- install SSH_DESTINATION
 ```
 
 `install` prints the installed executable path to stdout after verification.
+
+`list` prints the absolute paths of a directory's direct children, one per
+stdout line. It lists locally by default; pass `--remote` to use an SSH target:
+
+```text
+cargo run -p file-peeker-client -- list PATH
+cargo run -p file-peeker-client -- list --remote SSH_DESTINATION PATH
+```
+
+Its final stderr diagnostic reports entry and batch counts, elapsed listing
+time, and entries processed per second; stdout remains paths only.
 
 ## Verification completed
 
