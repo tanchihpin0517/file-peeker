@@ -2,14 +2,14 @@ use std::path::Path;
 
 use tokio::process::Command;
 
-use crate::{FilePeekerError, session::SessionMode};
+use crate::{FilePeekerError, SessionTarget};
 
 const SYSTEM_OPENER: &str = "/usr/bin/open";
 
-pub(crate) async fn open(mode: SessionMode, path: String) -> Result<(), FilePeekerError> {
-    match mode {
-        SessionMode::Local => open_local(Path::new(SYSTEM_OPENER), path).await,
-        SessionMode::Ssh => Ok(()),
+pub(crate) async fn open(target: &SessionTarget, path: String) -> Result<(), FilePeekerError> {
+    match target {
+        SessionTarget::Local { .. } => open_local(Path::new(SYSTEM_OPENER), path).await,
+        SessionTarget::Ssh { .. } => Ok(()),
     }
 }
 
@@ -41,13 +41,18 @@ mod tests {
     };
 
     use super::{open, open_local};
-    use crate::{FilePeekerError, session::SessionMode};
+    use crate::{FilePeekerError, SessionTarget};
 
     #[tokio::test]
     async fn ssh_open_is_a_successful_no_op() {
-        open(SessionMode::Ssh, "/remote/report.txt".into())
-            .await
-            .expect("SSH open should succeed without launching a process");
+        open(
+            &SessionTarget::Ssh {
+                destination: "example.com".into(),
+            },
+            "/remote/report.txt".into(),
+        )
+        .await
+        .expect("SSH open should succeed without launching a process");
     }
 
     #[tokio::test]

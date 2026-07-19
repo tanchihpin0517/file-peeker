@@ -23,6 +23,8 @@ use super::{CONNECT_RETRY_DELAY, SHUTDOWN_TIMEOUT, STARTUP_TIMEOUT, ServerHandle
 use crate::FilePeekerError;
 use crate::install::{RemoteInstallConfig, RemoteInstallPolicy, install_remote_server};
 
+const REMOTE_LAUNCH_SCRIPT: &str = include_str!("remote-launch.sh");
+
 struct RemoteProcess {
     master: Child,
     launcher: Child,
@@ -262,7 +264,8 @@ fn spawn_launcher(
 
 fn build_remote_script(remote_directory: &Path) -> String {
     format!(
-        "set -eu; runtime={}; run_root={}; if [ -L \"$run_root\" ] || {{ [ -e \"$run_root\" ] && [ ! -d \"$run_root\" ]; }}; then printf '%s\\n' 'unsafe remote runtime directory' >&2; exit 1; fi; umask 077; mkdir -p \"$run_root\"; chmod 700 \"$run_root\"; mkdir \"$runtime\"; chmod 700 \"$runtime\"; server=\"$HOME/.file-peeker/servers/{}/bin/file-peeker-server\"; \"$server\" serve --socket \"$runtime/server.sock\" --remove-parent-on-exit & server_pid=$!; (cat >/dev/null; kill \"$server_pid\" 2>/dev/null || :) & monitor_pid=$!; cleanup() {{ kill \"$server_pid\" \"$monitor_pid\" 2>/dev/null || :; rm -rf \"$runtime\"; }}; trap cleanup EXIT HUP INT TERM; set +e; wait \"$server_pid\"; status=$?; kill \"$monitor_pid\" 2>/dev/null || :; wait \"$monitor_pid\" 2>/dev/null; exit \"$status\"",
+        "sh -c {} -- {} {} {}",
+        shell_quote(REMOTE_LAUNCH_SCRIPT),
         shell_quote(remote_directory.to_string_lossy().as_ref()),
         shell_quote(
             remote_directory
@@ -271,7 +274,7 @@ fn build_remote_script(remote_directory: &Path) -> String {
                 .to_string_lossy()
                 .as_ref()
         ),
-        env!("CARGO_PKG_VERSION")
+        shell_quote(env!("CARGO_PKG_VERSION"))
     )
 }
 

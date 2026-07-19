@@ -5,23 +5,7 @@ use crate::{FileMetadata, FilePeekerError, SessionConfig, SessionTarget, ops, se
 #[derive(Debug)]
 pub(crate) struct Session {
     server: server::ServerHandle,
-    mode: SessionMode,
     target: SessionTarget,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SessionMode {
-    Local,
-    Ssh,
-}
-
-impl From<&SessionTarget> for SessionMode {
-    fn from(target: &SessionTarget) -> Self {
-        match target {
-            SessionTarget::Local { .. } => Self::Local,
-            SessionTarget::Ssh { .. } => Self::Ssh,
-        }
-    }
 }
 
 impl Drop for Session {
@@ -37,14 +21,9 @@ impl Session {
     ///
     /// Returns a typed startup, process, connection, or protocol error.
     pub(crate) async fn start(config: SessionConfig) -> Result<Arc<Self>, FilePeekerError> {
-        let mode = SessionMode::from(&config.target);
         let target = config.target.clone();
         let server = server::start(config).await?;
-        Ok(Arc::new(Self {
-            server,
-            mode,
-            target,
-        }))
+        Ok(Arc::new(Self { server, target }))
     }
 
     /// Returns the immutable local or SSH target owned by this session.
@@ -94,7 +73,7 @@ impl Session {
     /// when the macOS system opener cannot be launched or reports failure.
     pub(crate) async fn open(&self, path: String) -> Result<(), FilePeekerError> {
         self.ensure_open()?;
-        ops::open(self.mode, path).await
+        ops::open(&self.target, path).await
     }
 
     /// Retrieves metadata for one path.
