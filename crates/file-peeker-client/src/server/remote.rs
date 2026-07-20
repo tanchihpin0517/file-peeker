@@ -1,367 +1,506 @@
 use std::{
+    io,
+    net::{Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
     process::Stdio,
 };
-
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::UnixStream,
-    process::{Child, ChildStdin, Command},
-    sync::mpsc,
-    task::JoinHandle,
-    time::{Instant, sleep, timeout},
+    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    net::TcpStream,
+    process::{Child, ChildStdin, ChildStdout, Command},
 };
 
-use super::diagnostics::{add_named_stderr_context, join, log_event, read};
-use super::protocol::{complete_handshake, connect_control};
-use super::runtime::{SessionDirectory, validate_socket_path};
-use super::ssh::{
-    AUTHENTICATION_TIMEOUT, change_forward, multiplex_arguments, query_remote_home,
-    request_master_exit, shell_quote, validate_destination, wait_for_master,
+use super::{
+    BufTcpStream, RemoteServerStartup, Server,
+    common::{
+        authenticate_stream, ensure_server_executable, heartbeat_server, initialize_control,
+        read_server_startup, shell_quote, shutdown_server_process, stop_child, stop_server_process,
+    },
 };
-use super::{CONNECT_RETRY_DELAY, SHUTDOWN_TIMEOUT, STARTUP_TIMEOUT, ServerHandle};
-use crate::FilePeekerError;
-use crate::install::{RemoteInstallConfig, RemoteInstallPolicy, install_remote_server};
 
-const REMOTE_LAUNCH_SCRIPT: &str = include_str!("remote-launch.sh");
-
-struct RemoteProcess {
-    master: Child,
-    launcher: Child,
-    control: UnixStream,
-    master_stderr_task: JoinHandle<Result<Vec<u8>, std::io::Error>>,
-    launcher_stderr_task: JoinHandle<Result<Vec<u8>, std::io::Error>>,
-    _endpoint: SessionDirectory,
-    launcher_stdin: Option<ChildStdin>,
-    destination: String,
-    control_socket: PathBuf,
-    forward: String,
-    log_path: PathBuf,
+#[derive(Debug)]
+pub struct RemoteServer {
+    ssh_executable: PathBuf,
+    destination: Option<String>,
+    socks_port: Option<u16>,
+    child: Option<Child>,
+    stdin: Option<ChildStdin>,
+    stdout: Option<BufReader<ChildStdout>>,
+    startup: Option<RemoteServerStartup>,
+    control: Option<BufTcpStream>,
 }
 
-#[allow(clippy::too_many_lines)]
-pub(super) async fn start(destination: String) -> Result<ServerHandle, FilePeekerError> {
-    validate_destination(&destination)?;
-    let endpoint = SessionDirectory::create()?;
-    let socket_path = endpoint.socket_path();
-    let control_socket = endpoint.control_socket_path();
-    validate_socket_path(&socket_path)?;
-    validate_socket_path(&control_socket)?;
-    log_event(endpoint.log_path(), "starting SSH control master");
-
-    let mut master = spawn_master(&control_socket, &destination)?;
-    let master_stderr = master
-        .stderr
-        .take()
-        .ok_or_else(|| FilePeekerError::ServerStart {
-            message: "SSH control master stderr was not available".into(),
-        })?;
-    let master_stderr_task = tokio::spawn(read(
-        master_stderr,
-        endpoint.log_path().to_path_buf(),
-        "SSH control master stderr",
-    ));
-
-    if let Err(error) = wait_for_master(
-        &mut master,
-        &control_socket,
-        &destination,
-        Instant::now() + AUTHENTICATION_TIMEOUT,
-    )
-    .await
-    {
-        return Err(cleanup_master_startup_failure(master, master_stderr_task, error).await);
+impl Default for RemoteServer {
+    fn default() -> Self {
+        Self {
+            ssh_executable: PathBuf::from("ssh"),
+            destination: None,
+            socks_port: None,
+            child: None,
+            stdin: None,
+            stdout: None,
+            startup: None,
+            control: None,
+        }
     }
-    log_event(endpoint.log_path(), "SSH control master is ready");
+}
 
-    let mut install_config = RemoteInstallConfig::for_current_build(
-        destination.clone(),
-        RemoteInstallPolicy::ReuseExisting,
-    );
-    install_config.ssh_arguments = multiplex_arguments(&control_socket);
-    install_config.log_path = Some(endpoint.log_path().to_path_buf());
-    log_event(endpoint.log_path(), "checking remote server installation");
-    if let Err(error) = install_remote_server(&install_config).await {
-        let error = FilePeekerError::ServerStart {
-            message: error.to_string(),
+impl Server for RemoteServer {
+    type ConnectArgument = String;
+
+    async fn connect(&mut self, remote_server: Self::ConnectArgument) -> io::Result<()> {
+        tracing::debug!(remote_server = %remote_server, "checking connection state");
+        if self.child.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "remote server is already connected",
+            ));
+        }
+
+        let (port, mut child, stdin, stdout, startup) =
+            prepare_remote_process(&self.ssh_executable, &remote_server).await?;
+        tracing::debug!(server_port = startup.forward_port, "server started");
+        tracing::debug!("opening control stream through SSH proxy");
+        let control = async {
+            let control = open_operation_stream(port, startup.forward_port).await?;
+            let mut control = BufTcpStream::new(control);
+            tracing::debug!("control stream opened; initializing control protocol");
+            initialize_control(&mut control, &startup.token).await?;
+            tracing::debug!("control protocol initialized");
+            Ok::<_, io::Error>(control)
+        }
+        .await;
+        let control = match control {
+            Ok(control) => control,
+            Err(error) => {
+                tracing::debug!(%error, "control connection failed; stopping SSH connection");
+                drop(stdin);
+                drop(stdout);
+                stop_child(&mut child).await;
+                return Err(error);
+            }
         };
-        return Err(cleanup_master_startup_failure(master, master_stderr_task, error).await);
+
+        tracing::debug!(remote_server = %remote_server, "server connection ready");
+        self.destination = Some(remote_server);
+        self.socks_port = Some(port);
+        self.child = Some(child);
+        self.stdin = Some(stdin);
+        self.stdout = Some(stdout);
+        self.startup = Some(startup);
+        self.control = Some(control);
+        Ok(())
     }
 
-    let remote_home = match query_remote_home(&control_socket, &destination, endpoint.log_path())
-        .await
-    {
-        Ok(path) => path,
-        Err(error) => {
-            return Err(cleanup_master_startup_failure(master, master_stderr_task, error).await);
-        }
-    };
-    let remote_directory = remote_home
-        .join(".file-peeker")
-        .join("run")
-        .join(endpoint.id());
-    let remote_socket_path = remote_directory.join("server.sock");
-    validate_socket_path(&remote_socket_path)?;
-    let remote_socket = remote_socket_path
-        .to_str()
-        .ok_or_else(|| FilePeekerError::ServerStart {
-            message: "remote server socket path is not valid UTF-8".into(),
-        })?
-        .to_owned();
-
-    let mut launcher = match spawn_launcher(
-        &control_socket,
-        &destination,
-        build_remote_script(&remote_directory),
-    ) {
-        Ok(child) => child,
-        Err(error) => {
-            return Err(cleanup_master_startup_failure(master, master_stderr_task, error).await);
-        }
-    };
-    let launcher_stdin = launcher.stdin.take();
-    let launcher_stderr = launcher
-        .stderr
-        .take()
-        .ok_or_else(|| FilePeekerError::ServerStart {
-            message: "SSH remote server stderr was not available".into(),
+    async fn operate(&self) -> io::Result<BufTcpStream> {
+        let socks_port = self.socks_port.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "SSH proxy is not connected")
         })?;
-    let launcher_stderr_task = tokio::spawn(read(
-        launcher_stderr,
-        endpoint.log_path().to_path_buf(),
-        "SSH remote server stderr",
-    ));
+        let startup = self
+            .startup
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "server is not started"))?;
 
-    let forward = format!("{}:{remote_socket}", socket_path.display());
-    log_event(endpoint.log_path(), "creating StreamLocal forwarding");
-    if let Err(error) = change_forward(
-        "forward",
-        &control_socket,
-        &destination,
-        &forward,
-        endpoint.log_path(),
-    )
-    .await
-    {
-        return Err(cleanup_remote_startup_failure(
-            master,
-            launcher,
-            launcher_stdin,
-            master_stderr_task,
-            launcher_stderr_task,
-            &control_socket,
-            &destination,
-            error,
+        let stream = open_operation_stream(socks_port, startup.forward_port).await?;
+        let mut stream = BufTcpStream::new(stream);
+        authenticate_stream(&mut stream, &startup.token).await?;
+        Ok(stream)
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        shutdown_server_process(
+            &mut self.control,
+            &mut self.stdin,
+            &mut self.stdout,
+            &mut self.child,
         )
-        .await);
+        .await
     }
+}
 
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
-    let control = loop {
-        let mut stream = match connect_control(&mut launcher, &socket_path, deadline).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                return Err(cleanup_remote_startup_failure(
-                    master,
-                    launcher,
-                    launcher_stdin,
-                    master_stderr_task,
-                    launcher_stderr_task,
-                    &control_socket,
-                    &destination,
-                    error,
-                )
-                .await);
-            }
+async fn prepare_remote_process(
+    ssh_executable: &Path,
+    remote_server: &str,
+) -> io::Result<(
+    u16,
+    Child,
+    ChildStdin,
+    BufReader<ChildStdout>,
+    RemoteServerStartup,
+)> {
+    tracing::debug!(remote_server = %remote_server, "creating SSH connection");
+    let (port, mut child, mut stdin, mut stdout) =
+        RemoteServer::create_ssh_connection(ssh_executable, remote_server).await?;
+    tracing::debug!(socks_port = port, "SSH connection created");
+    let startup = async {
+        tracing::debug!("ensuring server executable");
+        let mut command_output = tokio::io::sink();
+        let executable = RemoteServer::get_server_executable(
+            &mut stdin,
+            &mut stdout,
+            false,
+            None,
+            &mut command_output,
+        )
+        .await?;
+        tracing::debug!(server_executable = %executable, "server executable ready");
+        tracing::debug!("starting server executable");
+        RemoteServer::start_server(&mut stdin, &mut stdout, &executable).await
+    }
+    .await;
+    match startup {
+        Ok(startup) => Ok((port, child, stdin, stdout, startup)),
+        Err(error) => {
+            drop(stdin);
+            drop(stdout);
+            stop_child(&mut child).await;
+            Err(error)
+        }
+    }
+}
+
+impl RemoteServer {
+    /// Starts the SSH process and captures its standard input and output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the remote server is empty or the SSH
+    /// connection cannot be created. The returned tuple contains the selected
+    /// SOCKS port, child process, standard input, and standard output.
+    pub async fn create_ssh_connection(
+        ssh_executable: &Path,
+        remote_server: &str,
+    ) -> io::Result<(u16, Child, ChildStdin, BufReader<ChildStdout>)> {
+        if remote_server.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "remote server is required",
+            ));
+        }
+
+        let port = available_loopback_port()?;
+        let mut child = ssh_command(ssh_executable, port, remote_server).spawn()?;
+        let Some(stdin) = child.stdin.take() else {
+            stop_child(&mut child).await;
+            return Err(io::Error::other(
+                "SSH process did not provide its piped standard input",
+            ));
         };
-        match complete_handshake(&mut launcher, &mut stream, deadline).await {
-            Ok(()) => break stream,
-            Err(FilePeekerError::ConnectionClosed { .. }) if Instant::now() < deadline => {
-                sleep(CONNECT_RETRY_DELAY).await;
-            }
-            Err(error) => {
-                return Err(cleanup_remote_startup_failure(
-                    master,
-                    launcher,
-                    launcher_stdin,
-                    master_stderr_task,
-                    launcher_stderr_task,
-                    &control_socket,
-                    &destination,
-                    error,
-                )
-                .await);
-            }
+        let Some(stdout) = child.stdout.take() else {
+            drop(stdin);
+            stop_child(&mut child).await;
+            return Err(io::Error::other(
+                "SSH process did not provide its piped standard output",
+            ));
+        };
+
+        Ok((port, child, stdin, BufReader::new(stdout)))
+    }
+
+    /// Ensures the matching server executable exists on the connected host.
+    ///
+    /// The command checks the versioned application directory first and uses
+    /// Cargo to install the server from crates.io when it is missing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the command cannot be sent, its response
+    /// cannot be read, or installation fails.
+    pub async fn get_server_executable(
+        server_stdin: &mut (impl AsyncWrite + Unpin),
+        server_stdout: &mut (impl AsyncBufRead + Unpin),
+        force_install: bool,
+        local_source_path: Option<&str>,
+        command_output: &mut (impl AsyncWrite + Unpin),
+    ) -> io::Result<String> {
+        ensure_server_executable(
+            server_stdin,
+            server_stdout,
+            force_install,
+            local_source_path,
+            command_output,
+        )
+        .await
+    }
+
+    /// Starts the server executable and reads its connection information.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the start command cannot be sent or the
+    /// server reports invalid startup information.
+    pub async fn start_server(
+        server_stdin: &mut (impl AsyncWrite + Unpin),
+        server_stdout: &mut (impl AsyncBufRead + Unpin),
+        server_executable: &str,
+    ) -> io::Result<RemoteServerStartup> {
+        if server_executable.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "server executable is required",
+            ));
+        }
+
+        server_stdin
+            .write_all(format!("exec {} serve\n", shell_quote(server_executable)).as_bytes())
+            .await?;
+        server_stdin.flush().await?;
+
+        read_server_startup(server_stdout).await
+    }
+
+    #[must_use]
+    pub fn remote_server(&self) -> Option<&str> {
+        self.destination.as_deref()
+    }
+
+    #[must_use]
+    pub fn socks_port(&self) -> Option<u16> {
+        self.socks_port
+    }
+
+    pub fn stdin(&mut self) -> Option<&mut ChildStdin> {
+        self.stdin.as_mut()
+    }
+
+    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.stdin.take()
+    }
+
+    pub fn stdout(&mut self) -> Option<&mut BufReader<ChildStdout>> {
+        self.stdout.as_mut()
+    }
+
+    #[must_use]
+    pub fn startup(&self) -> Option<&RemoteServerStartup> {
+        self.startup.as_ref()
+    }
+
+    /// Checks that the persistent control connection is responsive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the server is not connected or does not
+    /// acknowledge the heartbeat.
+    pub async fn heartbeat(&mut self) -> io::Result<()> {
+        heartbeat_server(self.control.as_mut()).await
+    }
+}
+
+impl Drop for RemoteServer {
+    fn drop(&mut self) {
+        self.control.take();
+        stop_server_process(&mut self.stdin, &mut self.stdout, &mut self.child);
+    }
+}
+
+async fn open_operation_stream(socks_port: u16, server_port: u16) -> io::Result<TcpStream> {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, socks_port)).await?;
+    connect_socks5(&mut stream, server_port).await?;
+    Ok(stream)
+}
+
+fn available_loopback_port() -> io::Result<u16> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
+async fn connect_socks5<S>(stream: &mut S, server_port: u16) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    stream.write_all(&[5, 1, 0]).await?;
+    let mut greeting = [0_u8; 2];
+    stream.read_exact(&mut greeting).await?;
+    if greeting != [5, 0] {
+        return Err(io::Error::other("SSH proxy rejected SOCKS5 negotiation"));
+    }
+
+    let port = server_port.to_be_bytes();
+    stream
+        .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, port[0], port[1]])
+        .await?;
+
+    let mut response = [0_u8; 4];
+    stream.read_exact(&mut response).await?;
+    if response[0] != 5 {
+        return Err(io::Error::other(
+            "SSH proxy returned an invalid SOCKS version",
+        ));
+    }
+    if response[1] != 0 {
+        return Err(io::Error::other(format!(
+            "SSH proxy rejected the server connection with status {}",
+            response[1]
+        )));
+    }
+
+    let address_bytes = match response[3] {
+        1 => 4,
+        3 => {
+            let mut length = [0_u8; 1];
+            stream.read_exact(&mut length).await?;
+            usize::from(length[0])
+        }
+        4 => 16,
+        address_type => {
+            return Err(io::Error::other(format!(
+                "SSH proxy returned unknown SOCKS5 address type {address_type}"
+            )));
         }
     };
-    log_event(endpoint.log_path(), "remote session is ready");
-
-    let log_path = endpoint.log_path().to_path_buf();
-    let running = RemoteProcess {
-        master,
-        launcher,
-        control,
-        master_stderr_task,
-        launcher_stderr_task,
-        _endpoint: endpoint,
-        launcher_stdin,
-        destination,
-        control_socket,
-        forward,
-        log_path,
-    };
-    Ok(ServerHandle::spawn(
-        socket_path,
-        move |mut shutdown| async move {
-            supervise(running, &mut shutdown).await;
-        },
-    ))
+    let mut bound_address_and_port = vec![0_u8; address_bytes + 2];
+    stream.read_exact(&mut bound_address_and_port).await?;
+    Ok(())
 }
 
-fn spawn_master(control_socket: &Path, destination: &str) -> Result<Child, FilePeekerError> {
-    let mut command = Command::new("ssh");
+fn ssh_command(ssh_executable: &Path, port: u16, remote_server: &str) -> Command {
+    let mut command = Command::new(ssh_executable);
     command
-        .arg("-M")
-        .arg("-S")
-        .arg(control_socket)
-        .arg("-o")
-        .arg("ControlPersist=no")
-        .arg("-N")
         .arg("-T")
-        .arg(destination)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    command
-        .spawn()
-        .map_err(|error| FilePeekerError::ServerStart {
-            message: format!("cannot launch SSH control master: {error}"),
-        })
-}
-
-fn spawn_launcher(
-    control_socket: &Path,
-    destination: &str,
-    remote_script: String,
-) -> Result<Child, FilePeekerError> {
-    let mut command = Command::new("ssh");
-    command
-        .args(multiplex_arguments(control_socket))
-        .arg("-T")
-        .arg(destination)
-        .arg(remote_script)
+        .arg("-D")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg(remote_server)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
         .kill_on_drop(true);
     command
-        .spawn()
-        .map_err(|error| FilePeekerError::ServerStart {
-            message: format!("cannot launch SSH remote server: {error}"),
-        })
 }
 
-fn build_remote_script(remote_directory: &Path) -> String {
-    format!(
-        "sh -c {} -- {} {} {}",
-        shell_quote(REMOTE_LAUNCH_SCRIPT),
-        shell_quote(remote_directory.to_string_lossy().as_ref()),
-        shell_quote(
-            remote_directory
-                .parent()
-                .expect("remote session directory has a parent")
-                .to_string_lossy()
-                .as_ref()
-        ),
-        shell_quote(env!("CARGO_PKG_VERSION"))
-    )
-}
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsStr, io::Cursor, path::Path};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, duplex};
 
-async fn cleanup_master_startup_failure(
-    mut master: Child,
-    master_stderr_task: JoinHandle<Result<Vec<u8>, std::io::Error>>,
-    error: FilePeekerError,
-) -> FilePeekerError {
-    let _ = master.kill().await;
-    let _ = master.wait().await;
-    let stderr = join(master_stderr_task).await;
-    add_named_stderr_context(error, "SSH control master", stderr.as_deref())
-}
+    use super::{RemoteServer, RemoteServerStartup, ssh_command};
+    use crate::server::{
+        Server,
+        common::{SERVER_READY_PREFIX, ensure_server_command},
+    };
 
-#[allow(clippy::too_many_arguments)]
-async fn cleanup_remote_startup_failure(
-    mut master: Child,
-    mut launcher: Child,
-    launcher_stdin: Option<ChildStdin>,
-    master_stderr_task: JoinHandle<Result<Vec<u8>, std::io::Error>>,
-    launcher_stderr_task: JoinHandle<Result<Vec<u8>, std::io::Error>>,
-    control_socket: &Path,
-    destination: &str,
-    error: FilePeekerError,
-) -> FilePeekerError {
-    drop(launcher_stdin);
-    let _ = launcher.kill().await;
-    let _ = launcher.wait().await;
-    request_master_exit(control_socket, destination, Path::new("/dev/null")).await;
-    let _ = master.kill().await;
-    let _ = master.wait().await;
-    let launcher_stderr = join(launcher_stderr_task).await;
-    let master_stderr = join(master_stderr_task).await;
-    let error = add_named_stderr_context(error, "SSH remote server", launcher_stderr.as_deref());
-    add_named_stderr_context(error, "SSH control master", master_stderr.as_deref())
-}
+    #[test]
+    fn ssh_command_uses_dynamic_forwarding() {
+        let command = ssh_command(Path::new("ssh"), 43827, "example.test");
+        let command = command.as_std();
+        let arguments: Vec<_> = command.get_args().collect();
 
-async fn supervise(running: RemoteProcess, shutdown: &mut mpsc::UnboundedReceiver<()>) {
-    let RemoteProcess {
-        mut master,
-        mut launcher,
-        mut control,
-        master_stderr_task,
-        launcher_stderr_task,
-        _endpoint,
-        launcher_stdin,
-        destination,
-        control_socket,
-        forward,
-        log_path,
-    } = running;
-    let mut probe = [0_u8; 1];
-    tokio::select! {
-        _ = shutdown.recv() => {
-            log_event(&log_path, "closing remote session");
-            let _ = control.shutdown().await;
-            drop(launcher_stdin);
-            if timeout(SHUTDOWN_TIMEOUT, launcher.wait()).await.is_err() {
-                let _ = launcher.kill().await;
-                let _ = launcher.wait().await;
-            }
-        }
-        _ = master.wait() => {
-            let _ = control.shutdown().await;
-            drop(launcher_stdin);
-            let _ = launcher.kill().await;
-            let _ = launcher.wait().await;
-        }
-        _ = launcher.wait() => {
-            let _ = control.shutdown().await;
-        }
-        _ = control.read(&mut probe) => {
-            drop(launcher_stdin);
-            if timeout(SHUTDOWN_TIMEOUT, launcher.wait()).await.is_err() {
-                let _ = launcher.kill().await;
-                let _ = launcher.wait().await;
-            }
-        }
+        assert_eq!(command.get_program(), "ssh");
+        assert_eq!(
+            arguments,
+            [
+                OsStr::new("-T"),
+                OsStr::new("-D"),
+                OsStr::new("127.0.0.1:43827"),
+                OsStr::new("example.test"),
+            ]
+        );
     }
 
-    let _ = change_forward("cancel", &control_socket, &destination, &forward, &log_path).await;
-    request_master_exit(&control_socket, &destination, &log_path).await;
-    if timeout(SHUTDOWN_TIMEOUT, master.wait()).await.is_err() {
-        let _ = master.kill().await;
-        let _ = master.wait().await;
+    #[tokio::test]
+    async fn get_server_executable_returns_remote_path() {
+        let expected = "/home/test/.file-peeker/servers/0.1.0/bin/file-peeker-server";
+        let mut stdin = Vec::new();
+        let mut stdout = Cursor::new(format!("login banner\n{SERVER_READY_PREFIX}{expected}\n"));
+        let mut output = Vec::new();
+
+        let executable =
+            RemoteServer::get_server_executable(&mut stdin, &mut stdout, false, None, &mut output)
+                .await
+                .expect("server executable should be reported");
+
+        assert_eq!(executable, expected);
+        assert_eq!(output, b"login banner\n");
+        assert_eq!(
+            String::from_utf8(stdin).expect("command should be UTF-8"),
+            ensure_server_command(false, None)
+        );
     }
-    let _ = launcher_stderr_task.await;
-    let _ = master_stderr_task.await;
-    log_event(&log_path, "remote session closed");
+
+    #[tokio::test]
+    async fn start_server_runs_executable_and_returns_connection_information() {
+        let mut stdin = Vec::new();
+        let mut stdout = Cursor::new(
+            "server output\nFILE_PEEKER_SERVER_STARTUP={\"port\":43827,\"token\":\"test-token\"}\n",
+        );
+
+        let startup = RemoteServer::start_server(
+            &mut stdin,
+            &mut stdout,
+            "/home/test/file peeker/bin/file-peeker-server",
+        )
+        .await
+        .expect("server should start");
+
+        assert_eq!(
+            startup,
+            RemoteServerStartup {
+                forward_port: 43827,
+                token: "test-token".into(),
+            }
+        );
+        assert_eq!(
+            stdin,
+            b"exec '/home/test/file peeker/bin/file-peeker-server' serve\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_output_is_retained_between_ensure_and_start() {
+        let executable = "/home/test/.file-peeker/servers/0.1.0/bin/file-peeker-server";
+        let mut stdin = Vec::new();
+        let mut stdout = Cursor::new(format!(
+            "{SERVER_READY_PREFIX}{executable}\nFILE_PEEKER_SERVER_STARTUP={{\"port\":43827,\"token\":\"test-token\"}}\n"
+        ));
+
+        let resolved = RemoteServer::get_server_executable(
+            &mut stdin,
+            &mut stdout,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        let startup = RemoteServer::start_server(&mut stdin, &mut stdout, &resolved)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, executable);
+        assert_eq!(startup.forward_port, 43827);
+        assert_eq!(startup.token, "test-token");
+    }
+
+    #[tokio::test]
+    async fn socks5_handshake_connects_to_remote_loopback_port() {
+        let (mut client, mut proxy) = duplex(64);
+        let proxy_task = tokio::spawn(async move {
+            let mut greeting = [0_u8; 3];
+            proxy.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            proxy.write_all(&[5, 0]).await.unwrap();
+
+            let mut request = [0_u8; 10];
+            proxy.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [5, 1, 0, 1, 127, 0, 0, 1, 171, 51]);
+            proxy
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+        });
+
+        super::connect_socks5(&mut client, 43827)
+            .await
+            .expect("SOCKS5 handshake should succeed");
+        proxy_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn operate_requires_connected_server() {
+        let error = RemoteServer::default()
+            .operate()
+            .await
+            .expect_err("disconnected server should not operate");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+    }
 }

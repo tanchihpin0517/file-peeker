@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 file-peeker-protocol = { version = "=0.1.0", path = "../file-peeker-protocol" }
+getrandom.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -19,8 +19,6 @@ targets:
     sources:
       - path: App
       - path: Generated
-      - path: Resources
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.filepeeker.FilePeeker

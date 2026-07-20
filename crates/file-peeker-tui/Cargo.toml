@@ -5,16 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+
 [[bin]]
 name = "file-peeker"
 path = "src/main.rs"
-
-[dependencies]
-crossterm.workspace = true
-file-peeker-client = { path = "../file-peeker-client" }
-ratatui.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

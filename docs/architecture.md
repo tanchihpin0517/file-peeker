@@ -6,20 +6,19 @@ the native Ratatui UI and to SwiftUI through UniFFI.
 
 ```text
 User -> Ratatui ─┐
-                 ├-> Rust client -> control + operation sockets -> server -> filesystem
+                 ├-> Rust client -> authenticated TCP operations -> server -> filesystem
 User -> SwiftUI ─┘
 ```
 
 ## Server and transport
 
-Each `Session` owns one local or SSH server lifecycle. A long-lived control
-connection defines that lifecycle; every filesystem operation uses a separate
-short-lived Unix stream. Independent operations therefore require neither
-request IDs nor multiplexing.
+Each `Session` owns one local or remote server lifecycle. Launcher stdin defines
+that lifecycle; every filesystem operation uses a separate authenticated TCP
+stream. Remote streams traverse one OpenSSH SOCKS transport. Independent
+operations therefore require neither request IDs nor application multiplexing.
 
-The server alone enforces the 1 MiB limit for both request and response frames.
-Clients retain newline-delimited responses until completion and rely on the
-server to apply the bound.
+The shared protocol I/O layer reads and writes newline-delimited request and
+response frames. Clients retain responses until completion.
 
 The server lists one directory level with `tokio::fs::read_dir`. It accumulates
 one bounded batch, writes it, then resumes enumeration. This makes transport
@@ -36,7 +35,8 @@ the entire directory.
 The client owns all transport concerns:
 
 - Local and SSH startup, installation, and shutdown.
-- Protocol v1 handshakes and newline-delimited JSON parsing.
+- Protocol v2 token handshakes and newline-delimited JSON parsing.
+- Heartbeat health checks and fatal-session state.
 - One persistent buffered reader per streamed `Listing`.
 - Mapping wire errors to public typed errors.
 - Validating names and reconstructing full child paths.

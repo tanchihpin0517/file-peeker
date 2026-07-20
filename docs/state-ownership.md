@@ -5,11 +5,13 @@ interaction state needed to display a directory tree.
 
 | Information | Rust client library | SwiftUI | TUI |
 | --- | --- | --- | --- |
-| Local or SSH connection target | Stored in `Session` | References the session | References the session |
-| Local versus SSH mode | Stored in `Session` | No | No |
+| Local or remote connection target | Stored in `Session` | References the session | References the session |
+| Local versus remote mode | Stored in `Session` | No | No |
 | Server process lifecycle | Stored in `Session` | No | No |
-| Control connection and socket path | Stored in the client lifecycle | No | No |
-| Active listing socket | Stored in `Listing` | No | No |
+| Server port, token, and stdin lifetime lease | Stored in the client lifecycle | No | No |
+| SSH SOCKS and control-socket state | Stored in the client lifecycle | No | No |
+| Heartbeat and fatal connection error | Stored in the client lifecycle | No | No |
+| Active listing TCP connection | Stored in `Listing` | No | No |
 | Partially received protocol frame | Stored in `Listing` | No | No |
 | Listing state: active, complete, or failed | Stored in `Listing` | No | No |
 | Listing's requested parent path | Temporarily stored to construct child paths | No | No |

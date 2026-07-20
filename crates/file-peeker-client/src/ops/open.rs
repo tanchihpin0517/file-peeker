@@ -8,8 +8,8 @@ const SYSTEM_OPENER: &str = "/usr/bin/open";
 
 pub(crate) async fn open(target: &SessionTarget, path: String) -> Result<(), FilePeekerError> {
     match target {
-        SessionTarget::Local { .. } => open_local(Path::new(SYSTEM_OPENER), path).await,
-        SessionTarget::Ssh { .. } => Ok(()),
+        SessionTarget::Local => open_local(Path::new(SYSTEM_OPENER), path).await,
+        SessionTarget::Remote { .. } => Ok(()),
     }
 }
 
@@ -46,7 +46,7 @@ mod tests {
     #[tokio::test]
     async fn ssh_open_is_a_successful_no_op() {
         open(
-            &SessionTarget::Ssh {
+            &SessionTarget::Remote {
                 destination: "example.com".into(),
             },
             "/remote/report.txt".into(),

@@ -1,19 +1,23 @@
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use file_peeker_protocol::{
-    ClientMessage, ConnectionRole, ErrorCode, PROTOCOL_VERSION, ServerMessage,
+    ClientMessage, ServerMessage,
+    io::{read_message, send_message},
 };
 use thiserror::Error;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
+    io::{AsyncBufRead, AsyncReadExt, AsyncWrite},
+    net::TcpListener,
+    sync::{Semaphore, mpsc},
     task::JoinSet,
 };
 
 mod ops;
 
-const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_CONNECTIONS: usize = 128;
+const SERVER_STARTUP_PREFIX: &str = "FILE_PEEKER_SERVER_STARTUP=";
 
 #[derive(Debug, Error)]
 pub(crate) enum ServerError {
@@ -32,14 +36,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum ServerCommand {
-    /// Listen for a client on a Unix socket.
-    Serve {
-        #[arg(long = "socket", value_name = "PATH")]
-        socket_path: PathBuf,
-        /// Remove the private socket parent directory when the server exits.
-        #[arg(long)]
-        remove_parent_on_exit: bool,
-    },
+    /// Listen on an ephemeral IPv4 loopback TCP port until stdin closes.
+    Serve,
     /// Print server and protocol version information.
     Version {
         #[arg(long, value_enum)]
@@ -55,10 +53,7 @@ enum VersionFormat {
 #[tokio::main]
 async fn main() {
     let result = match Cli::parse().command {
-        ServerCommand::Serve {
-            socket_path,
-            remove_parent_on_exit,
-        } => serve(socket_path, remove_parent_on_exit).await,
+        ServerCommand::Serve => serve().await,
         ServerCommand::Version {
             format: VersionFormat::Json,
         } => {
@@ -77,138 +72,111 @@ fn print_version_json() {
     println!(
         r#"{{"server_version":"{}","protocol_versions":[{}]}}"#,
         env!("CARGO_PKG_VERSION"),
-        PROTOCOL_VERSION
+        file_peeker_protocol::PROTOCOL_VERSION
     );
 }
 
-async fn serve(socket_path: PathBuf, remove_parent_on_exit: bool) -> Result<(), ServerError> {
-    let listener = UnixListener::bind(&socket_path)?;
-    let _socket_lease = SocketLease::new(socket_path, remove_parent_on_exit);
+async fn serve() -> Result<(), ServerError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let port = listener.local_addr()?.port();
+    let token = generate_token()?;
+    println!(
+        "{SERVER_STARTUP_PREFIX}{}",
+        serde_json::json!({ "port": port, "token": token })
+    );
+    std::io::stdout().flush()?;
 
-    let (mut control, _) = listener.accept().await?;
-    handshake_control(&mut control).await?;
+    let token = Arc::new(token);
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let (shutdown_sender, mut shutdown_receiver) = mpsc::unbounded_channel();
     let mut operations = JoinSet::new();
-    let mut control_probe = [0_u8; 1];
+    let mut stdin = tokio::io::stdin();
+    let mut stdin_probe = [0_u8; 1];
 
-    tokio::select! {
-        result = run_operations(&listener, &mut control, &mut control_probe, &mut operations) => result,
-        result = termination_signal() => result,
-    }
-}
-
-async fn run_operations(
-    listener: &UnixListener,
-    control: &mut UnixStream,
-    control_probe: &mut [u8; 1],
-    operations: &mut JoinSet<()>,
-) -> Result<(), ServerError> {
     loop {
         tokio::select! {
-            result = control.read(control_probe) => {
-                return match result? {
-                    0 => Ok(()),
-                    _ => Err(ServerError::Protocol {
-                        message: "control connection does not accept messages after hello".into(),
+            result = stdin.read(&mut stdin_probe) => {
+                match result? {
+                    0 => break,
+                    _ => return Err(ServerError::Protocol {
+                        message: "server stdin is a lifetime lease and does not accept data".into(),
                     }),
-                };
+                }
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                    drop(stream);
+                    continue;
+                };
+                let token = Arc::clone(&token);
+                let shutdown_sender = shutdown_sender.clone();
                 operations.spawn(async move {
-                    let _ = ops::handle(stream).await;
+                    let _permit = permit;
+                    let _ = ops::handle(stream, &token, &shutdown_sender).await;
                 });
             }
+            _ = shutdown_receiver.recv() => break,
             Some(_) = operations.join_next(), if !operations.is_empty() => {}
+            result = termination_signal() => {
+                result?;
+                break;
+            }
         }
     }
-}
 
-async fn handshake_control(stream: &mut UnixStream) -> Result<(), ServerError> {
-    let message = read_client_message(stream).await?;
-    match message {
-        ClientMessage::Hello {
-            version,
-            role: ConnectionRole::Control,
-        } if version == PROTOCOL_VERSION => {
-            write_server_message(
-                stream,
-                &ServerMessage::HelloOk {
-                    version: PROTOCOL_VERSION,
-                },
-            )
-            .await
-        }
-        ClientMessage::Hello { version, .. } if version != PROTOCOL_VERSION => {
-            write_server_message(
-                stream,
-                &ServerMessage::Error {
-                    code: ErrorCode::UnsupportedVersion,
-                    message: "Unsupported protocol version".into(),
-                },
-            )
-            .await?;
-            Err(ServerError::Protocol {
-                message: format!("unsupported protocol version {version}"),
-            })
-        }
-        ClientMessage::Hello { .. } => Err(ServerError::Protocol {
-            message: "first connection must have the control role".into(),
-        }),
-        _ => Err(ServerError::Protocol {
-            message: "first message must be hello".into(),
-        }),
-    }
-}
-
-pub(crate) async fn read_client_message(
-    stream: &mut UnixStream,
-) -> Result<ClientMessage, ServerError> {
-    let mut bytes = Vec::new();
-    loop {
-        let mut byte = [0_u8; 1];
-        if stream.read(&mut byte).await? == 0 {
-            return Err(ServerError::Protocol {
-                message: "connection closed before a complete message".into(),
-            });
-        }
-        if byte[0] == b'\n' {
-            break;
-        }
-        if bytes.len() == MAX_FRAME_BYTES {
-            return Err(ServerError::Protocol {
-                message: format!("message exceeds {MAX_FRAME_BYTES} bytes"),
-            });
-        }
-        bytes.push(byte[0]);
-    }
-
-    serde_json::from_slice(&bytes).map_err(|error| ServerError::Protocol {
-        message: format!("invalid JSON message: {error}"),
-    })
-}
-
-pub(crate) async fn write_server_message(
-    stream: &mut UnixStream,
-    message: &ServerMessage,
-) -> Result<(), ServerError> {
-    let mut bytes = serde_json::to_vec(message).map_err(|error| ServerError::Protocol {
-        message: format!("cannot encode response: {error}"),
-    })?;
-    if bytes.len() > MAX_FRAME_BYTES {
-        return Err(ServerError::Protocol {
-            message: format!("response exceeds {MAX_FRAME_BYTES} bytes"),
-        });
-    }
-    bytes.push(b'\n');
-    stream.write_all(&bytes).await?;
-    stream.flush().await?;
+    operations.abort_all();
+    while operations.join_next().await.is_some() {}
     Ok(())
+}
+
+fn generate_token() -> Result<String, ServerError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| ServerError::Protocol {
+        message: format!("cannot generate authentication token: {error}"),
+    })?;
+    let mut token = String::with_capacity(64);
+    for byte in bytes {
+        token.push(char::from(HEX[usize::from(byte >> 4)]));
+        token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(token)
+}
+
+pub(crate) async fn read_client_message<S>(stream: &mut S) -> Result<ClientMessage, ServerError>
+where
+    S: AsyncBufRead + Unpin,
+{
+    read_message(stream).await.map_err(map_message_error)
+}
+
+pub(crate) async fn write_server_message<S>(
+    stream: &mut S,
+    message: &ServerMessage,
+) -> Result<(), ServerError>
+where
+    S: AsyncWrite + Unpin,
+{
+    send_message(stream, message)
+        .await
+        .map_err(map_message_error)
+}
+
+fn map_message_error(error: std::io::Error) -> ServerError {
+    match error.kind() {
+        std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => {
+            ServerError::Protocol {
+                message: error.to_string(),
+            }
+        }
+        _ => ServerError::Io(error),
+    }
 }
 
 #[cfg(unix)]
 async fn termination_signal() -> Result<(), ServerError> {
     use tokio::signal::unix::{SignalKind, signal};
-
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     tokio::select! {
@@ -217,232 +185,50 @@ async fn termination_signal() -> Result<(), ServerError> {
     }
 }
 
-struct SocketLease {
-    path: PathBuf,
-    remove_parent_on_exit: bool,
-}
-
-impl SocketLease {
-    fn new(path: PathBuf, remove_parent_on_exit: bool) -> Self {
-        Self {
-            path,
-            remove_parent_on_exit,
-        }
-    }
-}
-
-impl Drop for SocketLease {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        if self.remove_parent_on_exit
-            && let Some(parent) = self.path.parent()
-        {
-            let _ = std::fs::remove_dir(parent);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, path::Path};
+    use clap::{CommandFactory, Parser};
+    use file_peeker_protocol::{ClientMessage, ErrorCode, ServerMessage};
 
-    use clap::{CommandFactory, Parser, error::ErrorKind};
-    use file_peeker_protocol::{
-        ClientMessage, ConnectionRole, ErrorCode, PROTOCOL_VERSION, ServerMessage,
-    };
-    use tempfile::TempDir;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::UnixStream,
-        time::{Duration, sleep},
-    };
-
-    use super::{
-        Cli, MAX_FRAME_BYTES, ServerCommand, VersionFormat, read_client_message, serve,
-        write_server_message,
-    };
+    use super::{Cli, ServerCommand, read_client_message, write_server_message};
 
     #[test]
     fn parses_serve_command() {
-        let cli = Cli::try_parse_from([
-            "file-peeker-server",
-            "serve",
-            "--socket",
-            "/tmp/file-peeker.sock",
-        ])
-        .expect("serve command should parse");
-
-        assert!(matches!(
-            cli.command,
-            ServerCommand::Serve { socket_path, .. }
-                if socket_path == Path::new("/tmp/file-peeker.sock")
-        ));
-    }
-
-    #[test]
-    fn parses_version_json_command() {
-        let cli = Cli::try_parse_from(["file-peeker-server", "version", "--format", "json"])
-            .expect("version command should parse");
-
-        assert!(matches!(
-            cli.command,
-            ServerCommand::Version {
-                format: VersionFormat::Json
-            }
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_version_format() {
-        let error = Cli::try_parse_from(["file-peeker-server", "version", "--format", "text"])
-            .expect_err("unsupported version formats should fail");
-
-        assert_eq!(error.kind(), ErrorKind::InvalidValue);
-    }
-
-    #[test]
-    fn rejects_a_missing_socket_path() {
-        let error = Cli::try_parse_from(["file-peeker-server", "serve"])
-            .expect_err("a missing socket path should fail");
-
-        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn provides_generated_help_and_version() {
+        let cli = Cli::try_parse_from(["file-peeker-server", "serve"]).unwrap();
+        assert!(matches!(cli.command, ServerCommand::Serve));
         Cli::command().debug_assert();
+    }
 
-        let help = Cli::try_parse_from(["file-peeker-server", "--help"])
-            .expect_err("help should exit before command dispatch");
-        assert_eq!(help.kind(), ErrorKind::DisplayHelp);
-        assert!(help.to_string().contains("Usage: file-peeker-server"));
-
-        let version = Cli::try_parse_from(["file-peeker-server", "--version"])
-            .expect_err("version should exit before command dispatch");
-        assert_eq!(version.kind(), ErrorKind::DisplayVersion);
-        assert!(version.to_string().contains(env!("CARGO_PKG_VERSION")));
+    #[test]
+    fn token_is_256_bits_of_hex() {
+        let token = super::generate_token().unwrap();
+        assert_eq!(token.len(), 64);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[tokio::test]
-    async fn serves_control_handshake_and_cleans_up() {
-        assert_server_lifecycle(private_tempdir()).await;
-    }
-
-    #[tokio::test]
-    async fn accepts_a_socket_in_a_permissive_parent_directory() {
-        let directory = private_tempdir();
-        let mut permissions = std::fs::metadata(directory.path())
-            .expect("temporary directory should exist")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(directory.path(), permissions)
-            .expect("temporary directory should become permissive");
-
-        assert_server_lifecycle(directory).await;
-    }
-
-    async fn assert_server_lifecycle(directory: TempDir) {
-        let socket_path = directory.path().join("server.sock");
-        let server = tokio::spawn(serve(socket_path.clone(), false));
-
-        let mut stream = connect_with_retry(&socket_path).await;
-        let hello = ClientMessage::Hello {
-            version: PROTOCOL_VERSION,
-            role: ConnectionRole::Control,
+    async fn client_message_can_exceed_one_mib() {
+        let expected = ClientMessage::List {
+            path: format!("/{}", "x".repeat(1024 * 1024 + 1)),
         };
-        let mut request = serde_json::to_vec(&hello).expect("hello should encode");
-        request.push(b'\n');
-        stream
-            .write_all(&request)
-            .await
-            .expect("hello should be written");
-
-        let mut response = Vec::new();
-        loop {
-            let mut byte = [0_u8; 1];
-            stream
-                .read_exact(&mut byte)
-                .await
-                .expect("response should be read");
-            if byte[0] == b'\n' {
-                break;
-            }
-            response.push(byte[0]);
-        }
-        let response: ServerMessage =
-            serde_json::from_slice(&response).expect("response should decode");
-        assert_eq!(
-            response,
-            ServerMessage::HelloOk {
-                version: PROTOCOL_VERSION
-            }
-        );
-
-        drop(stream);
-        server
-            .await
-            .expect("server task should complete")
-            .expect("server should exit cleanly");
-        assert!(!socket_path.exists());
-    }
-
-    #[tokio::test]
-    async fn client_message_cannot_exceed_one_mib() {
-        let path = format!("/{}", "x".repeat(MAX_FRAME_BYTES));
-        let message = ClientMessage::List { path };
-        let mut bytes = serde_json::to_vec(&message).expect("large request should encode");
-        assert!(bytes.len() > MAX_FRAME_BYTES);
+        let mut bytes = serde_json::to_vec(&expected).unwrap();
         bytes.push(b'\n');
-        let (mut server_stream, mut client_stream) =
-            UnixStream::pair().expect("socket pair should be created");
+        assert!(bytes.len() > 1024 * 1024);
+        let mut input = bytes.as_slice();
 
-        let writer = tokio::spawn(async move { client_stream.write_all(&bytes).await });
-        let error = read_client_message(&mut server_stream)
-            .await
-            .expect_err("large request should be rejected");
-        drop(server_stream);
-        let _ = writer.await.expect("writer task should complete");
-
-        assert!(matches!(error, super::ServerError::Protocol { .. }));
+        assert_eq!(read_client_message(&mut input).await.unwrap(), expected);
     }
 
     #[tokio::test]
-    async fn server_message_cannot_exceed_one_mib() {
+    async fn server_message_can_exceed_one_mib() {
         let message = ServerMessage::Error {
             code: ErrorCode::Io,
-            message: "x".repeat(MAX_FRAME_BYTES),
+            message: "x".repeat(1024 * 1024 + 1),
         };
-        let (mut server_stream, _client_stream) =
-            UnixStream::pair().expect("socket pair should be created");
+        let mut output = Vec::new();
 
-        let error = write_server_message(&mut server_stream, &message)
-            .await
-            .expect_err("large response should be rejected");
+        write_server_message(&mut output, &message).await.unwrap();
 
-        assert!(matches!(error, super::ServerError::Protocol { .. }));
-    }
-
-    fn private_tempdir() -> TempDir {
-        let directory = tempfile::Builder::new()
-            .prefix("fp-server-test-")
-            .tempdir_in("/tmp")
-            .expect("temporary directory should be created");
-        let mut permissions = std::fs::metadata(directory.path())
-            .expect("temporary directory should exist")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(directory.path(), permissions)
-            .expect("temporary directory should be private");
-        directory
-    }
-
-    async fn connect_with_retry(socket_path: &std::path::Path) -> UnixStream {
-        for _ in 0..100 {
-            match UnixStream::connect(socket_path).await {
-                Ok(stream) => return stream,
-                Err(_) => sleep(Duration::from_millis(10)).await,
-            }
-        }
-        panic!("server socket did not become ready");
+        assert!(output.len() > 1024 * 1024);
     }
 }

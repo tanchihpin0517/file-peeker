@@ -4,7 +4,7 @@ use std::path::Path;
 
 use file_peeker_protocol::{ErrorCode, ListingEntry, ServerMessage};
 use tokio::{
-    net::UnixStream,
+    io::{AsyncRead, AsyncWrite},
     time::{Duration, Instant, timeout_at},
 };
 
@@ -15,7 +15,10 @@ const BATCH_TARGET_BYTES: usize = 128 * 1024;
 const BATCH_MAX_ENTRIES: usize = 512;
 const BATCH_MAX_DELAY: Duration = Duration::from_millis(25);
 
-pub(super) async fn handle(stream: &mut UnixStream, path: &str) -> Result<(), ServerError> {
+pub(super) async fn handle<S>(stream: &mut S, path: &str) -> Result<(), ServerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let path = Path::new(path);
     if !path.is_absolute() {
         return write_error(
@@ -140,10 +143,10 @@ pub(super) async fn handle(stream: &mut UnixStream, path: &str) -> Result<(), Se
     write_server_message(stream, &ServerMessage::ListEnd).await
 }
 
-async fn flush_batch(
-    stream: &mut UnixStream,
-    entries: &mut Vec<ListingEntry>,
-) -> Result<(), ServerError> {
+async fn flush_batch<S>(stream: &mut S, entries: &mut Vec<ListingEntry>) -> Result<(), ServerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     if entries.is_empty() {
         return Ok(());
     }
@@ -207,7 +210,10 @@ fn listing_io_failure(error: &std::io::Error) -> ListingFailure {
     }
 }
 
-async fn write_io_error(stream: &mut UnixStream, error: std::io::Error) -> Result<(), ServerError> {
+async fn write_io_error<S>(stream: &mut S, error: std::io::Error) -> Result<(), ServerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let code = io_error_code(&error);
     write_error(stream, code, &error.to_string()).await
 }
@@ -226,7 +232,7 @@ mod tests {
     use std::collections::HashSet;
 
     use file_peeker_protocol::{ErrorCode, ServerMessage};
-    use tokio::{io::AsyncReadExt, net::UnixStream};
+    use tokio::io::{AsyncReadExt, duplex};
 
     use super::handle;
 
@@ -236,7 +242,7 @@ mod tests {
         std::fs::write(directory.path().join("notes.txt"), "hello").unwrap();
         std::fs::create_dir(directory.path().join("docs")).unwrap();
         let listing_path = directory.path().to_string_lossy().into_owned();
-        let (mut server_stream, mut client_stream) = UnixStream::pair().unwrap();
+        let (mut server_stream, mut client_stream) = duplex(1024 * 1024);
 
         let server = tokio::spawn(async move { handle(&mut server_stream, &listing_path).await });
         let mut response = String::new();
@@ -264,7 +270,7 @@ mod tests {
             .join("missing")
             .to_string_lossy()
             .into_owned();
-        let (mut server_stream, mut client_stream) = UnixStream::pair().unwrap();
+        let (mut server_stream, mut client_stream) = duplex(1024 * 1024);
 
         let server = tokio::spawn(async move { handle(&mut server_stream, &listing_path).await });
         let mut response = String::new();
@@ -289,7 +295,7 @@ mod tests {
             std::fs::write(directory.path().join(format!("entry-{index:04}")), "").unwrap();
         }
         let listing_path = directory.path().to_string_lossy().into_owned();
-        let (mut server_stream, mut client_stream) = UnixStream::pair().unwrap();
+        let (mut server_stream, mut client_stream) = duplex(1024 * 1024);
 
         let server = tokio::spawn(async move { handle(&mut server_stream, &listing_path).await });
         let mut response = String::new();

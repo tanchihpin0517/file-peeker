@@ -10,14 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy,rustfmt
-
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Verify workspace and bindings
+      - name: Build app
         run: make verify
-

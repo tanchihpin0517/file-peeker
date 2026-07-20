@@ -1,39 +1,63 @@
 use std::sync::Arc;
 
-use crate::{FilePeekerError, SessionConfig, session::Session};
+use crate::{ConnectError, Session, SessionConfig};
 
-#[derive(Debug, Default)]
-pub(crate) struct Client;
+/// Entry point for creating independent File Peeker sessions.
+#[derive(Debug, Default, uniffi::Object)]
+pub struct Client;
 
+#[uniffi::export(async_runtime = "tokio")]
 impl Client {
-    pub(crate) fn new() -> Arc<Self> {
+    #[uniffi::constructor]
+    #[must_use]
+    pub fn new() -> Arc<Self> {
         Arc::new(Self)
     }
 
-    pub(crate) async fn connect(
-        &self,
-        config: SessionConfig,
-    ) -> Result<Arc<Session>, FilePeekerError> {
+    /// Starts a server-backed session for the configured target.
+    ///
+    /// # Errors
+    ///
+    /// Returns a server-start error when the target server cannot be started
+    /// and authenticated.
+    pub async fn start_session(&self, config: SessionConfig) -> Result<Arc<Session>, ConnectError> {
         Session::start(config).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Client;
-    use crate::{FilePeekerError, SessionConfig, SessionTarget};
+    use crate::{Client, ConnectError, SessionConfig, SessionTarget};
 
     #[tokio::test]
-    async fn connect_delegates_session_startup_errors() {
+    #[ignore = "starts a managed local server"]
+    async fn starts_local_session() {
+        let session = Client::new()
+            .start_session(SessionConfig {
+                target: SessionTarget::Local,
+            })
+            .await
+            .expect("local startup should succeed");
+
+        assert_eq!(session.target(), SessionTarget::Local);
+        session
+            .close()
+            .await
+            .expect("local shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn empty_remote_destination_is_rejected() {
         let error = Client::new()
-            .connect(SessionConfig {
-                target: SessionTarget::Local {
-                    server_executable_path: "/definitely/missing/file-peeker-server".into(),
+            .start_session(SessionConfig {
+                target: SessionTarget::Remote {
+                    destination: String::new(),
                 },
             })
             .await
-            .expect_err("a missing server executable must fail");
+            .expect_err("an empty remote destination should fail");
 
-        assert!(matches!(error, FilePeekerError::ServerStart { .. }));
+        assert!(matches!(error, ConnectError::ServerStart { .. }));
+        assert!(error.to_string().contains("remote server is required"));
     }
 }

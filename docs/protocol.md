@@ -1,107 +1,87 @@
-# File Peeker Protocol v1
+# File Peeker Protocol v2
 
-File Peeker uses a private NDJSON protocol over local or SSH-forwarded Unix
-domain sockets. Protocol v1 is still under development; the streaming listing
-sequence replaces the earlier atomic `list_result` shape without compatibility.
+File Peeker uses private NDJSON over IPv4 loopback TCP. Local sessions connect
+directly; SSH sessions connect to the same remote loopback endpoint through an
+OpenSSH SOCKS5 proxy. Every filesystem operation uses a distinct TCP
+connection; heartbeat and shutdown share one persistent control connection.
 
-Each `Session` owns one long-lived control connection and opens one connection
-per filesystem operation. Operation connections carry one request, so the
-protocol does not use request IDs or multiplexing.
+## Startup and authentication
 
-## Framing and handshakes
+`file-peeker-server serve` binds `127.0.0.1:0`, generates a 256-bit token, and
+prints one prefixed JSON record before keeping stdout silent:
 
-Every message is one UTF-8 JSON object followed by `\n`. The server requires an
-encoded message not to exceed 1 MiB and applies that limit to both requests and
-responses. Malformed, oversized, or out-of-order messages terminate the
-operation. Clients rely on the server for frame-size enforcement.
-
-Every connection begins with `hello`:
-
-```json
-{"type":"hello","version":1,"role":"control"}
-{"type":"hello","version":1,"role":"operation"}
+```text
+FILE_PEEKER_SERVER_STARTUP={"port":43827,"token":"<64 lowercase hexadecimal characters>"}
 ```
 
-The server replies:
+The launcher keeps server stdin open as a lifetime lease. EOF stops the server
+and cancels active operations. Tokens are session-specific, memory-only, and
+must not appear in arguments, environment, files, diagnostics, or errors.
+
+Every connection begins with an authentication frame:
 
 ```json
-{"type":"hello_ok","version":1}
+{"type":"auth","token":"<session token>"}
 ```
 
-or rejects the version with a terminal `error`. The control connection accepts
-no messages after its handshake. Closing it shuts down the dedicated server.
+Successful authentication is silent. An invalid or missing token receives a
+generic `authentication_failed` error and only that connection is closed.
+
+After authentication, the next frame selects the connection behavior. A
+filesystem operation connection carries exactly one request and then closes.
+The persistent control connection begins with:
+
+```json
+{"type":"hello","version":2}
+{"type":"hello_ok","version":2}
+```
+
+Unsupported protocol versions are rejected without v1 compatibility. Messages
+are UTF-8 JSON followed by `\n`.
+
+## Heartbeat
+
+```json
+{"type":"heartbeat"}
+{"type":"heartbeat_ok"}
+```
+
+Heartbeat runs on the authenticated control connection. Shutdown uses the same
+connection and receives `{"type":"shutdown_ok"}` before the server exits.
 
 ## List a directory
-
-The client requests the direct children of one absolute UTF-8 path:
 
 ```json
 {"type":"list","path":"/tmp/example"}
 ```
 
-The server enumerates without globally sorting and sends zero or more non-empty
-batches:
+The server sends zero or more non-empty batches followed by `list_end`:
 
 ```json
 {"type":"list_batch","entries":[{"name":"docs","kind":"directory","navigable":true}]}
-```
-
-Wire entries omit their repeated parent path. The Rust client validates `name`
-as one path component and reconstructs the absolute child path before exposing
-`DirectoryEntry` to a UI.
-
-Successful enumeration ends explicitly:
-
-```json
 {"type":"list_end"}
 ```
 
-An empty directory sends only `list_end`. EOF before `list_end` is a truncated
-operation, never success.
-
-The server targets batches of 64 KiB and flushes at 512 entries or 25 ms after
-the first buffered entry, whichever occurs first. The timer is not reset by new
-entries. Enumeration pauses while a batch write is pending, providing bounded
-backpressure without a prefetch queue.
-
-If enumeration fails after valid entries were buffered, the server flushes that
-batch and then sends a terminal error. Clients may therefore retain useful
-partial results while marking the listing incomplete.
+Wire entries omit their repeated parent path. The client validates each name as
+one path component and reconstructs the absolute child path. EOF before
+`list_end` is failure. The server targets 128 KiB batches and flushes at 512
+entries or 25 ms after the first buffered entry. Errors may follow valid
+batches, allowing callers to retain partial results.
 
 `kind` is `file`, `directory`, `symlink`, or `other`. `navigable` is true for
-directories and symlinks whose current target is a directory. Failed symlink
-target resolution makes the symlink non-navigable. Non-UTF-8 filenames are
-unsupported and terminate the listing with `invalid_path`.
+directories and symlinks whose current target is a directory.
 
-## Other operations
-
-Current root:
+## Other operations and errors
 
 ```json
 {"type":"current_root"}
 {"type":"current_root","path":"/home/example"}
 ```
 
-Metadata remains reserved:
+Metadata remains reserved. Normal operation error codes are `not_found`,
+`permission_denied`, `not_directory`, `invalid_path`, and `io`. These terminate
+only their operation. Authentication, protocol, heartbeat, SOCKS, or TCP
+failures are fatal to the client session; there is no automatic reconnection.
 
-```json
-{"type":"get_metadata","path":"/tmp/example/docs"}
-{"type":"metadata","path":"/tmp/example/docs","kind":"directory","size":96,"readonly":false,"modified":null}
-```
-
-## Errors and operation rules
-
-```json
-{"type":"error","code":"permission_denied","message":"Cannot read directory"}
-```
-
-Codes are `not_found`, `permission_denied`, `not_directory`, `invalid_path`,
-`io`, and `unsupported_version`. An error is terminal for its operation.
-
-- One operation connection carries one request.
-- `list_batch`, `list_end`, and listing errors are valid only after `list`.
-- Empty listing batches are invalid.
-- Closing an operation connection cancels that operation.
-- Multiple operation connections may run concurrently.
-- A directory listing is not a filesystem snapshot; changes during enumeration
-  have platform-defined visibility.
+The client permits 64 concurrent operations per session plus a reserved
+heartbeat connection. The server permits at most 128 concurrent connections.

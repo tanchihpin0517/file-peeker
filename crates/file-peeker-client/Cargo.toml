@@ -10,13 +10,18 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 clap.workspace = true
-file-peeker-protocol = { path = "../file-peeker-protocol" }
+file-peeker-protocol = { version = "=0.1.0", path = "../file-peeker-protocol" }
+futures.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 uniffi = { workspace = true, features = ["tokio"] }
-uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [[bin]]
 name = "file-peeker-client"

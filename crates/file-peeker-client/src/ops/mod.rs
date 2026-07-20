@@ -1,5 +1,4 @@
-mod list;
-mod open;
+pub(crate) mod list;
+mod list_uniffi;
 
-pub(crate) use list::{Listing, current_root};
-pub(crate) use open::open;
+pub use list_uniffi::{DirectoryEntry, EntryKind, ListError, Listing};

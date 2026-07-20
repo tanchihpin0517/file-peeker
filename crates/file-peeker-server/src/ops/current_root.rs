@@ -1,12 +1,15 @@
 //! Implementation of the `current_root` operation.
 
 use file_peeker_protocol::{ErrorCode, ServerMessage};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::write_error;
 use crate::{ServerError, write_server_message};
 
-pub(super) async fn handle(stream: &mut UnixStream) -> Result<(), ServerError> {
+pub(super) async fn handle<S>(stream: &mut S) -> Result<(), ServerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let path = match std::env::current_dir() {
         Ok(path) => path,
         Err(error) => return write_error(stream, ErrorCode::Io, &error.to_string()).await,
@@ -33,7 +36,7 @@ pub(super) async fn handle(stream: &mut UnixStream) -> Result<(), ServerError> {
 #[cfg(test)]
 mod tests {
     use file_peeker_protocol::ServerMessage;
-    use tokio::{io::AsyncReadExt, net::UnixStream};
+    use tokio::io::{AsyncReadExt, duplex};
 
     use super::handle;
 
@@ -44,8 +47,7 @@ mod tests {
             .to_str()
             .expect("test directory should be UTF-8")
             .to_owned();
-        let (mut server_stream, mut client_stream) =
-            UnixStream::pair().expect("socket pair should be created");
+        let (mut server_stream, mut client_stream) = duplex(4096);
 
         let server = tokio::spawn(async move { handle(&mut server_stream).await });
         let mut response = String::new();

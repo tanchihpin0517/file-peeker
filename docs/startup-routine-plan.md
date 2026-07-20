@@ -1,4 +1,7 @@
-# Plan: Server Startup Routine for Local and Remote Browsing
+# Plan: Server Startup Routine for Local and Remote Browsing (superseded)
+
+This historical Unix-socket plan is superseded by `docs/startup.md` and
+`vscode.md`, which define the implemented protocol-v2 TCP/SOCKS architecture.
 
 ## Objective
 
@@ -61,7 +64,7 @@ feature and is not part of this startup change.
 The repository is currently a compilable skeleton:
 
 - `crates/file-peeker-client/src/lib.rs`
-  - `SessionConfig` contains only `server_executable_path`.
+  - `SessionConfig` contains only a local target.
   - `Client::connect` always returns `FilePeekerError::NotImplemented`.
   - `FilePeekerError` already has useful startup/lifecycle categories:
     `ServerStart`, `ServerExited`, `ConnectionClosed`, `Protocol`, and `Io`.
@@ -106,9 +109,7 @@ Conceptually:
 
 ```rust
 enum SessionTarget {
-    Local {
-        server_executable_path: String,
-    },
+    Local,
     Ssh {
         destination: String,
         server_version: String,
@@ -317,7 +318,8 @@ without starting SSH.
 
 ## Local startup sequence
 
-1. Validate that `server_executable_path` is non-empty.
+1. Resolve the matching managed server executable below
+   `~/.file-peeker/servers/VERSION`.
 2. Create a short, owner-only temporary directory and reserve
    `<directory>/server.sock`.
    - Account for the relatively small Unix socket path limit on macOS.

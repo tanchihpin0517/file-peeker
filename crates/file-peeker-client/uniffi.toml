@@ -4,4 +4,3 @@ ffi_module_name = "FilePeekerClientFFI"
 ffi_module_filename = "FilePeekerClientFFI"
 generate_module_map = true
 generate_immutable_records = true
-
