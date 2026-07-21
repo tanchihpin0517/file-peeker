@@ -1,92 +1,66 @@
-# File Peeker Protocol v1
+# File Peeker gRPC API v1
 
-File Peeker uses private NDJSON over IPv4 loopback TCP. Local sessions connect
-directly; SSH sessions connect to the same remote loopback endpoint through an
-OpenSSH SOCKS5 proxy. Every filesystem operation uses a distinct TCP
-connection; heartbeat and shutdown share one persistent control connection.
+File Peeker uses protobuf over plaintext HTTP/2 on IPv4 loopback. Local
+sessions connect directly. Remote sessions carry the same channel through an
+OpenSSH SOCKS5 tunnel, so the remote hop is SSH-encrypted. The protobuf package
+is `file_peeker.v1`.
 
 ## Startup and authentication
 
-`file-peeker-server serve` binds `127.0.0.1:0`, generates a 256-bit token, and
-prints one prefixed JSON record before keeping stdout silent:
+`file-peeker-server serve` binds `127.0.0.1:0`, generates a memory-only 256-bit
+token, and reports the selected endpoint before starting the gRPC server:
 
 ```text
-FILE_PEEKER_SERVER_STARTUP={"port":43827,"token":"<64 lowercase hexadecimal characters>"}
+FILE_PEEKER_SERVER_STARTUP={"port":43827,"token":"<64 lowercase hex characters>"}
 ```
 
-The launcher keeps server stdin open as a lifetime lease. EOF stops the server
-and cancels active operations. Tokens are session-specific, memory-only, and
-must not appear in arguments, environment, files, diagnostics, or errors.
+The launcher keeps server stdin open as its lifetime lease. EOF or a termination
+signal cancels active operations and triggers tonic graceful shutdown. The token
+is never placed in arguments, environment, files, diagnostics, or errors.
 
-Every connection begins with an authentication frame:
+Every gRPC request, including health checks, carries a sensitive metadata value:
 
-```json
-{"type":"auth","token":"<session token>"}
+```text
+authorization: Bearer <session token>
 ```
 
-Successful authentication is silent. An invalid or missing token receives a
-generic `authentication_failed` error and only that connection is closed.
+Missing or invalid credentials return generic `Unauthenticated`. The server
+binds only loopback and does not use TLS; SSH supplies encryption for remote
+sessions.
 
-After authentication, the next frame selects the connection behavior. A
-filesystem operation connection carries exactly one request and then closes.
-The persistent control connection begins with:
+## Services
 
-```json
-{"type":"hello","version":1}
-{"type":"hello_ok","version":1}
+The standard `grpc.health.v1.Health` service verifies startup readiness. The
+client opens one persistent channel per Session, enables HTTP/2 keepalive, and
+lets tonic reconnect it after transient transport loss. An interrupted RPC is
+not replayed or resumed; later RPCs may use the reconnected channel.
+
+`file_peeker.v1.FilePeeker` exposes:
+
+```proto
+rpc CurrentRoot(CurrentRootRequest) returns (CurrentRootResponse);
+rpc List(ListRequest) returns (stream ListBatch);
 ```
 
-Unsupported protocol versions are rejected. Messages are UTF-8 JSON followed
-by `\n`.
+`CurrentRoot` returns the server process's absolute UTF-8 working directory.
 
-## Heartbeat
+`List` accepts an absolute path, `~`, or `~/...`. It streams zero or more
+non-empty batches and completes with gRPC `OK`. The server targets 1 MiB per
+protobuf batch and flushes at 1024 entries or 25 ms after the first buffered
+entry. It does not sort.
 
-```json
-{"type":"heartbeat"}
-{"type":"heartbeat_ok"}
-```
+Errors may terminate a stream after valid batches, so callers retain partial
+results. Dropping the response stream cancels unfinished enumeration.
 
-Heartbeat runs on the authenticated control connection. Shutdown uses the same
-connection and receives `{"type":"shutdown_ok"}` before the server exits.
+## Status mapping
 
-## List a directory
+| Filesystem result | gRPC status |
+| --- | --- |
+| Missing path | `NotFound` |
+| Permission failure | `PermissionDenied` |
+| Non-directory | `FailedPrecondition` |
+| Invalid or non-UTF-8 path | `InvalidArgument` |
+| Other filesystem failure | `Internal` |
 
-```json
-{"type":"list","path":"/tmp/example"}
-```
-
-The path may be absolute, `~`, or start with `~/`. The server resolves tilde
-paths from its own `HOME`, so a remote request uses the remote user's home
-directory. Other relative paths and named-user forms such as `~alice` are
-invalid.
-
-The server sends zero or more non-empty batches followed by `list_end`:
-
-```json
-{"type":"list_batch","entries":[{"name":"docs","kind":"directory","navigable":true}]}
-{"type":"list_end"}
-```
-
-Wire entries omit their repeated parent path. The client validates each name as
-one path component and reconstructs the child path. EOF before
-`list_end` is failure. The server targets 128 KiB batches and flushes at 512
-entries or 25 ms after the first buffered entry. Errors may follow valid
-batches, allowing callers to retain partial results.
-
-`kind` is `file`, `directory`, `symlink`, or `other`. `navigable` is true for
-directories and symlinks whose current target is a directory.
-
-## Other operations and errors
-
-```json
-{"type":"current_root"}
-{"type":"current_root","path":"/home/example"}
-```
-
-Metadata remains reserved. Normal operation error codes are `not_found`,
-`permission_denied`, `not_directory`, `invalid_path`, and `io`. These terminate
-only their operation. Authentication, protocol, heartbeat, SOCKS, or TCP
-failures are fatal to the client session; there is no automatic reconnection.
-
-The client permits 64 concurrent operations per session plus a reserved
-heartbeat connection. The server permits at most 128 concurrent connections.
+The client maps these statuses back to its existing Rust and UniFFI error
+surfaces. API major version 1 remains reported by `version --format json`.

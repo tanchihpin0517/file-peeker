@@ -1,13 +1,15 @@
 use std::{io, sync::Arc};
 
+use file_peeker_protocol::v1::{CurrentRootRequest, ListRequest};
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tonic::{Request, transport::Channel};
 
 use crate::{
-    connection::{BufTcpStream, Connection, ConnectionConfig},
+    connection::{Connection, ConnectionConfig},
     ops::{
         CurrentRootError, ListError, Listing, current_root,
-        list::{self, ListStream},
+        list::{self, ListBatchStream, ListStream},
     },
 };
 
@@ -73,14 +75,6 @@ impl Session {
         }))
     }
 
-    async fn open_operation(&self) -> io::Result<BufTcpStream> {
-        let connection = self.connection.read().await;
-        let connection = connection
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
-        connection.open_operation().await
-    }
-
     /// Starts a native Rust stream of entries for one directory.
     ///
     /// # Errors
@@ -88,8 +82,7 @@ impl Session {
     /// Returns an I/O error when the session is closed, an operation connection
     /// cannot be opened, or the list request cannot be sent.
     pub async fn op_list(&self, path: &str) -> io::Result<ListStream> {
-        let stream = self.open_operation().await?;
-        list::list(stream, path).await
+        self.op_list_batches(path).await.map(list::flatten_batches)
     }
 
     /// Returns the server process's absolute working directory.
@@ -99,8 +92,43 @@ impl Session {
     /// Returns an I/O error when the session is closed, the operation
     /// connection fails, or the server returns an invalid response.
     pub async fn op_current_root(&self) -> io::Result<String> {
-        let stream = self.open_operation().await?;
-        current_root::current_root(stream).await
+        let (channel, request) = self.grpc_request(CurrentRootRequest {}).await?;
+        current_root::current_root(channel, request).await
+    }
+
+    /// Gracefully shuts down this session. Repeated calls succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a shutdown error when the managed server does not exit cleanly.
+    pub async fn close(&self) -> Result<(), CloseError> {
+        let connection = self.connection.write().await.take();
+        let result = match connection {
+            Some(connection) => connection.close().await,
+            None => return Ok(()),
+        };
+        result.map_err(|error| CloseError::ServerShutdown {
+            message: error.to_string(),
+        })
+    }
+}
+
+impl Session {
+    async fn grpc_request<T>(&self, message: T) -> io::Result<(Channel, Request<T>)> {
+        let connection = self.connection.read().await;
+        let connection = connection
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
+        Ok((connection.channel()?, connection.request(message)?))
+    }
+
+    async fn op_list_batches(&self, path: &str) -> io::Result<ListBatchStream> {
+        let (channel, request) = self
+            .grpc_request(ListRequest {
+                path: path.to_owned(),
+            })
+            .await?;
+        list::list_batches(channel, request).await
     }
 }
 
@@ -134,26 +162,19 @@ impl Session {
     ///
     /// Returns a listing error when the operation cannot be started.
     pub async fn op_list_uniffi(&self, path: String) -> Result<Arc<Listing>, ListError> {
-        self.op_list(&path)
+        self.op_list_batches(&path)
             .await
             .map(Listing::new)
             .map_err(ListError::from)
     }
 
-    /// Gracefully shuts down this session. Repeated calls succeed.
+    /// Gracefully shuts down this session through `UniFFI`. Repeated calls succeed.
     ///
     /// # Errors
     ///
-    /// Returns a shutdown error when the server does not acknowledge shutdown.
-    pub async fn close(&self) -> Result<(), CloseError> {
-        let connection = self.connection.write().await.take();
-        let result = match connection {
-            Some(connection) => connection.close().await,
-            None => return Ok(()),
-        };
-        result.map_err(|error| CloseError::ServerShutdown {
-            message: error.to_string(),
-        })
+    /// Returns a shutdown error when the managed server does not exit cleanly.
+    pub async fn close_uniffi(&self) -> Result<(), CloseError> {
+        self.close().await
     }
 }
 
@@ -197,6 +218,14 @@ mod tests {
 
         session.close().await.unwrap();
         session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_uniffi_is_idempotent() {
+        let session = Session::without_connection("close-uniffi-id", SessionTarget::Local);
+
+        session.close_uniffi().await.unwrap();
+        session.close_uniffi().await.unwrap();
     }
 
     #[tokio::test]

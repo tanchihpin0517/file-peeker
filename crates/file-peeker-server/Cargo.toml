@@ -8,10 +8,16 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 file-peeker-protocol = { version = "=0.1.0", path = "../file-peeker-protocol" }
+futures.workspace = true
 getrandom.workspace = true
+prost.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

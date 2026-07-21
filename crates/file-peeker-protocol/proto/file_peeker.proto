@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package file_peeker.v1;
+
+service FilePeeker {
+  rpc CurrentRoot(CurrentRootRequest) returns (CurrentRootResponse);
+  rpc List(ListRequest) returns (stream ListBatch);
+}
+
+message CurrentRootRequest {}
+
+message CurrentRootResponse {
+  string path = 1;
+}
+
+message ListRequest {
+  string path = 1;
+}
+
+message ListBatch {
+  repeated ListingEntry entries = 1;
+}
+
+message ListingEntry {
+  string name = 1;
+  EntryKind kind = 2;
+  bool navigable = 3;
+}
+
+enum EntryKind {
+  ENTRY_KIND_UNSPECIFIED = 0;
+  ENTRY_KIND_FILE = 1;
+  ENTRY_KIND_DIRECTORY = 2;
+  ENTRY_KIND_SYMLINK = 3;
+  ENTRY_KIND_OTHER = 4;
+}

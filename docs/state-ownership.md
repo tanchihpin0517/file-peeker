@@ -11,9 +11,8 @@ interaction state needed to display a directory tree.
 | Server process lifecycle | Stored in `Session` | No | No |
 | Server port, token, and stdin lifetime lease | Stored in the client lifecycle | No | No |
 | SSH SOCKS and control-socket state | Stored in the client lifecycle | No | No |
-| Heartbeat and fatal connection error | Stored in the client lifecycle | No | No |
-| Active listing TCP connection | Stored in `Listing` | No | No |
-| Partially received protocol frame | Stored in `Listing` | No | No |
+| gRPC channel, keepalive, and reconnect state | Stored in the client lifecycle | No | No |
+| Active listing gRPC stream | Stored in `Listing` | No | No |
 | Listing state: active, complete, or failed | Stored in `Listing` | No | No |
 | Listing's requested parent path | Temporarily stored to construct child paths | No | No |
 | Current received batch | Returned to the caller, not retained | Merged into `treeRows` | Merged into `rows` |
@@ -52,9 +51,9 @@ UI merges entries into its display tree
 Rust Listing does not retain the batch
 ```
 
-The client's `Listing` retains only the operation stream, an incomplete frame,
-the requested parent path, and its active, complete, or failed status. It does
-not accumulate directory entries after returning them to the caller.
+The client's `Listing` retains only the gRPC batch stream and its active,
+complete, or failed status. It does not accumulate directory entries after
+returning them to the caller.
 
 SwiftUI stores parent-linked rows in `BrowserModel.treeRows` and derives a
 sorted, depth-first visible list during rendering. The TUI stores its visible

@@ -6,10 +6,7 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 
-use super::{
-    ConnectionInfo,
-    common::{ensure_server_executable, read_server_startup, stop_child},
-};
+use super::{ConnectionInfo, ensure_server_executable, read_server_startup, stop_child};
 
 pub(super) async fn prepare(
     force_install: bool,

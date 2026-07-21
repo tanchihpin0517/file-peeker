@@ -1,7 +1,7 @@
 # Client CLI
 
 `file-peeker-client` is a test-only command-line tool for exercising local and
-remote server provisioning, startup, and protocol connections.
+remote server provisioning, startup, and gRPC connections.
 
 ## `test` subcommands
 
@@ -11,12 +11,12 @@ All test-only operations are nested under the top-level `test` command.
 
 Without `SERVER`, ensures the server is installed from Git under
 `~/.file-peeker/servers/VERSION`, starts it locally, authenticates a persistent
-control connection, checks it with a heartbeat, and prints the port and token as
+gRPC channel, checks the standard Health service, and prints the port and token as
 one line of JSON. Use `--force` to reinstall the server first.
 
 With `SERVER`, ensures the server is installed from Git and performs the same
 checks through SSH. `--force` also reinstalls the remote server. Exiting either
-test sends the shutdown request.
+test closes the server's stdin lifetime lease.
 
 ```text
 cargo run -p file-peeker-client -- test connect

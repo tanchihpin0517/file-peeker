@@ -6,39 +6,36 @@ the native Ratatui UI and to SwiftUI through UniFFI.
 
 ```text
 User -> Ratatui ─┐
-                 ├-> Rust client -> authenticated TCP operations -> server -> filesystem
+                 ├-> Rust client -> authenticated gRPC channel -> server -> filesystem
 User -> SwiftUI ─┘
 ```
 
 ## Server and transport
 
 `Client` strongly retains its started Sessions by UUID. Each `Session` owns one
-local or remote server lifecycle. Launcher stdin defines
-that lifecycle; every filesystem operation uses a separate authenticated TCP
-stream. Remote streams traverse one OpenSSH SOCKS transport. Independent
-operations therefore require neither request IDs nor application multiplexing.
-
-The shared protocol I/O layer reads and writes newline-delimited request and
-response frames. Clients retain responses until completion.
+local or remote server lifecycle. Launcher stdin defines that lifecycle. One
+authenticated tonic HTTP/2 channel multiplexes every filesystem RPC and the
+standard health check. Remote channels connect through one OpenSSH SOCKS
+transport; tonic opens a replacement SOCKS stream when its channel reconnects.
 
 The server lists one directory level with `tokio::fs::read_dir`. It accumulates
 one bounded batch, writes it, then resumes enumeration. This makes transport
 backpressure bound server memory while still reducing time to first visible
 entry and avoiding one message per file.
 
-Listing success is an explicit `list_end`; EOF is failure. Errors may follow
-valid batches, allowing UIs to retain partial results and show an incomplete
-state. The server never sorts because global sorting would require collecting
-the entire directory.
+Listing success is normal gRPC stream completion. A terminal gRPC status may
+follow valid batches, allowing UIs to retain partial results and show an
+incomplete state. The server never sorts because global sorting would require
+collecting the entire directory.
 
 ## Client
 
 The client owns all transport concerns:
 
 - Local and SSH startup, installation, and shutdown.
-- Protocol v1 token handshakes and newline-delimited JSON parsing.
-- Heartbeat health checks and fatal-session state.
-- One persistent buffered reader per streamed `Listing`.
+- Sensitive bearer-token metadata and standard gRPC health checks.
+- One reconnectable tonic channel per Session.
+- One gRPC response stream per active listing.
 - Mapping wire errors to public typed errors.
 - Validating names and reconstructing full child paths.
 - Cancelling an operation when its `Listing` is dropped.

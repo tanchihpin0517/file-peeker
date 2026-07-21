@@ -1,6 +1,7 @@
 use std::{io, path::Path};
 
 use clap::{Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
 
 mod cli;
 
@@ -48,8 +49,10 @@ enum TestCommand {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,file_peeker_client=debug"));
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_env_filter(filter)
         .with_target(false)
         .compact()
         .init();

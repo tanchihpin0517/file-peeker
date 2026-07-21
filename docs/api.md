@@ -2,7 +2,7 @@
 
 The public application API is the Rust `file-peeker-client` crate, exported to
 Swift through UniFFI. The Rust API exposes directory listings as streams; the
-Swift API wraps the same stream in an async `Listing.next()` adapter.
+Swift API exposes the same server batches through `Listing.nextBatch()`.
 
 ## Public interface
 
@@ -33,7 +33,7 @@ impl Session {
 }
 
 impl Listing {
-    pub async fn next(&self) -> Result<Option<DirectoryEntry>, ListError>;
+    pub async fn next_batch(&self) -> Result<Option<Vec<DirectoryEntry>>, ListError>;
 }
 
 pub struct SessionConfig {
@@ -70,20 +70,19 @@ pub enum EntryKind { File, Directory, Symlink, Other }
 `Client.start_session` is asynchronous. A local target reuses or installs the
 matching server below `~/.file-peeker/servers/VERSION`, then starts it directly.
 A remote target provisions and starts the matching server over SSH. Both paths
-authenticate the control connection and return a UUID only when startup
+authenticate a gRPC health check and return a UUID only when startup
 succeeds. The Client strongly retains the Session, which owns the server process
 and, for remote targets, the SSH transport. `Client.close_session` removes and
-gracefully closes the retained Session. Direct `Session.close()` remains
-idempotent but does not unregister it. Dropping Client releases all retained
+gracefully closes the retained Session. Direct Rust `Session.close()` and Swift
+`Session.closeUniffi()` remain idempotent but do not unregister it. Dropping Client releases all retained
 sessions; unclosed connections use their non-blocking fallback cleanup.
 
-`Session.op_list` is the native Rust API. It opens an authenticated operation
-connection and returns a `Stream` that yields listing entries in order. The
-stream owns its connection, buffers at most the current server batch, and
-cancels unfinished work when dropped.
+`Session.op_list` is the native Rust API. It starts a server-streaming RPC on
+the Session's shared HTTP/2 channel and flattens its batches into entries in
+order. Dropping the stream cancels unfinished work.
 
 `Session.op_list_uniffi` is the Swift-compatible adapter. It returns a `Listing`
-object whose async `next()` method advances the same Rust stream. Completion is
+object whose async `nextBatch()` method returns one server batch. Completion is
 idempotent, and terminal stream errors are repeated consistently.
 
 ## Swift usage
@@ -110,8 +109,10 @@ guard let localSession = await client.getSession(id: localSessionID) else {
 }
 
 let listing = try await localSession.opListUniffi(path: "/tmp")
-while let entry = try await listing.next() {
-    print(entry.name)
+while let batch = try await listing.nextBatch() {
+    for entry in batch {
+        print(entry.name)
+    }
 }
 
 try await client.closeSession(id: localSessionID)

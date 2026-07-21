@@ -1,11 +1,11 @@
 use std::{fmt, io, sync::Arc};
 
-use file_peeker_protocol::{EntryKind as ProtocolEntryKind, ListingEntry};
+use file_peeker_protocol::v1::{EntryKind as ProtocolEntryKind, ListingEntry};
 use futures::TryStreamExt;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use super::list::ListStream;
+use super::list::ListBatchStream;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum EntryKind {
@@ -42,7 +42,7 @@ pub struct Listing {
 }
 
 enum ListingState {
-    Active(ListStream),
+    Active(ListBatchStream),
     Complete,
     Failed(ListError),
 }
@@ -54,7 +54,7 @@ impl fmt::Debug for Listing {
 }
 
 impl Listing {
-    pub(crate) fn new(stream: ListStream) -> Arc<Self> {
+    pub(crate) fn new(stream: ListBatchStream) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(ListingState::Active(stream)),
         })
@@ -63,12 +63,13 @@ impl Listing {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Listing {
-    /// Returns the next entry, or `None` after the listing completes.
+    /// Returns the next non-empty server batch, or `None` after completion.
     ///
     /// # Errors
     ///
-    /// Returns a listing error when the underlying Rust stream fails.
-    pub async fn next(&self) -> Result<Option<DirectoryEntry>, ListError> {
+    /// Returns the terminal gRPC or protocol-conversion failure. Repeated calls
+    /// return the same failure.
+    pub async fn next_batch(&self) -> Result<Option<Vec<DirectoryEntry>>, ListError> {
         let mut state = self.state.lock().await;
         let result = match &mut *state {
             ListingState::Active(stream) => stream.try_next().await,
@@ -77,7 +78,14 @@ impl Listing {
         };
 
         match result {
-            Ok(Some(entry)) => Ok(Some(entry.into())),
+            Ok(Some(entries)) => entries
+                .into_iter()
+                .map(DirectoryEntry::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some)
+                .inspect_err(|error| {
+                    *state = ListingState::Failed(error.clone());
+                }),
             Ok(None) => {
                 *state = ListingState::Complete;
                 Ok(None)
@@ -91,24 +99,29 @@ impl Listing {
     }
 }
 
-impl From<ListingEntry> for DirectoryEntry {
-    fn from(entry: ListingEntry) -> Self {
-        Self {
-            name: entry.name,
-            kind: entry.kind.into(),
-            navigable: entry.navigable,
-        }
-    }
-}
+impl TryFrom<ListingEntry> for DirectoryEntry {
+    type Error = ListError;
 
-impl From<ProtocolEntryKind> for EntryKind {
-    fn from(kind: ProtocolEntryKind) -> Self {
-        match kind {
-            ProtocolEntryKind::File => Self::File,
-            ProtocolEntryKind::Directory => Self::Directory,
-            ProtocolEntryKind::Symlink => Self::Symlink,
-            ProtocolEntryKind::Other => Self::Other,
-        }
+    fn try_from(entry: ListingEntry) -> Result<Self, Self::Error> {
+        let kind = ProtocolEntryKind::try_from(entry.kind).map_err(|_| ListError::Operation {
+            message: format!("server returned unknown entry kind {}", entry.kind),
+        })?;
+        let kind = match kind {
+            ProtocolEntryKind::Unspecified => {
+                return Err(ListError::Operation {
+                    message: "server returned an unspecified entry kind".into(),
+                });
+            }
+            ProtocolEntryKind::File => EntryKind::File,
+            ProtocolEntryKind::Directory => EntryKind::Directory,
+            ProtocolEntryKind::Symlink => EntryKind::Symlink,
+            ProtocolEntryKind::Other => EntryKind::Other,
+        };
+        Ok(Self {
+            name: entry.name,
+            kind,
+            navigable: entry.navigable,
+        })
     }
 }
 
@@ -116,39 +129,45 @@ impl From<ProtocolEntryKind> for EntryKind {
 mod tests {
     use std::io;
 
-    use file_peeker_protocol::{EntryKind as ProtocolEntryKind, ListingEntry};
+    use file_peeker_protocol::v1::{EntryKind as ProtocolEntryKind, ListingEntry};
     use futures::{StreamExt, stream};
 
     use super::{DirectoryEntry, EntryKind, ListError, Listing};
 
     #[tokio::test]
-    async fn yields_converted_entries_then_completes_idempotently() {
-        let stream = stream::iter([
-            Ok(ListingEntry {
+    async fn yields_batches_then_completes_idempotently() {
+        let stream = stream::iter([Ok(vec![
+            ListingEntry {
                 name: "notes.txt".into(),
-                kind: ProtocolEntryKind::File,
+                kind: ProtocolEntryKind::File.into(),
                 navigable: false,
-            }),
-            Ok(ListingEntry {
+            },
+            ListingEntry {
                 name: "docs".into(),
-                kind: ProtocolEntryKind::Directory,
+                kind: ProtocolEntryKind::Directory.into(),
                 navigable: true,
-            }),
-        ])
+            },
+        ])])
         .boxed();
         let listing = Listing::new(stream);
 
         assert_eq!(
-            listing.next().await.unwrap(),
-            Some(DirectoryEntry {
-                name: "notes.txt".into(),
-                kind: EntryKind::File,
-                navigable: false,
-            })
+            listing.next_batch().await.unwrap(),
+            Some(vec![
+                DirectoryEntry {
+                    name: "notes.txt".into(),
+                    kind: EntryKind::File,
+                    navigable: false,
+                },
+                DirectoryEntry {
+                    name: "docs".into(),
+                    kind: EntryKind::Directory,
+                    navigable: true,
+                },
+            ])
         );
-        assert_eq!(listing.next().await.unwrap().unwrap().name, "docs");
-        assert_eq!(listing.next().await.unwrap(), None);
-        assert_eq!(listing.next().await.unwrap(), None);
+        assert_eq!(listing.next_batch().await.unwrap(), None);
+        assert_eq!(listing.next_batch().await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -160,15 +179,24 @@ mod tests {
         .boxed();
         let listing = Listing::new(stream);
 
-        let first = listing.next().await.unwrap_err();
-        let second = listing.next().await.unwrap_err();
-
+        let first = listing.next_batch().await.unwrap_err();
+        let second = listing.next_batch().await.unwrap_err();
         assert_eq!(first, second);
-        assert_eq!(
-            first,
-            ListError::Operation {
-                message: "listing connection closed".into()
-            }
-        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unspecified_entry_kind_stickily() {
+        let stream = stream::iter([Ok(vec![ListingEntry {
+            name: "unknown".into(),
+            kind: ProtocolEntryKind::Unspecified.into(),
+            navigable: false,
+        }])])
+        .boxed();
+        let listing = Listing::new(stream);
+
+        let first = listing.next_batch().await.unwrap_err();
+        let second = listing.next_batch().await.unwrap_err();
+        assert_eq!(first, second);
+        assert!(matches!(first, ListError::Operation { .. }));
     }
 }

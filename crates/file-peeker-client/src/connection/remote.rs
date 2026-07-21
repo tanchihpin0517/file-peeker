@@ -12,8 +12,7 @@ use tokio::{
 };
 
 use super::{
-    ConnectionInfo,
-    common::{ensure_server_executable, read_server_startup, shell_quote, stop_child},
+    ConnectionInfo, ensure_server_executable, read_server_startup, shell_quote, stop_child,
 };
 
 pub(super) async fn prepare(
@@ -209,10 +208,7 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, duplex};
 
     use super::{get_server_executable, ssh_command, start_server};
-    use crate::connection::{
-        ConnectionInfo,
-        common::{SERVER_READY_PREFIX, ensure_server_command},
-    };
+    use crate::connection::{ConnectionInfo, SERVER_READY_PREFIX, ensure_server_command};
 
     #[test]
     fn ssh_command_uses_dynamic_forwarding() {
