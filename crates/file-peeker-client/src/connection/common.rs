@@ -10,7 +10,7 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout},
 };
 
-use super::{BufTcpStream, RemoteServerStartup};
+use super::{BufTcpStream, ConnectionInfo};
 
 const SERVER_STARTUP_PREFIX: &str = "FILE_PEEKER_SERVER_STARTUP=";
 pub(super) const SERVER_READY_PREFIX: &str = "FILE_PEEKER_SERVER_READY=";
@@ -26,7 +26,7 @@ struct ServerStartupResponse {
 
 pub(super) async fn read_server_startup(
     server_stdout: &mut (impl AsyncBufRead + Unpin),
-) -> io::Result<RemoteServerStartup> {
+) -> io::Result<ConnectionInfo> {
     let startup_json = loop {
         let mut line = String::new();
         if server_stdout.read_line(&mut line).await? == 0 || !line.ends_with('\n') {
@@ -53,8 +53,8 @@ pub(super) async fn read_server_startup(
         ));
     }
 
-    Ok(RemoteServerStartup {
-        forward_port: startup.port,
+    Ok(ConnectionInfo {
+        server_port: startup.port,
         token: startup.token,
     })
 }
@@ -63,11 +63,10 @@ pub(super) async fn ensure_server_executable(
     server_stdin: &mut (impl AsyncWrite + Unpin),
     server_stdout: &mut (impl AsyncBufRead + Unpin),
     force_install: bool,
-    local_source_path: Option<&str>,
     command_output: &mut (impl AsyncWrite + Unpin),
 ) -> io::Result<String> {
     server_stdin
-        .write_all(ensure_server_command(force_install, local_source_path).as_bytes())
+        .write_all(ensure_server_command(force_install).as_bytes())
         .await?;
     server_stdin.flush().await?;
 
@@ -91,17 +90,11 @@ pub(super) async fn ensure_server_executable(
     }
 }
 
-pub(super) fn ensure_server_command(
-    force_install: bool,
-    local_source_path: Option<&str>,
-) -> String {
+pub(super) fn ensure_server_command(force_install: bool) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let force_install = if force_install { "true" } else { "false" };
-    let local_source_argument = local_source_path
-        .map(|path| format!(" {}", shell_quote(path)))
-        .unwrap_or_default();
     format!(
-        "sh -s -- '{version}' '{force_install}'{local_source_argument} <<'{ENSURE_SERVER_HEREDOC}'\n{ENSURE_SERVER_SCRIPT}{ENSURE_SERVER_HEREDOC}\n"
+        "sh -s -- '{version}' '{force_install}' <<'{ENSURE_SERVER_HEREDOC}'\n{ENSURE_SERVER_SCRIPT}{ENSURE_SERVER_HEREDOC}\n"
     )
 }
 
@@ -235,7 +228,7 @@ mod tests {
         ENSURE_SERVER_SCRIPT, authenticate_stream, ensure_server_command, read_server_startup,
         stop_child,
     };
-    use crate::server::RemoteServerStartup;
+    use crate::connection::ConnectionInfo;
 
     #[tokio::test]
     async fn startup_ignores_output_before_prefixed_result() {
@@ -245,8 +238,8 @@ mod tests {
 
         assert_eq!(
             read_server_startup(&mut output).await.unwrap(),
-            RemoteServerStartup {
-                forward_port: 43827,
+            ConnectionInfo {
+                server_port: 43827,
                 token: "test-token".into(),
             }
         );
@@ -292,14 +285,12 @@ mod tests {
 
     #[test]
     fn ensure_command_checks_then_installs_versioned_server() {
-        let command = ensure_server_command(false, None);
-        let local_command = ensure_server_command(true, Some("/tmp/file-peeker checkout's copy"));
+        let command = ensure_server_command(false);
+        let forced_command = ensure_server_command(true);
         let version = env!("CARGO_PKG_VERSION");
 
         assert!(command.starts_with(&format!("sh -s -- '{version}' 'false' <<")));
-        assert!(local_command.starts_with(&format!(
-            "sh -s -- '{version}' 'true' '/tmp/file-peeker checkout'\"'\"'s copy' <<"
-        )));
+        assert!(forced_command.starts_with(&format!("sh -s -- '{version}' 'true' <<")));
         assert!(command.contains(ENSURE_SERVER_SCRIPT));
         assert!(ENSURE_SERVER_SCRIPT.contains("[ -x \"$server_executable\" ]"));
         assert!(ENSURE_SERVER_SCRIPT.contains("cargo install"));
@@ -311,10 +302,7 @@ mod tests {
             ENSURE_SERVER_SCRIPT
                 .contains("--git https://github.com/tanchihpin0517/file-peeker.git")
         );
-        assert!(
-            ENSURE_SERVER_SCRIPT
-                .contains("--path \"$local_source_path/crates/file-peeker-server\"")
-        );
+        assert!(!ENSURE_SERVER_SCRIPT.contains("--path"));
         assert!(ENSURE_SERVER_SCRIPT.contains("$HOME/.file-peeker/servers/$server_version"));
         assert!(ENSURE_SERVER_SCRIPT.contains(super::SERVER_READY_PREFIX));
         assert!(ENSURE_SERVER_SCRIPT.contains(super::SERVER_ERROR_PREFIX));

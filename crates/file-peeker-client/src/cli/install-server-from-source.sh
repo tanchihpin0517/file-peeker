@@ -2,7 +2,7 @@
 
 server_version=$1
 force_install=$2
-local_source_path=${3-}
+source_root=$3
 server_root="$HOME/.file-peeker/servers/$server_version"
 server_executable="$server_root/bin/file-peeker-server"
 
@@ -15,17 +15,9 @@ install_server() {
         set -- --force "$@"
     fi
 
-    if [ -z "$local_source_path" ]; then
-        cargo install \
-            "$@" \
-            --git https://github.com/tanchihpin0517/file-peeker.git \
-            --version "$server_version" \
-            file-peeker-server
-    else
-        cargo install \
-            "$@" \
-            --path "$local_source_path/crates/file-peeker-server"
-    fi
+    cargo install \
+        "$@" \
+        --path "$source_root/crates/file-peeker-server"
 }
 
 if [ "$force_install" != true ] && [ -x "$server_executable" ]; then
@@ -35,5 +27,5 @@ elif command -v cargo >/dev/null 2>&1 &&
     [ -x "$server_executable" ]; then
     printf 'FILE_PEEKER_SERVER_READY=%s\n' "$server_executable"
 else
-    printf 'FILE_PEEKER_SERVER_ERROR=%s\n' 'unable to install file-peeker-server'
+    printf 'FILE_PEEKER_SERVER_ERROR=%s\n' 'unable to install file-peeker-server from source'
 fi

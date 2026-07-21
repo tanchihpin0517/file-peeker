@@ -1,11 +1,11 @@
 use std::{io, path::Path};
 
-use file_peeker_client::server::RemoteServer;
+use file_peeker_client::connection::remote::create_ssh_connection;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 pub async fn run(destination: &str) -> io::Result<()> {
     let (_port, mut child, mut ssh_stdin, mut ssh_stdout) =
-        RemoteServer::create_ssh_connection(Path::new("ssh"), destination).await?;
+        create_ssh_connection(Path::new("ssh"), destination).await?;
     let destination = destination.replace('\'', "'\"'\"'");
     ssh_stdin
         .write_all(format!("echo 'Connect to {destination}'\nexit\n").as_bytes())

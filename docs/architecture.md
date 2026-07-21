@@ -12,7 +12,8 @@ User -> SwiftUI ─┘
 
 ## Server and transport
 
-Each `Session` owns one local or remote server lifecycle. Launcher stdin defines
+`Client` strongly retains its started Sessions by UUID. Each `Session` owns one
+local or remote server lifecycle. Launcher stdin defines
 that lifecycle; every filesystem operation uses a separate authenticated TCP
 stream. Remote streams traverse one OpenSSH SOCKS transport. Independent
 operations therefore require neither request IDs nor application multiplexing.
@@ -35,7 +36,7 @@ the entire directory.
 The client owns all transport concerns:
 
 - Local and SSH startup, installation, and shutdown.
-- Protocol v2 token handshakes and newline-delimited JSON parsing.
+- Protocol v1 token handshakes and newline-delimited JSON parsing.
 - Heartbeat health checks and fatal-session state.
 - One persistent buffered reader per streamed `Listing`.
 - Mapping wire errors to public typed errors.
@@ -45,6 +46,8 @@ The client owns all transport concerns:
 The UI-facing listing flow is:
 
 ```text
+Session.op_current_root() -> absolute server working directory
+Session.op_current_root_uniffi() -> UniFFI error-mapping adapter
 Session.list(path) -> Listing
 Listing.next_batch() -> Some(entries)
 Listing.next_batch() -> Some(entries)

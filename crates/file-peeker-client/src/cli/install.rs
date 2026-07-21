@@ -1,63 +1,139 @@
 use std::{io, path::Path, process::Stdio};
 
-use file_peeker_client::server::{LocalServer, LocalServerConfig, RemoteServer};
+use file_peeker_client::connection::{local, remote};
 use tokio::{
-    io::{AsyncWriteExt as _, copy},
+    io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader, copy},
     process::{Child, Command},
 };
 
-pub(crate) const DEFAULT_REMOTE_PROJECT_DIR: &str = ".file-peeker/debug/repo";
+const DEFAULT_REMOTE_PROJECT_DIR: &str = ".file-peeker/debug/repo";
+const SERVER_READY_PREFIX: &str = "FILE_PEEKER_SERVER_READY=";
+const SERVER_ERROR_PREFIX: &str = "FILE_PEEKER_SERVER_ERROR=";
+const SOURCE_INSTALL_SCRIPT: &str = include_str!("install-server-from-source.sh");
+const SOURCE_INSTALL_HEREDOC: &str = "FILE_PEEKER_SOURCE_INSTALL_SCRIPT";
 
 pub async fn run(
     destination: Option<&str>,
     force_install: bool,
-    source: Option<&str>,
+    source: Option<&Path>,
 ) -> io::Result<()> {
-    let executable = if let Some(destination) = destination {
-        let remote_project_dir = source.unwrap_or(DEFAULT_REMOTE_PROJECT_DIR);
-        upload_and_install(destination, force_install, remote_project_dir).await?
-    } else {
-        let config = local_install_config(force_install, source);
-        LocalServer::get_server_executable(&config)
+    let executable = match (destination, source) {
+        (Some(destination), Some(source)) => {
+            upload_project_dir(source, destination, DEFAULT_REMOTE_PROJECT_DIR).await?;
+            install_remote_server_from_source(
+                destination,
+                force_install,
+                DEFAULT_REMOTE_PROJECT_DIR,
+            )
+            .await?
+        }
+        (None, Some(source)) => install_local_server_from_source(force_install, source).await?,
+        (Some(destination), None) => install_remote_server(destination, force_install).await?,
+        (None, None) => local::get_server_executable(force_install)
             .await?
             .to_string_lossy()
-            .into_owned()
+            .into_owned(),
     };
     println!("{executable}");
     Ok(())
 }
 
-fn local_install_config(force_install: bool, source: Option<&str>) -> LocalServerConfig {
-    LocalServerConfig {
+async fn install_local_server_from_source(
+    force_install: bool,
+    source: &Path,
+) -> io::Result<String> {
+    let source = source.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "server source path must be valid UTF-8",
+        )
+    })?;
+    let mut command = Command::new("sh");
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let Some(mut stdin) = child.stdin.take() else {
+        stop_process(&mut child).await;
+        return Err(io::Error::other(
+            "source installer standard input is unavailable",
+        ));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        drop(stdin);
+        stop_process(&mut child).await;
+        return Err(io::Error::other(
+            "source installer standard output is unavailable",
+        ));
+    };
+    let mut command_output = tokio::io::stdout();
+    let executable = run_source_installer(
+        &mut stdin,
+        &mut BufReader::new(stdout),
         force_install,
-        local_source_path: Some(match source {
-            Some(source) => Path::new(source).to_path_buf(),
-            None => project_dir().to_path_buf(),
-        }),
+        source,
+        &mut command_output,
+    )
+    .await;
+    drop(stdin);
+
+    let executable = match executable {
+        Ok(executable) => executable,
+        Err(error) => {
+            stop_process(&mut child).await;
+            return Err(error);
+        }
+    };
+    let status = child.wait().await?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "source installer failed with {status}"
+        )));
+    }
+    Ok(executable)
+}
+
+async fn run_source_installer(
+    server_stdin: &mut (impl AsyncWrite + Unpin),
+    server_stdout: &mut (impl AsyncBufRead + Unpin),
+    force_install: bool,
+    source: &str,
+    command_output: &mut (impl AsyncWrite + Unpin),
+) -> io::Result<String> {
+    server_stdin
+        .write_all(source_install_command(force_install, source).as_bytes())
+        .await?;
+    server_stdin.flush().await?;
+
+    loop {
+        let mut line = String::new();
+        if server_stdout.read_line(&mut line).await? == 0 || !line.ends_with('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source installer closed stdout before reporting a result",
+            ));
+        }
+        let status_line = line.trim_end_matches(['\r', '\n']);
+        if let Some(executable) = status_line.strip_prefix(SERVER_READY_PREFIX) {
+            return Ok(executable.to_owned());
+        }
+        if let Some(message) = status_line.strip_prefix(SERVER_ERROR_PREFIX) {
+            return Err(io::Error::other(message.to_owned()));
+        }
+        command_output.write_all(line.as_bytes()).await?;
+        command_output.flush().await?;
     }
 }
 
-pub(crate) async fn upload_and_install(
-    destination: &str,
-    force_install: bool,
-    remote_project_dir: &str,
-) -> io::Result<String> {
-    upload_current_project(destination, remote_project_dir).await?;
-    install_remote_server(destination, force_install, remote_project_dir).await
-}
-
-pub(crate) async fn upload_current_project(
-    remote_server: &str,
-    remote_project_dir: &str,
-) -> io::Result<()> {
-    upload_project_dir(project_dir(), remote_server, remote_project_dir).await
-}
-
-pub(crate) fn project_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("client crate should be inside the workspace crates directory")
+fn source_install_command(force_install: bool, source: &str) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let force_install = if force_install { "true" } else { "false" };
+    format!(
+        "sh -s -- '{version}' '{force_install}' {} <<'{SOURCE_INSTALL_HEREDOC}'\n{SOURCE_INSTALL_SCRIPT}{SOURCE_INSTALL_HEREDOC}\n",
+        shell_quote(source)
+    )
 }
 
 async fn upload_project_dir(
@@ -197,19 +273,39 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-async fn install_remote_server(
-    destination: &str,
-    force_install: bool,
-    local_source_path: &str,
-) -> io::Result<String> {
+async fn install_remote_server(destination: &str, force_install: bool) -> io::Result<String> {
     let (_port, mut child, mut ssh_stdin, mut ssh_stdout) =
-        RemoteServer::create_ssh_connection(Path::new("ssh"), destination).await?;
+        remote::create_ssh_connection(Path::new("ssh"), destination).await?;
     let mut command_output = tokio::io::stdout();
-    let executable = RemoteServer::get_server_executable(
+    let executable = remote::get_server_executable(
         &mut ssh_stdin,
         &mut ssh_stdout,
         force_install,
-        Some(local_source_path),
+        &mut command_output,
+    )
+    .await;
+
+    ssh_stdin.write_all(b"exit\n").await?;
+    ssh_stdin.flush().await?;
+    drop(ssh_stdin);
+    child.wait().await?;
+
+    executable
+}
+
+async fn install_remote_server_from_source(
+    destination: &str,
+    force_install: bool,
+    remote_source: &str,
+) -> io::Result<String> {
+    let (_port, mut child, mut ssh_stdin, mut ssh_stdout) =
+        remote::create_ssh_connection(Path::new("ssh"), destination).await?;
+    let mut command_output = tokio::io::stdout();
+    let executable = run_source_installer(
+        &mut ssh_stdin,
+        &mut ssh_stdout,
+        force_install,
+        remote_source,
         &mut command_output,
     )
     .await;
@@ -232,27 +328,35 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
 
     use super::{
-        filter_existing_project_files, local_install_config, project_dir, remote_extract_command,
-        upload_project_dir_with_commands,
+        SOURCE_INSTALL_SCRIPT, filter_existing_project_files, remote_extract_command,
+        source_install_command, upload_project_dir_with_commands,
     };
 
-    #[test]
-    fn local_install_defaults_to_current_workspace() {
-        let config = local_install_config(false, None);
-
-        assert!(!config.force_install);
-        assert_eq!(config.local_source_path.as_deref(), Some(project_dir()));
+    fn project_dir() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("client crate should be inside the workspace crates directory")
     }
 
     #[test]
-    fn local_install_uses_explicit_source_and_force() {
-        let config = local_install_config(true, Some("/tmp/file-peeker-source"));
+    fn source_install_command_quotes_path_and_preserves_force() {
+        let command = source_install_command(false, "/tmp/file peeker's source");
+        let forced_command = source_install_command(true, "/tmp/file-peeker");
+        let version = env!("CARGO_PKG_VERSION");
 
-        assert!(config.force_install);
-        assert_eq!(
-            config.local_source_path.as_deref(),
-            Some(Path::new("/tmp/file-peeker-source"))
+        assert!(command.starts_with(&format!(
+            "sh -s -- '{version}' 'false' '/tmp/file peeker'\"'\"'s source' <<"
+        )));
+        assert!(forced_command.starts_with(&format!(
+            "sh -s -- '{version}' 'true' '/tmp/file-peeker' <<"
+        )));
+        assert!(command.contains(SOURCE_INSTALL_SCRIPT));
+        assert!(
+            SOURCE_INSTALL_SCRIPT.contains("--path \"$source_root/crates/file-peeker-server\"")
         );
+        assert!(SOURCE_INSTALL_SCRIPT.contains("--root \"$server_root\""));
+        assert!(SOURCE_INSTALL_SCRIPT.contains("--force"));
     }
 
     #[test]

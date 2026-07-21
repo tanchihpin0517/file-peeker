@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, path::Path};
 
 use clap::{Parser, Subcommand};
 
@@ -22,17 +22,21 @@ enum Command {
 #[derive(Debug, Eq, PartialEq, Subcommand)]
 enum TestCommand {
     Connect {
+        #[arg(long)]
+        force: bool,
         server: Option<String>,
     },
     Install {
         #[arg(long)]
         force: bool,
         #[arg(long)]
-        source: Option<String>,
+        from_source: Option<String>,
         server: Option<String>,
     },
     List {
         path: String,
+        #[arg(long)]
+        remote: Option<String>,
     },
     SshConnection {
         server: String,
@@ -55,13 +59,24 @@ async fn main() -> io::Result<()> {
 async fn run(cli: &Cli) -> io::Result<()> {
     match &cli.command {
         Command::Test { command } => match command {
-            TestCommand::Connect { server } => cli::connect::run(server.as_deref()).await?,
+            TestCommand::Connect { force, server } => {
+                cli::connect::run(server.as_deref(), *force).await?;
+            }
             TestCommand::Install {
                 force,
-                source,
+                from_source,
                 server,
-            } => cli::install::run(server.as_deref(), *force, source.as_deref()).await?,
-            TestCommand::List { path } => cli::list::run(path).await?,
+            } => {
+                cli::install::run(
+                    server.as_deref(),
+                    *force,
+                    from_source.as_deref().map(Path::new),
+                )
+                .await?;
+            }
+            TestCommand::List { path, remote } => {
+                cli::list::run(path, remote.as_deref()).await?;
+            }
             TestCommand::SshConnection { server } => cli::ssh_connection::run(server).await?,
             TestCommand::StartServer { server } => cli::start_server::run(server).await?,
         },
@@ -84,7 +99,31 @@ mod tests {
             cli.command,
             Command::Test {
                 command: TestCommand::List {
-                    path: "/tmp/reports".into()
+                    path: "/tmp/reports".into(),
+                    remote: None
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_remote_test_list() {
+        let cli = Cli::try_parse_from([
+            "file-peeker-client",
+            "test",
+            "list",
+            ".",
+            "--remote",
+            "example.test",
+        ])
+        .expect("remote test list command should parse");
+
+        assert_eq!(
+            cli.command,
+            Command::Test {
+                command: TestCommand::List {
+                    path: ".".into(),
+                    remote: Some("example.test".into())
                 }
             }
         );
@@ -108,7 +147,7 @@ mod tests {
             Command::Test {
                 command: TestCommand::Install {
                     force: false,
-                    source: None,
+                    from_source: None,
                     server: Some("example.test".into())
                 }
             }
@@ -131,31 +170,7 @@ mod tests {
             Command::Test {
                 command: TestCommand::Install {
                     force: true,
-                    source: None,
-                    server: Some("example.test".into())
-                }
-            }
-        );
-    }
-
-    #[test]
-    fn parses_test_install_local_source() {
-        let cli = Cli::try_parse_from([
-            "file-peeker-client",
-            "test",
-            "install",
-            "example.test",
-            "--source",
-            ".file-peeker/debug/repo",
-        ])
-        .expect("test install local source command should parse");
-
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                command: TestCommand::Install {
-                    force: false,
-                    source: Some(".file-peeker/debug/repo".into()),
+                    from_source: None,
                     server: Some("example.test".into())
                 }
             }
@@ -172,7 +187,7 @@ mod tests {
             Command::Test {
                 command: TestCommand::Install {
                     force: false,
-                    source: None,
+                    from_source: None,
                     server: None
                 }
             }
@@ -180,24 +195,48 @@ mod tests {
     }
 
     #[test]
-    fn parses_local_test_install_options() {
+    fn parses_local_test_install_from_source() {
+        let cli = Cli::try_parse_from([
+            "file-peeker-client",
+            "test",
+            "install",
+            "--from-source",
+            "/tmp/file-peeker-source",
+        ])
+        .expect("local source install command should parse");
+
+        assert_eq!(
+            cli.command,
+            Command::Test {
+                command: TestCommand::Install {
+                    force: false,
+                    from_source: Some("/tmp/file-peeker-source".into()),
+                    server: None,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_forced_remote_test_install_from_source() {
         let cli = Cli::try_parse_from([
             "file-peeker-client",
             "test",
             "install",
             "--force",
-            "--source",
+            "--from-source",
             "/tmp/file-peeker-source",
+            "example.test",
         ])
-        .expect("hostless test install options should parse");
+        .expect("remote source install command should parse");
 
         assert_eq!(
             cli.command,
             Command::Test {
                 command: TestCommand::Install {
                     force: true,
-                    source: Some("/tmp/file-peeker-source".into()),
-                    server: None
+                    from_source: Some("/tmp/file-peeker-source".into()),
+                    server: Some("example.test".into()),
                 }
             }
         );
@@ -240,6 +279,14 @@ mod tests {
     }
 
     #[test]
+    fn test_upload_is_rejected() {
+        let error = Cli::try_parse_from(["file-peeker-client", "test", "upload", "example.test"])
+            .expect_err("test upload should not be a supported command");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
     fn parses_test_connect() {
         let cli = Cli::try_parse_from(["file-peeker-client", "test", "connect", "example.test"])
             .expect("test connect command should parse");
@@ -248,6 +295,7 @@ mod tests {
             cli.command,
             Command::Test {
                 command: TestCommand::Connect {
+                    force: false,
                     server: Some("example.test".into())
                 }
             }
@@ -262,7 +310,48 @@ mod tests {
         assert_eq!(
             cli.command,
             Command::Test {
-                command: TestCommand::Connect { server: None }
+                command: TestCommand::Connect {
+                    force: false,
+                    server: None
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_forced_remote_test_connect() {
+        let cli = Cli::try_parse_from([
+            "file-peeker-client",
+            "test",
+            "connect",
+            "--force",
+            "example.test",
+        ])
+        .expect("remote test connect --force command should parse");
+
+        assert_eq!(
+            cli.command,
+            Command::Test {
+                command: TestCommand::Connect {
+                    force: true,
+                    server: Some("example.test".into())
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_forced_local_test_connect() {
+        let cli = Cli::try_parse_from(["file-peeker-client", "test", "connect", "--force"])
+            .expect("local test connect --force command should parse");
+
+        assert_eq!(
+            cli.command,
+            Command::Test {
+                command: TestCommand::Connect {
+                    force: true,
+                    server: None
+                }
             }
         );
     }

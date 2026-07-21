@@ -12,7 +12,7 @@ pub mod io;
 pub trait Message: Serialize + DeserializeOwned {}
 
 /// The only protocol version understood by this client and server.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,7 +111,7 @@ mod tests {
         let hello_json = serde_json::to_string(&hello).expect("hello should serialize");
 
         assert_eq!(auth_json, r#"{"type":"auth","token":"secret"}"#);
-        assert_eq!(hello_json, r#"{"type":"hello","version":2}"#);
+        assert_eq!(hello_json, r#"{"type":"hello","version":1}"#);
     }
 
     #[test]

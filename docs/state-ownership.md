@@ -5,6 +5,7 @@ interaction state needed to display a directory tree.
 
 | Information | Rust client library | SwiftUI | TUI |
 | --- | --- | --- | --- |
+| Session UUID and registry | UUID stored in `Session`; strong registry stored in `Client` | Stores returned IDs as needed | Stores returned IDs as needed |
 | Local or remote connection target | Stored in `Session` | References the session | References the session |
 | Local versus remote mode | Stored in `Session` | No | No |
 | Server process lifecycle | Stored in `Session` | No | No |

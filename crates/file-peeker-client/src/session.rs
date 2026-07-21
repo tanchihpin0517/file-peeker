@@ -4,11 +4,11 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 use crate::{
+    connection::{BufTcpStream, Connection, ConnectionConfig},
     ops::{
-        ListError, Listing,
+        CurrentRootError, ListError, Listing, current_root,
         list::{self, ListStream},
     },
-    server::{LocalServer, LocalServerConfig, RemoteServer, Server},
 };
 
 /// Configuration used to create a client session.
@@ -41,54 +41,44 @@ pub enum CloseError {
 /// An independent File Peeker session.
 #[derive(Debug, uniffi::Object)]
 pub struct Session {
+    id: String,
     target: SessionTarget,
-    server: RwLock<Option<SessionServer>>,
-}
-
-#[derive(Debug)]
-enum SessionServer {
-    Local(LocalServer),
-    Remote(RemoteServer),
+    connection: RwLock<Option<Connection>>,
 }
 
 impl Session {
-    pub(crate) async fn start(config: SessionConfig) -> Result<Arc<Self>, ConnectError> {
+    pub(crate) async fn start(
+        id: String,
+        config: SessionConfig,
+    ) -> Result<Arc<Self>, ConnectError> {
         let target = config.target.clone();
-        let server = match config.target {
-            SessionTarget::Local => {
-                let mut server = LocalServer::default();
-                server
-                    .connect(LocalServerConfig::default())
-                    .await
-                    .map_err(|error| ConnectError::ServerStart {
-                        message: error.to_string(),
-                    })?;
-                SessionServer::Local(server)
-            }
-            SessionTarget::Remote { destination } => {
-                let mut server = RemoteServer::default();
-                server
-                    .connect(destination)
-                    .await
-                    .map_err(|error| ConnectError::ServerStart {
-                        message: error.to_string(),
-                    })?;
-                SessionServer::Remote(server)
-            }
-        };
+        let connection = Connection::from(match config.target {
+            SessionTarget::Local => ConnectionConfig::Local {
+                force_install: false,
+            },
+            SessionTarget::Remote { destination } => ConnectionConfig::Remote {
+                destination,
+                force_install: false,
+            },
+        })
+        .await
+        .map_err(|error| ConnectError::ServerStart {
+            message: error.to_string(),
+        })?;
 
         Ok(Arc::new(Self {
+            id,
             target,
-            server: RwLock::new(Some(server)),
+            connection: RwLock::new(Some(connection)),
         }))
     }
 
-    #[cfg(test)]
-    fn from_server(target: SessionTarget, server: SessionServer) -> Arc<Self> {
-        Arc::new(Self {
-            target,
-            server: RwLock::new(Some(server)),
-        })
+    async fn open_operation(&self) -> io::Result<BufTcpStream> {
+        let connection = self.connection.read().await;
+        let connection = connection
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
+        connection.open_operation().await
     }
 
     /// Starts a native Rust stream of entries for one directory.
@@ -98,26 +88,44 @@ impl Session {
     /// Returns an I/O error when the session is closed, an operation connection
     /// cannot be opened, or the list request cannot be sent.
     pub async fn op_list(&self, path: &str) -> io::Result<ListStream> {
-        let stream = {
-            let server = self.server.read().await;
-            let server = server
-                .as_ref()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
-            match server {
-                SessionServer::Local(server) => server.operate().await?,
-                SessionServer::Remote(server) => server.operate().await?,
-            }
-        };
+        let stream = self.open_operation().await?;
         list::list(stream, path).await
+    }
+
+    /// Returns the server process's absolute working directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the session is closed, the operation
+    /// connection fails, or the server returns an invalid response.
+    pub async fn op_current_root(&self) -> io::Result<String> {
+        let stream = self.open_operation().await?;
+        current_root::current_root(stream).await
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Session {
+    /// Returns this session's immutable UUID.
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
     /// Returns the immutable target associated with this session.
     #[must_use]
     pub fn target(&self) -> SessionTarget {
         self.target.clone()
+    }
+
+    /// Returns the server process's absolute working directory through `UniFFI`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operation error when the session is closed, the operation
+    /// connection fails, or the server returns an invalid response.
+    pub async fn op_current_root_uniffi(&self) -> Result<String, CurrentRootError> {
+        self.op_current_root().await.map_err(CurrentRootError::from)
     }
 
     /// Starts a Swift-compatible listing adapter for one directory.
@@ -138,10 +146,9 @@ impl Session {
     ///
     /// Returns a shutdown error when the server does not acknowledge shutdown.
     pub async fn close(&self) -> Result<(), CloseError> {
-        let server = self.server.write().await.take();
-        let result = match server {
-            Some(SessionServer::Local(mut server)) => server.shutdown().await,
-            Some(SessionServer::Remote(mut server)) => server.shutdown().await,
+        let connection = self.connection.write().await.take();
+        let result = match connection {
+            Some(connection) => connection.close().await,
             None => return Ok(()),
         };
         result.map_err(|error| CloseError::ServerShutdown {
@@ -151,16 +158,26 @@ impl Session {
 }
 
 #[cfg(test)]
+impl Session {
+    pub(crate) fn without_connection(id: impl Into<String>, target: SessionTarget) -> Arc<Self> {
+        Arc::new(Self {
+            id: id.into(),
+            target,
+            connection: RwLock::new(None),
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{Session, SessionServer, SessionTarget};
-    use crate::server::{LocalServer, RemoteServer};
+    use super::{CurrentRootError, Session, SessionTarget};
 
     #[test]
     fn local_target_is_retained() {
         let target = SessionTarget::Local;
-        let session =
-            Session::from_server(target.clone(), SessionServer::Local(LocalServer::default()));
+        let session = Session::without_connection("local-id", target.clone());
 
+        assert_eq!(session.id(), "local-id");
         assert_eq!(session.target(), target);
     }
 
@@ -169,20 +186,14 @@ mod tests {
         let target = SessionTarget::Remote {
             destination: "example.test".into(),
         };
-        let session = Session::from_server(
-            target.clone(),
-            SessionServer::Remote(RemoteServer::default()),
-        );
+        let session = Session::without_connection("remote-id", target.clone());
 
         assert_eq!(session.target(), target);
     }
 
     #[tokio::test]
     async fn close_is_idempotent() {
-        let session = Session::from_server(
-            SessionTarget::Local,
-            SessionServer::Local(LocalServer::default()),
-        );
+        let session = Session::without_connection("close-id", SessionTarget::Local);
 
         session.close().await.unwrap();
         session.close().await.unwrap();
@@ -190,10 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_close_is_idempotent() {
-        let session = Session::from_server(
-            SessionTarget::Local,
-            SessionServer::Local(LocalServer::default()),
-        );
+        let session = Session::without_connection("concurrent-id", SessionTarget::Local);
 
         let (first, second) = tokio::join!(session.close(), session.close());
 
@@ -203,10 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_list_rejects_a_closed_session() {
-        let session = Session::from_server(
-            SessionTarget::Local,
-            SessionServer::Local(LocalServer::default()),
-        );
+        let session = Session::without_connection("closed-list-id", SessionTarget::Local);
         session.close().await.unwrap();
 
         let error = session
@@ -220,36 +225,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn op_list_requires_a_connected_local_server() {
-        let session = Session::from_server(
-            SessionTarget::Local,
-            SessionServer::Local(LocalServer::default()),
-        );
+    async fn op_list_requires_an_open_connection() {
+        let session = Session::without_connection("missing-list-id", SessionTarget::Local);
 
         let error = session
             .op_list("/fixture")
             .await
             .err()
-            .expect("disconnected local server should fail");
+            .expect("closed session should fail");
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+        assert_eq!(error.to_string(), "session is closed");
     }
 
     #[tokio::test]
-    async fn op_list_requires_a_connected_remote_server() {
-        let session = Session::from_server(
-            SessionTarget::Remote {
-                destination: "example.test".into(),
-            },
-            SessionServer::Remote(RemoteServer::default()),
-        );
+    async fn op_current_root_rejects_a_closed_session() {
+        let session = Session::without_connection("current-root-id", SessionTarget::Local);
 
-        let error = session
-            .op_list("/fixture")
-            .await
-            .err()
-            .expect("disconnected remote server should fail");
+        let error = session.op_current_root().await.unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+        assert_eq!(error.to_string(), "session is closed");
+    }
+
+    #[tokio::test]
+    async fn op_current_root_uniffi_maps_native_errors() {
+        let session = Session::without_connection("current-root-uniffi-id", SessionTarget::Local);
+
+        let error = session.op_current_root_uniffi().await.unwrap_err();
+
+        assert_eq!(
+            error,
+            CurrentRootError::Operation {
+                message: "session is closed".into()
+            }
+        );
     }
 }

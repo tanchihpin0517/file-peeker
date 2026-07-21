@@ -566,6 +566,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uniffi",
+ "uuid",
 ]
 
 [[package]]

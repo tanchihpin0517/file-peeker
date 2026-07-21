@@ -15,6 +15,7 @@ use tokio::{
 };
 
 mod ops;
+mod utils;
 
 const MAX_CONNECTIONS: usize = 128;
 const SERVER_STARTUP_PREFIX: &str = "FILE_PEEKER_SERVER_STARTUP=";

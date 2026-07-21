@@ -1,7 +1,5 @@
 //! Streaming directory-listing operation.
 
-use std::path::Path;
-
 use file_peeker_protocol::{ErrorCode, ListingEntry, ServerMessage};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -9,7 +7,7 @@ use tokio::{
 };
 
 use super::write_error;
-use crate::{ServerError, write_server_message};
+use crate::{ServerError, utils::resolve_path, write_server_message};
 
 const BATCH_TARGET_BYTES: usize = 128 * 1024;
 const BATCH_MAX_ENTRIES: usize = 512;
@@ -19,17 +17,12 @@ pub(super) async fn handle<S>(stream: &mut S, path: &str) -> Result<(), ServerEr
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let path = Path::new(path);
-    if !path.is_absolute() {
-        return write_error(
-            stream,
-            ErrorCode::InvalidPath,
-            "Listing path must be absolute",
-        )
-        .await;
-    }
+    let path = match resolve_path(path) {
+        Ok(path) => path,
+        Err(message) => return write_error(stream, ErrorCode::InvalidPath, message).await,
+    };
 
-    let mut directory_entries = match tokio::fs::read_dir(path).await {
+    let mut directory_entries = match tokio::fs::read_dir(&path).await {
         Ok(entries) => entries,
         Err(error) => return write_io_error(stream, error).await,
     };

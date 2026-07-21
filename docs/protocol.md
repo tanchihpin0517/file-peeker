@@ -1,4 +1,4 @@
-# File Peeker Protocol v2
+# File Peeker Protocol v1
 
 File Peeker uses private NDJSON over IPv4 loopback TCP. Local sessions connect
 directly; SSH sessions connect to the same remote loopback endpoint through an
@@ -32,12 +32,12 @@ filesystem operation connection carries exactly one request and then closes.
 The persistent control connection begins with:
 
 ```json
-{"type":"hello","version":2}
-{"type":"hello_ok","version":2}
+{"type":"hello","version":1}
+{"type":"hello_ok","version":1}
 ```
 
-Unsupported protocol versions are rejected without v1 compatibility. Messages
-are UTF-8 JSON followed by `\n`.
+Unsupported protocol versions are rejected. Messages are UTF-8 JSON followed
+by `\n`.
 
 ## Heartbeat
 
@@ -55,6 +55,11 @@ connection and receives `{"type":"shutdown_ok"}` before the server exits.
 {"type":"list","path":"/tmp/example"}
 ```
 
+The path may be absolute, `~`, or start with `~/`. The server resolves tilde
+paths from its own `HOME`, so a remote request uses the remote user's home
+directory. Other relative paths and named-user forms such as `~alice` are
+invalid.
+
 The server sends zero or more non-empty batches followed by `list_end`:
 
 ```json
@@ -63,7 +68,7 @@ The server sends zero or more non-empty batches followed by `list_end`:
 ```
 
 Wire entries omit their repeated parent path. The client validates each name as
-one path component and reconstructs the absolute child path. EOF before
+one path component and reconstructs the child path. EOF before
 `list_end` is failure. The server targets 128 KiB batches and flushes at 512
 entries or 25 ms after the first buffered entry. Errors may follow valid
 batches, allowing callers to retain partial results.

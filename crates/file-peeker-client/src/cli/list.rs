@@ -4,38 +4,45 @@ use std::{
     time::Instant,
 };
 
-use file_peeker_client::server::Server;
-use file_peeker_protocol::{
-    ClientMessage, ServerMessage,
-    io::{read_message, send_message},
-};
+use file_peeker_client::{Client, ListStream, Session, SessionConfig, SessionTarget};
+use futures::TryStreamExt as _;
 
-use super::connect::connect_local_server;
-
-pub async fn run(path: &str) -> io::Result<()> {
+pub async fn run(path: &str, remote: Option<&str>) -> io::Result<()> {
     tracing::debug!("---------------- list ----------------");
-    let path = absolute_path(path)?;
+    let target = match remote {
+        Some(destination) => SessionTarget::Remote {
+            destination: destination.to_owned(),
+        },
+        None => SessionTarget::Local,
+    };
+    let client = Client::new();
+    let session_id = client
+        .start_session(SessionConfig { target })
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let session = client
+        .get_session(session_id.clone())
+        .await
+        .ok_or_else(|| io::Error::other("started Session was not retained"))?;
+    let result = run_with_session(&session, path).await;
+    let shutdown = client
+        .close_session(session_id)
+        .await
+        .map_err(|error| io::Error::other(error.to_string()));
+    result?;
+    shutdown
+}
+
+async fn run_with_session(session: &Session, path: &str) -> io::Result<()> {
+    let path = request_path(session, path).await?;
     let request_path = path
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path must be valid UTF-8"))?;
 
-    let mut server = connect_local_server().await?;
-    let mut stream = server.operate().await?;
     let started = Instant::now();
-    send_message(
-        &mut stream,
-        &ClientMessage::List {
-            path: request_path.to_owned(),
-        },
-    )
-    .await?;
-
+    let mut entries = session.op_list(request_path).await?;
     let mut output = io::stdout().lock();
-    let listed = write_listing(&path, &mut stream, &mut output).await;
-    drop(stream);
-    let shutdown = server.shutdown().await;
-    let stats = listed?;
-    shutdown?;
+    let stats = write_listing(&path, &mut entries, &mut output).await?;
     output.flush()?;
 
     let elapsed = started.elapsed();
@@ -46,7 +53,6 @@ pub async fn run(path: &str) -> io::Result<()> {
     };
     tracing::debug!(
         entries = stats.entries,
-        batches = stats.batches,
         elapsed_ms = elapsed.as_secs_f64() * 1_000.0,
         entries_per_second = %entries_per_second,
         "list performance"
@@ -57,60 +63,46 @@ pub async fn run(path: &str) -> io::Result<()> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ListStats {
     entries: u64,
-    batches: u64,
 }
 
-fn absolute_path(path: &str) -> io::Result<PathBuf> {
+async fn request_path(session: &Session, path: &str) -> io::Result<PathBuf> {
     let path = Path::new(path);
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
+    if path.is_absolute() || is_tilde_path(path) {
+        return Ok(path.to_path_buf());
     }
+    resolve_path(path, Path::new(&session.op_current_root().await?))
 }
 
-async fn write_listing<R>(
-    parent: &Path,
-    reader: &mut R,
-    output: &mut impl Write,
-) -> io::Result<ListStats>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    let mut stats = ListStats {
-        entries: 0,
-        batches: 0,
-    };
-    loop {
-        match read_message::<ServerMessage, _>(reader).await? {
-            ServerMessage::ListBatch { entries } if entries.is_empty() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "server returned an empty listing batch",
-                ));
-            }
-            ServerMessage::ListBatch { entries } => {
-                stats.batches += 1;
-                stats.entries += entries.len() as u64;
-                for entry in entries {
-                    let path = child_path(parent, &entry.name)?;
-                    writeln!(output, "{}", path.display())?;
-                }
-            }
-            ServerMessage::ListEnd => return Ok(stats),
-            ServerMessage::Error { code, message } => {
-                return Err(io::Error::other(format!(
-                    "server rejected list ({code:?}): {message}"
-                )));
-            }
-            response => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("server returned unexpected list response: {response:?}"),
-                ));
-            }
-        }
+fn is_tilde_path(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|path| path == "~" || path.starts_with("~/"))
+}
+
+fn resolve_path(path: &Path, root: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
     }
+    if !root.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "server returned a non-absolute current root",
+        ));
+    }
+    Ok(root.join(path))
+}
+
+async fn write_listing(
+    parent: &Path,
+    entries: &mut ListStream,
+    output: &mut impl Write,
+) -> io::Result<ListStats> {
+    let mut stats = ListStats { entries: 0 };
+    while let Some(entry) = entries.try_next().await? {
+        let path = child_path(parent, &entry.name)?;
+        writeln!(output, "{}", path.display())?;
+        stats.entries += 1;
+    }
+    Ok(stats)
 }
 
 fn child_path(parent: &Path, name: &str) -> io::Result<PathBuf> {
@@ -128,128 +120,95 @@ fn child_path(parent: &Path, name: &str) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{io, path::Path};
 
-    use file_peeker_protocol::{EntryKind, ErrorCode, ListingEntry, ServerMessage};
+    use file_peeker_client::ListStream;
+    use file_peeker_protocol::{EntryKind, ListingEntry};
+    use futures::{StreamExt as _, stream};
 
-    use super::{ListStats, absolute_path, child_path, write_listing};
+    use super::{ListStats, child_path, is_tilde_path, resolve_path, write_listing};
 
-    fn responses(messages: &[ServerMessage]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for message in messages {
-            serde_json::to_writer(&mut bytes, message).unwrap();
-            bytes.push(b'\n');
-        }
-        bytes
+    fn listing(entries: Vec<io::Result<ListingEntry>>) -> ListStream {
+        stream::iter(entries).boxed()
     }
 
     #[tokio::test]
-    async fn writes_child_paths_from_multiple_batches() {
-        let reader = responses(&[
-            ServerMessage::ListBatch {
-                entries: vec![ListingEntry {
-                    name: "notes.txt".into(),
-                    kind: EntryKind::File,
-                    navigable: false,
-                }],
-            },
-            ServerMessage::ListBatch {
-                entries: vec![ListingEntry {
-                    name: "docs".into(),
-                    kind: EntryKind::Directory,
-                    navigable: true,
-                }],
-            },
-            ServerMessage::ListEnd,
+    async fn writes_child_paths_from_the_listing_stream() {
+        let mut entries = listing(vec![
+            Ok(ListingEntry {
+                name: "notes.txt".into(),
+                kind: EntryKind::File,
+                navigable: false,
+            }),
+            Ok(ListingEntry {
+                name: "docs".into(),
+                kind: EntryKind::Directory,
+                navigable: true,
+            }),
         ]);
         let mut output = Vec::new();
 
-        let mut reader = reader.as_slice();
-        let stats = write_listing(Path::new("/fixture"), &mut reader, &mut output)
+        let stats = write_listing(Path::new("/fixture"), &mut entries, &mut output)
             .await
             .unwrap();
 
         assert_eq!(output, b"/fixture/notes.txt\n/fixture/docs\n");
-        assert_eq!(
-            stats,
-            ListStats {
-                entries: 2,
-                batches: 2
-            }
-        );
+        assert_eq!(stats, ListStats { entries: 2 });
     }
 
     #[tokio::test]
-    async fn list_end_without_batches_writes_nothing() {
-        let reader = responses(&[ServerMessage::ListEnd]);
+    async fn empty_listing_writes_nothing() {
+        let mut entries = listing(Vec::new());
         let mut output = Vec::new();
 
-        let mut reader = reader.as_slice();
-        let stats = write_listing(Path::new("/fixture"), &mut reader, &mut output)
+        let stats = write_listing(Path::new("/fixture"), &mut entries, &mut output)
             .await
             .unwrap();
 
         assert!(output.is_empty());
-        assert_eq!(
-            stats,
-            ListStats {
-                entries: 0,
-                batches: 0
-            }
-        );
+        assert_eq!(stats, ListStats { entries: 0 });
     }
 
     #[tokio::test]
-    async fn server_errors_are_returned() {
-        let reader = responses(&[ServerMessage::Error {
-            code: ErrorCode::NotFound,
-            message: "missing".into(),
-        }]);
-        let mut reader = reader.as_slice();
-        let error = write_listing(Path::new("/fixture"), &mut reader, &mut Vec::new())
+    async fn listing_stream_errors_are_returned() {
+        let mut entries = listing(vec![Err(io::Error::other("listing failed"))]);
+
+        let error = write_listing(Path::new("/fixture"), &mut entries, &mut Vec::new())
             .await
-            .expect_err("server error should fail the listing");
+            .expect_err("stream error should fail the listing");
 
-        assert!(error.to_string().contains("NotFound"));
-        assert!(error.to_string().contains("missing"));
+        assert_eq!(error.to_string(), "listing failed");
     }
 
     #[tokio::test]
-    async fn invalid_listing_responses_are_rejected() {
-        let empty_batch = responses(&[ServerMessage::ListBatch {
-            entries: Vec::new(),
-        }]);
-        let mut empty_batch = empty_batch.as_slice();
-        assert_eq!(
-            write_listing(Path::new("/fixture"), &mut empty_batch, &mut Vec::new())
-                .await
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::InvalidData
-        );
+    async fn invalid_child_names_are_rejected() {
+        let mut entries = listing(vec![Ok(ListingEntry {
+            name: "../escape".into(),
+            kind: EntryKind::Directory,
+            navigable: true,
+        })]);
 
-        let unexpected = responses(&[ServerMessage::HeartbeatOk]);
-        let mut unexpected = unexpected.as_slice();
-        assert_eq!(
-            write_listing(Path::new("/fixture"), &mut unexpected, &mut Vec::new())
-                .await
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::InvalidData
-        );
+        let error = write_listing(Path::new("/fixture"), &mut entries, &mut Vec::new())
+            .await
+            .expect_err("invalid child name should fail the listing");
 
-        let truncated = br#"{"type":"list_end""#.to_vec();
-        let mut truncated = truncated.as_slice();
-        assert!(
-            write_listing(Path::new("/fixture"), &mut truncated, &mut Vec::new())
-                .await
-                .is_err()
-        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
-    fn paths_are_absolute_and_child_names_are_single_components() {
-        assert!(absolute_path(".").unwrap().is_absolute());
+    fn paths_resolve_from_the_selected_root_and_child_names_are_single_components() {
+        assert!(is_tilde_path(Path::new("~")));
+        assert!(is_tilde_path(Path::new("~/reports")));
+        assert!(!is_tilde_path(Path::new("~alice/reports")));
+        assert_eq!(
+            resolve_path(Path::new("reports"), Path::new("/remote/home")).unwrap(),
+            Path::new("/remote/home/reports")
+        );
+        assert_eq!(
+            resolve_path(Path::new("/reports"), Path::new("/remote/home")).unwrap(),
+            Path::new("/reports")
+        );
+        assert!(resolve_path(Path::new("reports"), Path::new("relative/root")).is_err());
         assert_eq!(
             child_path(Path::new("/fixture"), "notes.txt").unwrap(),
             Path::new("/fixture/notes.txt")

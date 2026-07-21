@@ -1,55 +1,35 @@
 use std::io;
 
-use file_peeker_client::server::{
-    LocalServer, LocalServerConfig, RemoteServer, RemoteServerStartup, Server,
-};
+use file_peeker_client::connection::{Connection, ConnectionConfig, ConnectionInfo};
 
-use super::install::{DEFAULT_REMOTE_PROJECT_DIR, project_dir, upload_and_install};
-
-pub async fn run(destination: Option<&str>) -> io::Result<()> {
+pub async fn run(destination: Option<&str>, force_install: bool) -> io::Result<()> {
     tracing::debug!("---------------- connect ----------------");
 
-    match destination {
-        Some(destination) => connect_remote(destination).await,
-        None => connect_local().await,
-    }
+    let connection = create_connection(destination, force_install).await?;
+    print_startup(connection.info());
+    connection.close().await
 }
 
-async fn connect_local() -> io::Result<()> {
-    let mut server = connect_local_server().await?;
-    print_startup(server.startup())?;
-    server.shutdown().await
+pub(crate) async fn create_connection(
+    destination: Option<&str>,
+    force_install: bool,
+) -> io::Result<Connection> {
+    let config = match destination {
+        Some(destination) => ConnectionConfig::Remote {
+            destination: destination.to_owned(),
+            force_install,
+        },
+        None => ConnectionConfig::Local { force_install },
+    };
+    Connection::from(config).await
 }
 
-pub(crate) async fn connect_local_server() -> io::Result<LocalServer> {
-    let mut server = LocalServer::default();
-    server
-        .connect(LocalServerConfig {
-            force_install: true,
-            local_source_path: Some(project_dir().to_path_buf()),
-        })
-        .await?;
-    Ok(server)
-}
-
-async fn connect_remote(destination: &str) -> io::Result<()> {
-    upload_and_install(destination, true, DEFAULT_REMOTE_PROJECT_DIR).await?;
-    let mut server = RemoteServer::default();
-    server.connect(destination.to_owned()).await?;
-    print_startup(server.startup())?;
-    server.shutdown().await
-}
-
-fn print_startup(startup: Option<&RemoteServerStartup>) -> io::Result<()> {
-    let startup =
-        startup.ok_or_else(|| io::Error::other("server connected without startup information"))?;
-
+fn print_startup(info: &ConnectionInfo) {
     println!(
         "{}",
         serde_json::json!({
-            "port": startup.forward_port,
-            "token": startup.token,
+            "port": info.server_port,
+            "token": info.token,
         })
     );
-    Ok(())
 }

@@ -1,6 +1,6 @@
 # Startup routine
 
-Local and remote session startup implement the protocol-v2 connection and
+Local and remote session startup implement the protocol-v1 connection and
 lifecycle model below.
 
 Local and remote targets are designed to share one lifecycle model:
@@ -15,11 +15,12 @@ Remote: Session -> SOCKS 127.0.0.1:PROXY -> one SSH transport
 
 ## Local startup
 
-`Client::start_session(SessionTarget::Local)` starts a managed local server.
+`Client::start_session(SessionTarget::Local)` starts a managed local server,
+retains its Session by UUID, and returns that UUID.
 
 1. Ensure the matching executable exists below
-   `~/.file-peeker/servers/VERSION`. The public client reuses or installs that
-   version; the hostless test CLI force-installs it from the current workspace.
+   `~/.file-peeker/servers/VERSION`. The public client and test CLI reuse or
+   install that version; `test connect --force` explicitly reinstalls it.
 2. Spawn the resolved executable as `file-peeker-server serve` with piped
    stdin, stdout, and stderr.
 3. Parse the prefixed startup JSON from stdout.
@@ -48,7 +49,7 @@ diagnostics use stderr. Any later stdout data is a fatal launcher violation.
    lease; stdout carries the two startup records.
 5. Open a SOCKS5 connection to remote `127.0.0.1:<server-port>`, authenticate
    with the token, and complete a heartbeat.
-6. Return the same public `Session` type used locally.
+6. Retain the same public `Session` type used locally and return its UUID.
 
 There is one authenticated SSH network transport. Helper `ssh` processes only
 request additional channels through its control socket. Every request creates a
@@ -70,7 +71,9 @@ session explicitly; automatic reconnection is intentionally absent.
 Each session allows 64 simultaneous operation connections, with a separate
 heartbeat allowance. The server defensively caps active connections at 128.
 
-Explicit `Session.close()` is immediate and idempotent: it stops heartbeat,
+`Client.close_session(id)` removes the retained Session and performs its
+graceful shutdown. Explicit `Session.close()` remains immediate and idempotent
+but does not remove it from Client: it stops heartbeat,
 closes the stdin lease, cancels active operations, waits up to the bounded
 shutdown deadline, terminates the SSH master when present, and removes owned
 local runtime files. Dropping the last session/listing reference initiates the
