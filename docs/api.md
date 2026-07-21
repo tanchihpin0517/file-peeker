@@ -7,6 +7,9 @@ Swift API exposes the same server batches through `Listing.nextBatch()`.
 ## Public interface
 
 ```rust
+pub type ListStream =
+    BoxStream<'static, io::Result<Vec<DirectoryEntry>>>;
+
 impl Client {
     pub fn new() -> Arc<Client>;
 
@@ -77,13 +80,14 @@ gracefully closes the retained Session. Direct Rust `Session.close()` and Swift
 `Session.closeUniffi()` remain idempotent but do not unregister it. Dropping Client releases all retained
 sessions; unclosed connections use their non-blocking fallback cleanup.
 
-`Session.op_list` is the native Rust API. It starts a server-streaming RPC on
-the Session's shared HTTP/2 channel and flattens its batches into entries in
-order. Dropping the stream cancels unfinished work.
+`Session.op_list` is the native Rust API. Its `ListStream` yields
+`Vec<DirectoryEntry>` batches from the server-streaming RPC in order. Batching
+is the default list semantic; there is no flattened native listing API.
+Dropping the stream cancels unfinished work.
 
-`Session.op_list_uniffi` is the Swift-compatible adapter. It returns a `Listing`
-object whose async `nextBatch()` method returns one server batch. Completion is
-idempotent, and terminal stream errors are repeated consistently.
+`Session.op_list_uniffi` wraps that native stream for Swift. Its async
+`nextBatch()` method returns one native batch. Completion is idempotent, and
+terminal stream errors are repeated consistently.
 
 ## Swift usage
 
@@ -118,5 +122,7 @@ while let batch = try await listing.nextBatch() {
 try await client.closeSession(id: localSessionID)
 ```
 
-The SwiftUI application shell does not start a default session. A destination
-selection flow will call this API in a later milestone.
+The SwiftUI application starts a local Session when its browser appears, uses
+`opCurrentRootUniffi()` as Home, and consumes listing batches incrementally.
+Rows are display-only. The retained Session stays alive after listing completes
+and closes when the browser disappears.

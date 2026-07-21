@@ -1,21 +1,34 @@
 use std::io;
 
-use file_peeker_protocol::v1::{ListRequest, ListingEntry, file_peeker_client::FilePeekerClient};
-use futures::{
-    StreamExt, TryStreamExt,
-    stream::{self, BoxStream},
+use file_peeker_protocol::v1::{
+    EntryKind as ProtocolEntryKind, ListRequest, ListingEntry, file_peeker_client::FilePeekerClient,
 };
+use futures::{StreamExt, stream::BoxStream};
 use tonic::{Request, transport::Channel};
 
 use crate::connection::status_error;
 
-pub type ListStream = BoxStream<'static, io::Result<ListingEntry>>;
-pub(crate) type ListBatchStream = BoxStream<'static, io::Result<Vec<ListingEntry>>>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
 
-pub(crate) async fn list_batches(
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub kind: EntryKind,
+    pub navigable: bool,
+}
+
+pub type ListStream = BoxStream<'static, io::Result<Vec<DirectoryEntry>>>;
+
+pub(crate) async fn list(
     channel: Channel,
     request: Request<ListRequest>,
-) -> io::Result<ListBatchStream> {
+) -> io::Result<ListStream> {
     let stream = FilePeekerClient::new(channel)
         .list(request)
         .await
@@ -23,72 +36,100 @@ pub(crate) async fn list_batches(
         .into_inner()
         .map(|result| {
             let batch = result.map_err(status_error)?;
-            if batch.entries.is_empty() {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "server returned an empty listing batch",
-                ))
-            } else {
-                Ok(batch.entries)
-            }
+            convert_batch(batch.entries)
         })
         .boxed();
     Ok(stream)
 }
 
-pub(crate) fn flatten_batches(batches: ListBatchStream) -> ListStream {
-    batches
-        .map_ok(|entries| stream::iter(entries.into_iter().map(Ok)))
-        .try_flatten()
-        .boxed()
+fn convert_batch(entries: Vec<ListingEntry>) -> io::Result<Vec<DirectoryEntry>> {
+    if entries.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "server returned an empty listing batch",
+        ));
+    }
+    entries.into_iter().map(DirectoryEntry::try_from).collect()
+}
+
+impl TryFrom<ListingEntry> for DirectoryEntry {
+    type Error = io::Error;
+
+    fn try_from(entry: ListingEntry) -> Result<Self, Self::Error> {
+        let kind = ProtocolEntryKind::try_from(entry.kind).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("server returned unknown entry kind {}", entry.kind),
+            )
+        })?;
+        let kind = match kind {
+            ProtocolEntryKind::Unspecified => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "server returned an unspecified entry kind",
+                ));
+            }
+            ProtocolEntryKind::File => EntryKind::File,
+            ProtocolEntryKind::Directory => EntryKind::Directory,
+            ProtocolEntryKind::Symlink => EntryKind::Symlink,
+            ProtocolEntryKind::Other => EntryKind::Other,
+        };
+        Ok(Self {
+            name: entry.name,
+            kind,
+            navigable: entry.navigable,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use file_peeker_protocol::v1::{EntryKind as ProtocolEntryKind, ListingEntry};
 
-    use file_peeker_protocol::v1::{EntryKind, ListingEntry};
-    use futures::{StreamExt, TryStreamExt, stream};
+    use super::{DirectoryEntry, EntryKind, convert_batch};
 
-    use super::flatten_batches;
-
-    fn entry(name: &str) -> ListingEntry {
+    fn entry(name: &str, kind: ProtocolEntryKind) -> ListingEntry {
         ListingEntry {
             name: name.into(),
-            kind: EntryKind::File.into(),
-            navigable: false,
+            kind: kind.into(),
+            navigable: kind == ProtocolEntryKind::Directory,
         }
     }
 
-    #[tokio::test]
-    async fn flattens_batches_in_order() {
-        let batches = stream::iter([
-            Ok(vec![entry("one"), entry("two")]),
-            Ok(vec![entry("three")]),
-        ])
-        .boxed();
-        let names = flatten_batches(batches)
-            .map_ok(|entry| entry.name)
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-
-        assert_eq!(names, ["one", "two", "three"]);
+    #[test]
+    fn converts_complete_batches_in_order() {
+        assert_eq!(
+            convert_batch(vec![
+                entry("one", ProtocolEntryKind::File),
+                entry("two", ProtocolEntryKind::Directory),
+            ])
+            .unwrap(),
+            [
+                DirectoryEntry {
+                    name: "one".into(),
+                    kind: EntryKind::File,
+                    navigable: false,
+                },
+                DirectoryEntry {
+                    name: "two".into(),
+                    kind: EntryKind::Directory,
+                    navigable: true,
+                },
+            ]
+        );
     }
 
-    #[tokio::test]
-    async fn preserves_terminal_errors_after_entries() {
-        let batches = stream::iter([
-            Ok(vec![entry("one")]),
-            Err(io::Error::new(io::ErrorKind::ConnectionAborted, "closed")),
-        ])
-        .boxed();
-        let mut entries = flatten_batches(batches);
-
-        assert_eq!(entries.next().await.unwrap().unwrap().name, "one");
+    #[test]
+    fn rejects_empty_batches_and_unspecified_kinds() {
         assert_eq!(
-            entries.next().await.unwrap().unwrap_err().kind(),
-            io::ErrorKind::ConnectionAborted
+            convert_batch(vec![]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            convert_batch(vec![entry("unknown", ProtocolEntryKind::Unspecified)])
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
         );
     }
 }

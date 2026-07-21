@@ -669,7 +669,11 @@ name = "file-peeker-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "file-peeker-client",
+ "futures",
  "ratatui",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

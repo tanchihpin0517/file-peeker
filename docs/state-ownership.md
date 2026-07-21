@@ -1,61 +1,30 @@
 # Client and UI State Ownership
 
-The Rust client owns connection and transport state. Each UI owns the data and
-interaction state needed to display a directory tree.
+The Rust client owns connection and transport state. Each UI owns only the
+state needed to display one listing of the server's current root.
 
 | Information | Rust client library | SwiftUI | TUI |
 | --- | --- | --- | --- |
-| Session UUID and registry | UUID stored in `Session`; strong registry stored in `Client` | Stores returned IDs as needed | Stores returned IDs as needed |
-| Local or remote connection target | Stored in `Session` | References the session | References the session |
-| Local versus remote mode | Stored in `Session` | No | No |
-| Server process lifecycle | Stored in `Session` | No | No |
-| Server port, token, and stdin lifetime lease | Stored in the client lifecycle | No | No |
-| SSH SOCKS and control-socket state | Stored in the client lifecycle | No | No |
-| gRPC channel, keepalive, and reconnect state | Stored in the client lifecycle | No | No |
-| Active listing gRPC stream | Stored in `Listing` | No | No |
-| Listing state: active, complete, or failed | Stored in `Listing` | No | No |
-| Listing's requested parent path | Temporarily stored to construct child paths | No | No |
-| Current received batch | Returned to the caller, not retained | Merged into `treeRows` | Merged into `rows` |
-| Accumulated directory entries | Not stored | Stored in `treeRows` | Stored in `rows` |
-| Parent-child relationship | No | `parentPath` | `parent_path` |
-| Display depth | No | Stored per row | Stored per row |
-| Expanded or collapsed state | No | Stored per row | Stored per row |
-| Current displayed directory | No | `currentPath` | `path` |
-| Selection | No | Entry path in SwiftUI `State` | Numeric row index |
-| Sorting preference | No | `sortOrder` | No sorting currently |
-| Sorted visible rows | No | Derived during rendering | Rows are stored in display order |
-| Root loading state | No | `isLoading` | `loading` |
-| Expanding-directory loading state | No | `loadingTreePaths` | `loading_tree_paths` |
-| Tasks consuming listing batches | No | `loadTask` and `expansionTasks` | `root_task` and `expansion_tasks` |
-| Stale-request generation | No | `generation` | `generation` |
-| Operation or protocol error | Produces a typed `FilePeekerError` | Converts it to displayed text | Converts it to displayed text |
-| Per-directory expansion error | No | Stored on `DisplayRow` | Stored on `DisplayRow` |
-| View style, search, and popovers | No | Stored as SwiftUI state | No |
-| Cached collapsed children | No | No; descendants are removed | No; descendants are removed |
+| Session UUID and registry | UUID and strong Session registry stored in `Client` | Retains the returned ID and Session | `App` tracks started IDs; each `BrowserContext` references one ID |
+| Server process and connection lifecycle | Stored in the Session connection | Starts on appearance; closes on disappearance | `App.start` creates it; `App.shutdown` closes it after terminal restoration |
+| gRPC channel and authentication | Stored in the Session connection | No | No |
+| Current-root path | Returned to the caller | `homePath` | Initial `BrowserContext.path` |
+| Active listing stream | Native `ListStream` or Swift `Listing` adapter | Consumed by `loadTask` | Each `BrowserContext.listing_task` consumes native `op_list` |
+| Received directory entries | Returned batch-by-batch, not retained | Appended to `rows` | Appended to the matching context's `entries` |
+| Loading and terminal error | Produced by the operation | `isLoading` and `errorMessage` | Stored independently in each `BrowserContext` |
+| Selection | No | Not implemented | `selected_index` stored per `BrowserContext` |
+| Navigation, expansion, and file opening | No UI state | Not implemented | Not implemented |
 
 ## Listing Data Flow
 
 ```text
-Server batch
-    |
-    v
-Rust Listing parses it
-    |
-    v
-next_batch() / nextBatch() returns directory entries
-    |
-    v
-UI merges entries into its display tree
-    |
-    v
-Rust Listing does not retain the batch
+local Session -> current_root -> list(current_root) -> bounded gRPC batches
+                                                    -> append to UI rows
 ```
 
-The client's `Listing` retains only the gRPC batch stream and its active,
-complete, or failed status. It does not accumulate directory entries after
-returning them to the caller.
-
-SwiftUI stores parent-linked rows in `BrowserModel.treeRows` and derives a
-sorted, depth-first visible list during rendering. The TUI stores its visible
-rows directly in depth-first display order. Both remove descendants when a
-directory is collapsed, so expanding it again starts a fresh listing.
+Both UIs preserve server arrival order and retain partial entries if the stream
+fails. SwiftUI issues one listing per lifecycle. The TUI can run listings for
+multiple BrowserContexts concurrently, routing events by context UUID and
+generation. Pressing `R` replaces only the active context's listing, clearing
+its entries and error first. Completing a stream releases its Listing but
+leaves the shared Session alive until the UI shuts down.

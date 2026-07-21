@@ -37,7 +37,6 @@ The client owns all transport concerns:
 - One reconnectable tonic channel per Session.
 - One gRPC response stream per active listing.
 - Mapping wire errors to public typed errors.
-- Validating names and reconstructing full child paths.
 - Cancelling an operation when its `Listing` is dropped.
 
 The UI-facing listing flow is:
@@ -45,33 +44,35 @@ The UI-facing listing flow is:
 ```text
 Session.op_current_root() -> absolute server working directory
 Session.op_current_root_uniffi() -> UniFFI error-mapping adapter
-Session.list(path) -> Listing
-Listing.next_batch() -> Some(entries)
-Listing.next_batch() -> Some(entries)
-Listing.next_batch() -> None or error
+Session.op_list(path) -> ListStream
+ListStream.try_next() -> Some(entry batch)
+ListStream.try_next() -> Some(entry batch)
+ListStream.try_next() -> None or error
 ```
 
-The client deliberately has no browsing `State`, snapshot, cache, or tree. It
-does not retain entries already returned to the caller.
+The client deliberately has no browsing `State`, snapshot, cache, or tree. A
+native ListStream retains only the active transport stream and does not retain
+batches already returned to the caller.
 
 ## UI display ownership
 
-Both UIs maintain local display rows containing entry, parent, depth,
-expanded/loading state, and an optional error.
+Both UIs start one local Session, discover its current root, and append each
+received batch to a flat, display-only list in arrival order. They do not
+navigate, expand directories, open files, or add a separate batch-coalescing
+layer. The TUI keeps a visual selection per BrowserContext and can cancel and
+restart the active Home listing with `R`; generation IDs prevent delayed events
+from the cancelled stream from repopulating the cleared list.
 
-Root navigation clears the previous tree immediately and consumes a new
-listing. Expansion marks the parent open immediately and inserts child batches
-as they arrive. Collapse cancels that branch's listing and removes every
-descendant. Generation tokens reject late events after navigation or collapse.
+The TUI owns one Client plus a map of `BrowserContext` values. Each context has
+an independent UUID, Session UUID, path, accumulated entries, status,
+generation, and listing task. Multiple contexts may share one Client-owned
+Session and list concurrently. Events carry both context UUID and generation,
+while rendering and `R` refresh target only the active context. `main` only
+coordinates the terminal and event loop.
 
-Selection is keyed by full path. Duplicate paths replace existing display
-entries. Swift applies its selected name/kind sort; Ratatui retains arrival
-order. Neither UI adds a separate batch-coalescing layer, although Ratatui's
-normal draw interval may render several already-applied events together.
+If listing fails, entries received from earlier batches remain visible and the
+global status shows the terminal error. Listing completion or failure does not
+close the Session; the UI retains it until the window closes or the TUI exits.
 
-If a root listing fails, received entries remain visible and the global status
-shows the error. If an expansion fails, its partial children remain under an
-expanded parent carrying an error marker. Retrying starts a fresh listing.
-
-The SSH connection sheet dismisses after session setup and current-root
-discovery; the remote root then streams in the main browser.
+See [TUI Implementation](tui.md) for the concrete ownership, event-routing,
+refresh, and shutdown design.

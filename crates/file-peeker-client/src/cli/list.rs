@@ -95,16 +95,18 @@ fn resolve_path(path: &Path, root: &Path) -> io::Result<PathBuf> {
 
 async fn write_listing(
     parent: &Path,
-    entries: &mut ListStream,
+    batches: &mut ListStream,
     output: &mut impl Write,
 ) -> io::Result<ListStats> {
     let mut stats = ListStats { entries: 0 };
-    while let Some(entry) = entries.try_next().await? {
-        let path = child_path(parent, &entry.name)?;
-        writeln!(output, "{}", path.display())?;
-        stats.entries += 1;
-        if stats.entries.is_multiple_of(OUTPUT_FLUSH_INTERVAL) {
-            output.flush()?;
+    while let Some(batch) = batches.try_next().await? {
+        for entry in batch {
+            let path = child_path(parent, &entry.name)?;
+            writeln!(output, "{}", path.display())?;
+            stats.entries += 1;
+            if stats.entries.is_multiple_of(OUTPUT_FLUSH_INTERVAL) {
+                output.flush()?;
+            }
         }
     }
     Ok(stats)
@@ -127,16 +129,23 @@ fn child_path(parent: &Path, name: &str) -> io::Result<PathBuf> {
 mod tests {
     use std::{io, path::Path};
 
-    use file_peeker_client::ListStream;
-    use file_peeker_protocol::{EntryKind, ListingEntry};
+    use file_peeker_client::{DirectoryEntry, EntryKind, ListStream};
     use futures::{StreamExt as _, stream};
 
     use super::{
         ListStats, OUTPUT_FLUSH_INTERVAL, child_path, is_tilde_path, resolve_path, write_listing,
     };
 
-    fn listing(entries: Vec<io::Result<ListingEntry>>) -> ListStream {
-        stream::iter(entries).boxed()
+    fn entry(name: &str) -> DirectoryEntry {
+        DirectoryEntry {
+            name: name.into(),
+            kind: EntryKind::File,
+            navigable: false,
+        }
+    }
+
+    fn listing(batches: Vec<io::Result<Vec<DirectoryEntry>>>) -> ListStream {
+        stream::iter(batches).boxed()
     }
 
     #[derive(Default)]
@@ -159,18 +168,7 @@ mod tests {
 
     #[tokio::test]
     async fn writes_child_paths_from_the_listing_stream() {
-        let mut entries = listing(vec![
-            Ok(ListingEntry {
-                name: "notes.txt".into(),
-                kind: EntryKind::File.into(),
-                navigable: false,
-            }),
-            Ok(ListingEntry {
-                name: "docs".into(),
-                kind: EntryKind::Directory.into(),
-                navigable: true,
-            }),
-        ]);
+        let mut entries = listing(vec![Ok(vec![entry("notes.txt"), entry("docs")])]);
         let mut output = Vec::new();
 
         let stats = write_listing(Path::new("/fixture"), &mut entries, &mut output)
@@ -197,15 +195,9 @@ mod tests {
     #[tokio::test]
     async fn flushes_each_full_transport_sized_batch() {
         let entries = (0..OUTPUT_FLUSH_INTERVAL)
-            .map(|index| {
-                Ok(ListingEntry {
-                    name: format!("file-{index}"),
-                    kind: EntryKind::File.into(),
-                    navigable: false,
-                })
-            })
+            .map(|index| entry(&format!("file-{index}")))
             .collect();
-        let mut entries = listing(entries);
+        let mut entries = listing(vec![Ok(entries)]);
         let mut output = FlushCountingWriter::default();
 
         let stats = write_listing(Path::new("/fixture"), &mut entries, &mut output)
@@ -235,11 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_child_names_are_rejected() {
-        let mut entries = listing(vec![Ok(ListingEntry {
-            name: "../escape".into(),
-            kind: EntryKind::Directory.into(),
-            navigable: true,
-        })]);
+        let mut entries = listing(vec![Ok(vec![entry("../escape")])]);
 
         let error = write_listing(Path::new("/fixture"), &mut entries, &mut Vec::new())
             .await

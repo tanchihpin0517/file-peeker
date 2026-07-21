@@ -9,7 +9,7 @@ use crate::{
     connection::{Connection, ConnectionConfig},
     ops::{
         CurrentRootError, ListError, Listing, current_root,
-        list::{self, ListBatchStream, ListStream},
+        list::{self, ListStream},
     },
 };
 
@@ -75,14 +75,19 @@ impl Session {
         }))
     }
 
-    /// Starts a native Rust stream of entries for one directory.
+    /// Starts a native Rust stream of entry batches for one directory.
     ///
     /// # Errors
     ///
     /// Returns an I/O error when the session is closed, an operation connection
     /// cannot be opened, or the list request cannot be sent.
     pub async fn op_list(&self, path: &str) -> io::Result<ListStream> {
-        self.op_list_batches(path).await.map(list::flatten_batches)
+        let (channel, request) = self
+            .grpc_request(ListRequest {
+                path: path.to_owned(),
+            })
+            .await?;
+        list::list(channel, request).await
     }
 
     /// Returns the server process's absolute working directory.
@@ -121,15 +126,6 @@ impl Session {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
         Ok((connection.channel()?, connection.request(message)?))
     }
-
-    async fn op_list_batches(&self, path: &str) -> io::Result<ListBatchStream> {
-        let (channel, request) = self
-            .grpc_request(ListRequest {
-                path: path.to_owned(),
-            })
-            .await?;
-        list::list_batches(channel, request).await
-    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -162,7 +158,7 @@ impl Session {
     ///
     /// Returns a listing error when the operation cannot be started.
     pub async fn op_list_uniffi(&self, path: String) -> Result<Arc<Listing>, ListError> {
-        self.op_list_batches(&path)
+        self.op_list(&path)
             .await
             .map(Listing::new)
             .map_err(ListError::from)

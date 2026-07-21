@@ -3,4 +3,5 @@ pub(crate) mod list;
 mod list_uniffi;
 
 pub use current_root::CurrentRootError;
-pub use list_uniffi::{DirectoryEntry, EntryKind, ListError, Listing};
+pub use list::{DirectoryEntry, EntryKind};
+pub use list_uniffi::{ListError, Listing};
