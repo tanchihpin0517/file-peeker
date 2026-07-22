@@ -56,19 +56,23 @@ batches already returned to the caller.
 
 ## UI display ownership
 
-Both UIs start one local Session, discover its current root, and append each
-received batch to a flat, display-only list in arrival order. They do not
-navigate, expand directories, open files, or add a separate batch-coalescing
-layer. The TUI keeps a visual selection per BrowserContext and can cancel and
-restart the active Home listing with `R`; generation IDs prevent delayed events
-from the cancelled stream from repopulating the cleared list.
+SwiftUI starts one local Session and discovers its current root. The TUI always
+creates its App and Client, but starts a local Session only when invoked with a
+path; without one, the shared Ratatui loop displays an in-app help screen. Both
+UIs append received batches to a flat, display-only list in arrival order. They
+do not navigate, expand directories, open files, or add a separate
+batch-coalescing layer. The TUI keeps a visual selection per BrowserContext and
+can cancel and restart the active listing with `R`; generation IDs prevent
+delayed events from the cancelled stream from repopulating the cleared list.
 
 The TUI owns one Client plus a map of `BrowserContext` values. Each context has
-an independent UUID, Session UUID, path, accumulated entries, status,
-generation, and listing task. Multiple contexts may share one Client-owned
-Session and list concurrently. Events carry both context UUID and generation,
-while rendering and `R` refresh target only the active context. `main` only
-coordinates the terminal and event loop.
+an independent UUID and retains its resolved Session, path, accumulated entries,
+Listing Status, generation, and listing task. Multiple contexts may share one
+Client-owned Session and list concurrently. A context owns refresh,
+cancellation, stale-event rejection, partial results, and terminal selection.
+Bounded context events carry results to the UI loop; App routes them by context
+UUID without interpreting listing transitions. Rendering and `R` refresh target
+only the active context. `main` only coordinates the terminal and event loop.
 
 If listing fails, entries received from earlier batches remain visible and the
 global status shows the terminal error. Listing completion or failure does not

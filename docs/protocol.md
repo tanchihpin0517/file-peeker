@@ -44,10 +44,12 @@ rpc List(ListRequest) returns (stream ListBatch);
 
 `CurrentRoot` returns the server process's absolute UTF-8 working directory.
 
-`List` accepts an absolute path, `~`, or `~/...`. It streams zero or more
-non-empty batches and completes with gRPC `OK`. The server targets 1 MiB per
-protobuf batch and flushes at 1024 entries or 25 ms after the first buffered
-entry. It does not sort.
+`List` accepts absolute, relative, and shell-style paths. The server uses its
+own environment to expand `~` and `$VARIABLES`; relative results are interpreted
+against its working directory. It streams zero or more non-empty batches and
+completes with gRPC `OK`. The server targets 1 MiB per protobuf batch and
+flushes at 1024 entries or 25 ms after the first buffered entry. It does not
+sort.
 
 Errors may terminate a stream after valid batches, so callers retain partial
 results. Dropping the response stream cancels unfinished enumeration.

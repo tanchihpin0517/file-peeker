@@ -73,10 +73,10 @@ Ensures the server is installed from Git, starts it locally, and lists the direc
 children of `PATH`. Relative paths are resolved from the server's reported
 working directory, which locally inherits the client's working directory. Each
 child's path is written to standard output on its own line; output order follows
-the server's filesystem iteration order. `~` and `~/...` are preserved in the
-output and resolved from the server's home directory. After the listing
-completes, a debug line on standard error reports the entry count, elapsed
-milliseconds, and entries per second.
+the server's filesystem iteration order. Shell expressions are preserved in the
+output while `~` and `$VARIABLES` are expanded in the server environment for
+listing. After the listing completes, a debug line on standard error reports
+the entry count, elapsed milliseconds, and entries per second.
 
 With `--remote SERVER`, the matching server is started through SSH and the same
 listing operation runs on that host. Relative paths are resolved from the

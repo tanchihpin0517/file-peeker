@@ -36,15 +36,10 @@ pub async fn run(path: &str, remote: Option<&str>) -> io::Result<()> {
 }
 
 async fn run_with_session(session: &Session, path: &str) -> io::Result<()> {
-    let path = request_path(session, path).await?;
-    let request_path = path
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path must be valid UTF-8"))?;
-
     let started = Instant::now();
-    let mut entries = session.op_list(request_path).await?;
+    let mut entries = session.op_list(path).await?;
     let mut output = io::stdout().lock();
-    let stats = write_listing(&path, &mut entries, &mut output).await?;
+    let stats = write_listing(Path::new(path), &mut entries, &mut output).await?;
     output.flush()?;
 
     let elapsed = started.elapsed();
@@ -65,32 +60,6 @@ async fn run_with_session(session: &Session, path: &str) -> io::Result<()> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ListStats {
     entries: u64,
-}
-
-async fn request_path(session: &Session, path: &str) -> io::Result<PathBuf> {
-    let path = Path::new(path);
-    if path.is_absolute() || is_tilde_path(path) {
-        return Ok(path.to_path_buf());
-    }
-    resolve_path(path, Path::new(&session.op_current_root().await?))
-}
-
-fn is_tilde_path(path: &Path) -> bool {
-    path.to_str()
-        .is_some_and(|path| path == "~" || path.starts_with("~/"))
-}
-
-fn resolve_path(path: &Path, root: &Path) -> io::Result<PathBuf> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    if !root.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "server returned a non-absolute current root",
-        ));
-    }
-    Ok(root.join(path))
 }
 
 async fn write_listing(
@@ -132,9 +101,7 @@ mod tests {
     use file_peeker_client::{DirectoryEntry, EntryKind, ListStream};
     use futures::{StreamExt as _, stream};
 
-    use super::{
-        ListStats, OUTPUT_FLUSH_INTERVAL, child_path, is_tilde_path, resolve_path, write_listing,
-    };
+    use super::{ListStats, OUTPUT_FLUSH_INTERVAL, child_path, write_listing};
 
     fn entry(name: &str) -> DirectoryEntry {
         DirectoryEntry {
@@ -237,19 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn paths_resolve_from_the_selected_root_and_child_names_are_single_components() {
-        assert!(is_tilde_path(Path::new("~")));
-        assert!(is_tilde_path(Path::new("~/reports")));
-        assert!(!is_tilde_path(Path::new("~alice/reports")));
-        assert_eq!(
-            resolve_path(Path::new("reports"), Path::new("/remote/home")).unwrap(),
-            Path::new("/remote/home/reports")
-        );
-        assert_eq!(
-            resolve_path(Path::new("/reports"), Path::new("/remote/home")).unwrap(),
-            Path::new("/reports")
-        );
-        assert!(resolve_path(Path::new("reports"), Path::new("relative/root")).is_err());
+    fn child_names_are_single_components() {
         assert_eq!(
             child_path(Path::new("/fixture"), "notes.txt").unwrap(),
             Path::new("/fixture/notes.txt")

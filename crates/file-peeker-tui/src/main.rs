@@ -6,140 +6,56 @@ use std::{
     time::Duration,
 };
 
+mod browser_context;
+
+use clap::{CommandFactory, Parser};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use file_peeker_client::{
-    Client, CloseSessionError, DirectoryEntry, EntryKind, SessionConfig, SessionTarget,
+    Client, CloseSessionError, DirectoryEntry, EntryKind, Session, SessionConfig, SessionTarget,
 };
-use futures::TryStreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use tokio::{sync::mpsc, task::JoinHandle};
-use uuid::Uuid;
+use tokio::sync::mpsc;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct BrowserContextId(Uuid);
+use crate::browser_context::{
+    BrowserContext, BrowserContextEvent, BrowserContextId, ListingStatus,
+};
 
-impl BrowserContextId {
-    fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
+const EVENT_CHANNEL_CAPACITY: usize = 8;
+const HELP_WIDTH: u16 = 56;
+const HELP_HEIGHT: u16 = 15;
 
-#[derive(Debug)]
-struct BrowserContext {
-    id: BrowserContextId,
-    session_id: String,
-    path: String,
-    entries: Vec<DirectoryEntry>,
-    selected_index: Option<usize>,
-    loading: bool,
-    error: Option<String>,
-    listing_task: Option<JoinHandle<()>>,
-    generation: u64,
-}
-
-impl BrowserContext {
-    fn new(session_id: String, path: String) -> Self {
-        Self {
-            id: BrowserContextId::new(),
-            session_id,
-            path,
-            entries: Vec::new(),
-            selected_index: None,
-            loading: false,
-            error: None,
-            listing_task: None,
-            generation: 0,
-        }
-    }
-
-    fn prepare_listing(&mut self) -> u64 {
-        self.cancel_listing();
-        self.generation = self.generation.wrapping_add(1);
-        self.entries.clear();
-        self.loading = true;
-        self.error = None;
-        self.generation
-    }
-
-    fn cancel_listing(&mut self) {
-        if let Some(task) = self.listing_task.take() {
-            task.abort();
-        }
-        self.loading = false;
-    }
-
-    fn append_entries(&mut self, entries: Vec<DirectoryEntry>) {
-        self.entries.extend(entries);
-        if self.selected_index.is_none() && !self.entries.is_empty() {
-            self.selected_index = Some(0);
-        }
-    }
-
-    fn clamp_selection(&mut self) {
-        self.selected_index = match (self.selected_index, self.entries.len()) {
-            (_, 0) => None,
-            (Some(index), length) => Some(index.min(length - 1)),
-            (None, _) => Some(0),
-        };
-    }
-
-    fn move_selection(&mut self, down: bool) {
-        if self.entries.is_empty() {
-            self.selected_index = None;
-            return;
-        }
-        let last = self.entries.len() - 1;
-        let current = self.selected_index.unwrap_or(0).min(last);
-        self.selected_index = Some(if down {
-            (current + 1).min(last)
-        } else {
-            current.saturating_sub(1)
-        });
-    }
-
-    fn effective_selection(&self) -> Option<usize> {
-        (!self.entries.is_empty())
-            .then(|| self.selected_index.unwrap_or(0).min(self.entries.len() - 1))
-    }
-}
-
-#[derive(Debug)]
-enum AppEvent {
-    Batch {
-        context_id: BrowserContextId,
-        generation: u64,
-        entries: Vec<DirectoryEntry>,
-    },
-    Finished {
-        context_id: BrowserContextId,
-        generation: u64,
-    },
-    Failed {
-        context_id: BrowserContextId,
-        generation: u64,
-        error: String,
-    },
+#[derive(Debug, Eq, Parser, PartialEq)]
+#[command(
+    name = "file-peeker",
+    version,
+    about = "Browse a directory with File Peeker"
+)]
+struct Cli {
+    /// Directory to browse
+    path: Option<String>,
 }
 
 #[derive(Debug)]
 struct App {
     client: Arc<Client>,
+    help: String,
     session_ids: HashSet<String>,
     contexts: HashMap<BrowserContextId, BrowserContext>,
     active_context_id: Option<BrowserContextId>,
-    events: mpsc::UnboundedSender<AppEvent>,
+    events: mpsc::Sender<BrowserContextEvent>,
 }
 
 impl App {
-    fn new(events: mpsc::UnboundedSender<AppEvent>) -> Self {
+    fn new(events: mpsc::Sender<BrowserContextEvent>) -> Self {
         Self {
             client: Client::new(),
+            help: Cli::command().render_help().to_string(),
             session_ids: HashSet::new(),
             contexts: HashMap::new(),
             active_context_id: None,
@@ -147,7 +63,10 @@ impl App {
         }
     }
 
-    async fn start(&mut self) -> Result<(), Box<dyn Error>> {
+    async fn start(&mut self, path: Option<&str>) -> Result<(), Box<dyn Error>> {
+        let Some(path) = path else {
+            return Ok(());
+        };
         let session_id = self
             .client
             .start_session(SessionConfig {
@@ -160,64 +79,22 @@ impl App {
             .get_session(session_id.clone())
             .await
             .ok_or_else(|| io::Error::other("started Session was not retained"))?;
-        let path = session.op_current_root().await?;
-        let context_id = self.add_context(session_id, path);
+        let context_id = self.add_context(session, path.to_owned());
         self.active_context_id = Some(context_id);
-        self.restart_context(context_id);
         Ok(())
     }
 
-    fn add_context(&mut self, session_id: String, path: String) -> BrowserContextId {
-        let context = BrowserContext::new(session_id, path);
-        let id = context.id;
+    fn add_context(&mut self, session: Arc<Session>, path: String) -> BrowserContextId {
+        let context = BrowserContext::new(session, path, self.events.clone());
+        let id = context.id();
         self.contexts.insert(id, context);
         id
     }
 
-    fn update(&mut self, event: AppEvent) {
-        match event {
-            AppEvent::Batch {
-                context_id,
-                generation,
-                entries,
-            } => {
-                if let Some(context) = self.current_generation(context_id, generation) {
-                    context.append_entries(entries);
-                }
-            }
-            AppEvent::Finished {
-                context_id,
-                generation,
-            } => {
-                if let Some(context) = self.current_generation(context_id, generation) {
-                    context.loading = false;
-                    context.listing_task = None;
-                    context.clamp_selection();
-                }
-            }
-            AppEvent::Failed {
-                context_id,
-                generation,
-                error,
-            } => {
-                if let Some(context) = self.current_generation(context_id, generation) {
-                    context.loading = false;
-                    context.error = Some(error);
-                    context.listing_task = None;
-                    context.clamp_selection();
-                }
-            }
+    fn update(&mut self, event: BrowserContextEvent) {
+        if let Some(context) = self.contexts.get_mut(&event.context_id()) {
+            context.apply(event);
         }
-    }
-
-    fn current_generation(
-        &mut self,
-        context_id: BrowserContextId,
-        generation: u64,
-    ) -> Option<&mut BrowserContext> {
-        self.contexts
-            .get_mut(&context_id)
-            .filter(|context| context.generation == generation)
     }
 
     fn restart_active_context(&mut self) {
@@ -235,22 +112,8 @@ impl App {
     }
 
     fn restart_context(&mut self, context_id: BrowserContextId) {
-        let Some(context) = self.contexts.get_mut(&context_id) else {
-            return;
-        };
-        let generation = context.prepare_listing();
-        let session_id = context.session_id.clone();
-        let path = context.path.clone();
-        let task = start_listing(
-            Arc::clone(&self.client),
-            session_id,
-            path,
-            context_id,
-            generation,
-            self.events.clone(),
-        );
         if let Some(context) = self.contexts.get_mut(&context_id) {
-            context.listing_task = Some(task);
+            context.refresh();
         }
     }
 
@@ -260,7 +123,7 @@ impl App {
 
     fn cancel_all_listings(&mut self) {
         for context in self.contexts.values_mut() {
-            context.cancel_listing();
+            context.cancel();
         }
     }
 
@@ -279,6 +142,11 @@ impl App {
     }
 
     fn render(&self, frame: &mut Frame<'_>) {
+        if self.active_context().is_none() {
+            self.render_help(frame);
+            return;
+        }
+
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(1),
@@ -287,7 +155,7 @@ impl App {
         .areas(frame.area());
         let context = self.active_context();
         frame.render_widget(
-            Paragraph::new(context.map_or("", |context| context.path.as_str())).block(
+            Paragraph::new(context.map_or("", BrowserContext::path)).block(
                 Block::default()
                     .title(" File Peeker ")
                     .borders(Borders::ALL),
@@ -302,7 +170,7 @@ impl App {
         );
         let entries = context
             .into_iter()
-            .flat_map(|context| context.entries.iter())
+            .flat_map(BrowserContext::entries)
             .map(entry_list_item);
         let mut list_state = ListState::default()
             .with_selected(context.and_then(BrowserContext::effective_selection));
@@ -316,31 +184,46 @@ impl App {
         );
         let status = context.map_or_else(
             || "Not started  q/Esc: quit".into(),
-            |context| {
-                context.error.as_ref().map_or_else(
-                    || {
-                        if context.loading {
-                            "Loading…  j/k: select  R: refresh  q/Esc: quit".into()
-                        } else {
-                            format!(
-                                "{} items  j/k: select  R: refresh  q/Esc: quit",
-                                context.entries.len()
-                            )
-                        }
-                    },
-                    |error| format!("Error: {error}  j/k: select  R: refresh  q/Esc: quit"),
-                )
+            |context| match context.status() {
+                ListingStatus::Loading => "Loading…  j/k: select  R: refresh  q/Esc: quit".into(),
+                ListingStatus::Complete => format!(
+                    "{} items  j/k: select  R: refresh  q/Esc: quit",
+                    context.entries().len()
+                ),
+                ListingStatus::Failed(error) => {
+                    format!("Error: {error}  j/k: select  R: refresh  q/Esc: quit")
+                }
             },
         );
         frame.render_widget(Paragraph::new(status), footer);
+    }
+
+    fn render_help(&self, frame: &mut Frame<'_>) {
+        let area = centered_help_area(frame.area());
+        let block = Block::default()
+            .title(" File Peeker ")
+            .borders(Borders::ALL);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let [body, footer] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        frame.render_widget(
+            Paragraph::new(self.help.as_str()).wrap(Wrap { trim: false }),
+            body,
+        );
+        frame.render_widget(
+            Paragraph::new("q/Esc: quit").alignment(Alignment::Center),
+            footer,
+        );
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let cli = Cli::parse();
+    let (sender, mut receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
     let mut app = App::new(sender);
-    if let Err(error) = app.start().await {
+    if let Err(error) = app.start(cli.path.as_deref()).await {
         let _ = app.shutdown().await;
         return Err(error);
     }
@@ -358,69 +241,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     shutdown_result.map_err(Into::into)
 }
 
-fn start_listing(
-    client: Arc<Client>,
-    session_id: String,
-    path: String,
-    context_id: BrowserContextId,
-    generation: u64,
-    events: mpsc::UnboundedSender<AppEvent>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let Some(session) = client.get_session(session_id).await else {
-            let _ = events.send(AppEvent::Failed {
-                context_id,
-                generation,
-                error: "Session is no longer available".into(),
-            });
-            return;
-        };
-        match session.op_list(&path).await {
-            Ok(mut listing) => loop {
-                match listing.try_next().await {
-                    Ok(Some(entries)) => {
-                        let _ = events.send(AppEvent::Batch {
-                            context_id,
-                            generation,
-                            entries,
-                        });
-                    }
-                    Ok(None) => {
-                        let _ = events.send(AppEvent::Finished {
-                            context_id,
-                            generation,
-                        });
-                        break;
-                    }
-                    Err(error) => {
-                        let _ = events.send(AppEvent::Failed {
-                            context_id,
-                            generation,
-                            error: error.to_string(),
-                        });
-                        break;
-                    }
-                }
-            },
-            Err(error) => {
-                let _ = events.send(AppEvent::Failed {
-                    context_id,
-                    generation,
-                    error: error.to_string(),
-                });
-            }
-        }
-    })
-}
-
 fn run(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    receiver: &mut mpsc::UnboundedReceiver<AppEvent>,
+    receiver: &mut mpsc::Receiver<BrowserContextEvent>,
 ) -> io::Result<()> {
     loop {
-        while let Ok(app_event) = receiver.try_recv() {
-            app.update(app_event);
+        for _ in 0..EVENT_CHANNEL_CAPACITY {
+            let Ok(context_event) = receiver.try_recv() else {
+                break;
+            };
+            app.update(context_event);
         }
         terminal.draw(|frame| app.render(frame))?;
         if event::poll(Duration::from_millis(50))?
@@ -466,6 +297,17 @@ fn sidebar_width(total_width: u16) -> u16 {
         .min(total_width.saturating_sub(20))
 }
 
+fn centered_help_area(area: Rect) -> Rect {
+    let width = HELP_WIDTH.min(area.width);
+    let height = HELP_HEIGHT.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
 fn body_layout(area: Rect) -> [Rect; 2] {
     Layout::horizontal([
         Constraint::Length(sidebar_width(area.width)),
@@ -476,25 +318,22 @@ fn body_layout(area: Rect) -> [Rect; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, AppEvent, entry_appearance, sidebar_width};
-    use file_peeker_client::{DirectoryEntry, EntryKind};
-    use ratatui::style::{Color, Modifier};
+    use super::{
+        App, Cli, EVENT_CHANNEL_CAPACITY, centered_help_area, entry_appearance, sidebar_width,
+    };
+    use clap::{Parser, error::ErrorKind};
+    use file_peeker_client::EntryKind;
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        style::{Color, Modifier},
+    };
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
-    fn entry(name: &str) -> DirectoryEntry {
-        DirectoryEntry {
-            name: name.into(),
-            kind: EntryKind::File,
-            navigable: false,
-        }
-    }
     fn app() -> App {
-        let (events, _receiver) = mpsc::unbounded_channel();
+        let (events, _receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         App::new(events)
-    }
-    fn context(app: &mut App, session: &str, path: &str) -> super::BrowserContextId {
-        app.add_context(session.into(), path.into())
     }
 
     #[test]
@@ -506,157 +345,73 @@ mod tests {
         assert_eq!(app.active_context_id, None);
     }
 
-    #[tokio::test]
-    async fn shutdown_without_a_session_is_harmless() {
-        app().shutdown().await.unwrap();
-    }
-
     #[test]
-    fn contexts_have_unique_ids_and_can_share_a_session() {
-        let mut app = app();
-        let first = context(&mut app, "session", "/one");
-        let second = context(&mut app, "session", "/two");
-        assert_ne!(first, second);
+    fn parses_an_optional_startup_path() {
         assert_eq!(
-            app.contexts[&first].session_id,
-            app.contexts[&second].session_id
+            Cli::try_parse_from(["file-peeker"]).unwrap(),
+            Cli { path: None }
+        );
+        assert_eq!(
+            Cli::try_parse_from(["file-peeker", "/tmp/reports"]).unwrap(),
+            Cli {
+                path: Some("/tmp/reports".into())
+            }
         );
     }
 
     #[test]
-    fn concurrent_events_are_routed_to_their_context() {
+    fn clap_help_is_available() {
+        let error = Cli::try_parse_from(["file-peeker", "--help"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        assert!(error.to_string().contains("Usage: file-peeker [PATH]"));
+    }
+
+    #[tokio::test]
+    async fn starting_without_a_path_keeps_the_app_sessionless() {
         let mut app = app();
-        let first = context(&mut app, "session", "/one");
-        let second = context(&mut app, "session", "/two");
-        let first_generation = app.contexts.get_mut(&first).unwrap().prepare_listing();
-        let second_generation = app.contexts.get_mut(&second).unwrap().prepare_listing();
-        app.update(AppEvent::Batch {
-            context_id: first,
-            generation: first_generation,
-            entries: vec![entry("one")],
-        });
-        app.update(AppEvent::Batch {
-            context_id: second,
-            generation: second_generation,
-            entries: vec![entry("two")],
-        });
-        assert_eq!(app.contexts[&first].entries, [entry("one")]);
-        assert_eq!(app.contexts[&second].entries, [entry("two")]);
-        assert_eq!(app.contexts[&first].selected_index, Some(0));
-        assert_eq!(app.contexts[&second].selected_index, Some(0));
+        app.start(None).await.unwrap();
+
+        assert!(app.session_ids.is_empty());
+        assert!(app.contexts.is_empty());
+        assert_eq!(app.active_context_id, None);
     }
 
     #[test]
-    fn selection_moves_within_the_active_context() {
-        let mut app = app();
-        let active = context(&mut app, "session", "/one");
-        let inactive = context(&mut app, "session", "/two");
-        app.active_context_id = Some(active);
-        app.contexts.get_mut(&active).unwrap().append_entries(vec![
-            entry("one"),
-            entry("two"),
-            entry("three"),
-        ]);
-        app.contexts
-            .get_mut(&inactive)
-            .unwrap()
-            .append_entries(vec![entry("other")]);
+    fn startup_screen_renders_help_inside_ratatui() {
+        let app = app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
 
-        app.move_active_selection(true);
-        app.move_active_selection(true);
-        app.move_active_selection(true);
-        assert_eq!(app.contexts[&active].selected_index, Some(2));
-        app.move_active_selection(false);
-        assert_eq!(app.contexts[&active].selected_index, Some(1));
-        assert_eq!(app.contexts[&inactive].selected_index, Some(0));
+        assert!(
+            rendered.contains("Usage: file-peeker [PATH]"),
+            "rendered startup screen: {rendered:?}"
+        );
+        assert!(rendered.contains("Directory to browse"));
+        assert!(rendered.contains("q/Esc: quit"));
     }
 
     #[test]
-    fn listing_batches_and_errors_preserve_partial_content() {
-        let mut app = app();
-        let id = context(&mut app, "session", "/home");
-        let generation = app.contexts.get_mut(&id).unwrap().prepare_listing();
-        app.update(AppEvent::Batch {
-            context_id: id,
-            generation,
-            entries: vec![entry("one"), entry("two")],
-        });
-        app.update(AppEvent::Failed {
-            context_id: id,
-            generation,
-            error: "failed".into(),
-        });
-        assert_eq!(app.contexts[&id].entries, [entry("one"), entry("two")]);
-        assert_eq!(app.contexts[&id].error.as_deref(), Some("failed"));
-        assert!(!app.contexts[&id].loading);
+    fn startup_help_area_is_centered_and_responsive() {
+        assert_eq!(
+            centered_help_area(ratatui::layout::Rect::new(0, 0, 80, 24)),
+            ratatui::layout::Rect::new(12, 4, 56, 15)
+        );
+        assert_eq!(
+            centered_help_area(ratatui::layout::Rect::new(3, 2, 40, 10)),
+            ratatui::layout::Rect::new(3, 2, 40, 10)
+        );
     }
 
-    #[test]
-    fn refresh_only_clears_active_context_and_rejects_stale_events() {
-        let mut app = app();
-        let active = context(&mut app, "session", "/one");
-        let inactive = context(&mut app, "session", "/two");
-        app.active_context_id = Some(active);
-        let old = app.contexts.get_mut(&active).unwrap().prepare_listing();
-        app.contexts
-            .get_mut(&active)
-            .unwrap()
-            .entries
-            .push(entry("old"));
-        app.contexts
-            .get_mut(&inactive)
-            .unwrap()
-            .entries
-            .push(entry("kept"));
-        let current = app.contexts.get_mut(&active).unwrap().prepare_listing();
-        app.update(AppEvent::Batch {
-            context_id: active,
-            generation: old,
-            entries: vec![entry("stale")],
-        });
-        assert_ne!(old, current);
-        assert!(app.contexts[&active].entries.is_empty());
-        assert_eq!(app.contexts[&inactive].entries, [entry("kept")]);
-    }
-
-    #[test]
-    fn refresh_preserves_index_until_the_replacement_listing_finishes() {
-        let mut app = app();
-        let id = context(&mut app, "session", "/home");
-        let context = app.contexts.get_mut(&id).unwrap();
-        context.append_entries(vec![entry("a"), entry("b"), entry("c")]);
-        context.selected_index = Some(2);
-        let generation = context.prepare_listing();
-        assert_eq!(context.selected_index, Some(2));
-
-        app.update(AppEvent::Batch {
-            context_id: id,
-            generation,
-            entries: vec![entry("new-a"), entry("new-b")],
-        });
-        assert_eq!(app.contexts[&id].effective_selection(), Some(1));
-        assert_eq!(app.contexts[&id].selected_index, Some(2));
-        app.update(AppEvent::Finished {
-            context_id: id,
-            generation,
-        });
-        assert_eq!(app.contexts[&id].selected_index, Some(1));
-    }
-
-    #[test]
-    fn empty_terminal_listing_clears_selection() {
-        let mut app = app();
-        let id = context(&mut app, "session", "/home");
-        let context = app.contexts.get_mut(&id).unwrap();
-        context.selected_index = Some(4);
-        let generation = context.prepare_listing();
-
-        app.update(AppEvent::Finished {
-            context_id: id,
-            generation,
-        });
-
-        assert_eq!(app.contexts[&id].selected_index, None);
+    #[tokio::test]
+    async fn shutdown_without_a_session_is_harmless() {
+        app().shutdown().await.unwrap();
     }
 
     #[test]

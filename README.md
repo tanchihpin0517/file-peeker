@@ -4,10 +4,11 @@ File Peeker is a native macOS file browser with SwiftUI and Ratatui frontends
 backed by a shared Rust client and filesystem server.
 
 The client API and test CLI can install, start, and own a local server or
-connect to one over SSH. Both UIs start a local session, discover the server's
-current root, and display that directory's entries as bounded gRPC batches.
-The initial UI is deliberately read-only and does not navigate or open files.
-In the TUI, press `R` to clear and refresh the Home listing.
+connect to one over SSH. SwiftUI discovers and displays the server's current
+root. The TUI opens an in-app help screen when started without a path; pass a
+path to start a local session and display that directory's entries as bounded
+gRPC batches. The initial UI is deliberately read-only and does not navigate or
+open files. In the TUI, press `R` to clear and refresh the active listing.
 
 ## Build
 

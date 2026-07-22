@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+clap.workspace = true
 crossterm.workspace = true
 file-peeker-client = { path = "../file-peeker-client" }
 futures.workspace = true
