@@ -20,12 +20,13 @@ main
 
 `App` always creates and owns the Client. When a startup path is supplied,
 Sessions remain strongly owned by the Client's registry and each Browser
-Context also retains its resolved Session. `Client::get_session` is used once
-after startup, not on each refresh.
+Context also retains its resolved Session behind its `BrowserSource` trait
+object. `Client::get_session` is used once after startup, not on each refresh.
 
-`main` parses an optional path and owns only the event receiver and terminal
-lifecycle. It always creates App, calls `App::start` with that optional path,
-runs the draw/input loop, restores the terminal, and calls `App::shutdown`.
+`main` parses an optional path, creates the event channel and help text, owns the
+terminal lifecycle and event receiver, and maps key presses to App commands. It
+always creates App, calls `App::start` with that optional path, runs the
+draw/input loop, restores the terminal, and calls `App::shutdown`.
 
 ## Browser Context
 
@@ -34,9 +35,9 @@ Each Browser Context represents one independent browsing instance:
 | Field | Purpose |
 | --- | --- |
 | `id` | UUID used to route asynchronous events |
-| `session` | Resolved, Client-owned Session used by this context's listings |
+| `source` | Listing source; production stores the resolved, Client-owned Session behind `BrowserSource` |
 | `root_path` | Absolute lexical directory path resolved by the Session |
-| `entries` | Batches accumulated in server arrival order |
+| `entries` | Individual entries appended in selected-host stream arrival order |
 | `selected_index` | Independent visual selection for this context |
 | `ListingStatus` | Mutually exclusive loading, complete, or failed outcome |
 | `listing_task` | Tokio task handle used to cancel active work |
@@ -86,12 +87,13 @@ Session and path.
 The selected numeric index is retained while loading, displayed at the nearest
 currently available row, and clamped permanently when the stream terminates.
 
-The task handle stops the old gRPC work. The context's private generation check
-separately protects against old events that were already queued before
-cancellation. Dropping a Browser Context also aborts its active listing task.
-`Up`/`Down` and `k`/`j` move the active context's selection within the available
-rows. The first received entry is selected automatically. Lowercase `r` has no
-action. `q` and `Esc` exit.
+The task handle stops the old listing work by dropping its native stream; a
+future remote-backed context would consequently drop its gRPC response stream.
+The context's private generation check separately protects against old events
+that were already queued before cancellation. Dropping a Browser Context also
+aborts its active listing task. `Up`/`Down` and `k`/`j` move the active context's
+selection within the available rows. The first received entry is selected
+automatically. Lowercase `r` has no action. `q` and `Esc` exit.
 
 Entry kinds use aligned prefixes and styles so they remain distinguishable in
 the list: files use a two-space prefix and terminal defaults, directories use a
@@ -116,8 +118,8 @@ failures use the same shutdown path.
 - The help screen is informational and exits with `q` or `Esc`.
 - Only the active context is visible and refreshable from the keyboard.
 - There is not yet a command to create, select, close, or lay out contexts.
-- Entries retain server order. Navigation changes the active context's path;
-  there is no sorting or searching.
+- Entries retain selected-host filesystem order. Navigation changes the active
+  context's path; there is no sorting or searching.
 
 Unit tests cover empty App ownership, harmless empty shutdown, initial listing,
 partial-result errors, navigation and failed navigation, refresh clearing,

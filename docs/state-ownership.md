@@ -5,7 +5,7 @@ state needed to display its requested listing.
 
 | Information | Rust client library | SwiftUI | TUI |
 | --- | --- | --- | --- |
-| Session UUID and registry | UUID and strong Session registry stored in `Client` | Retains the returned ID and Session | `App` tracks started IDs; each `BrowserContext` retains the resolved Session |
+| Session UUID and registry | UUID and strong Session registry stored in `Client` | Retains the returned ID and Session | `App` tracks started IDs; each `BrowserContext` retains the resolved Session behind `BrowserSource` |
 | Unified operation interface | Private `SessionBackend` trait implemented by native `FsService` and remote `RemoteBackend` | Uses `Session` only | Uses `Session` only |
 | Server process and connection lifecycle | Owned by the Session backend slot until consuming close | Starts on appearance; closes on disappearance | `App.start` creates it when given a path; `App.shutdown` closes it after terminal restoration |
 | gRPC channel and authentication | Stored in the remote Session backend | No | No |
@@ -26,12 +26,12 @@ TUI: optional path -> help screen
                                                        -> op_list_dir(root_path) -> append entries
 ```
 
-Both UIs preserve server arrival order and retain partial entries if the stream
-fails. SwiftUI issues one listing per lifecycle. The TUI can run listings for
-multiple Browser Contexts concurrently. Bounded events are routed by context
-UUID; each context privately rejects stale generations and applies its own
-listing transitions. Pressing `h` or `l` changes the active context path and
-starts a replacement listing with reset selection; pressing `R` replaces the
-listing at the same path. Both clear entries and failed status first. Completing
-a stream releases its Listing but leaves the shared Session alive until the UI
-shuts down.
+Both UIs preserve selected-host stream arrival order and retain partial entries
+if the stream fails. SwiftUI issues one listing per lifecycle. The TUI can run
+listings for multiple Browser Contexts concurrently. Bounded events are routed
+by context UUID; each context privately rejects stale generations and applies
+its own listing transitions. Pressing `h` or `l` changes the active context path
+and starts a replacement listing with reset selection; pressing `R` replaces
+the listing at the same path. Both clear entries and failed status first.
+Completing a stream releases its Listing but leaves the shared Session alive
+until the UI shuts down.

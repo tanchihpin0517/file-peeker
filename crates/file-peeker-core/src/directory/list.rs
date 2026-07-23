@@ -2,8 +2,8 @@ use futures::{StreamExt, stream, stream::BoxStream};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 
-use super::{DirectoryEntry, EntryKind};
-use crate::{FsError, FsErrorKind, error::service_cancelled_error, resolve_path::resolve_path};
+use super::{DirectoryEntry, entry::inspect_entry};
+use crate::{FsError, error::service_cancelled_error, resolve_path::resolve_path};
 
 pub type EntryStream = BoxStream<'static, Result<DirectoryEntry, FsError>>;
 
@@ -40,7 +40,7 @@ pub(crate) async fn list_dir(
                         () = cancellation_token.cancelled() => {
                             return Some((Err(service_cancelled_error()), None));
                         }
-                        result = convert_entry(&entry) => result,
+                        result = inspect_entry(&entry) => result.map(|inspected| inspected.entry),
                     };
                     let next_state = result.is_ok().then_some(directory_entries);
                     Some((result, next_state))
@@ -52,50 +52,6 @@ pub(crate) async fn list_dir(
     });
 
     Ok(stream.boxed())
-}
-
-async fn convert_entry(entry: &fs::DirEntry) -> Result<DirectoryEntry, FsError> {
-    let entry_path = entry.path();
-    if entry_path.to_str().is_none() {
-        return Err(FsError::new(
-            FsErrorKind::InvalidArgument,
-            "Encountered a non-UTF-8 path",
-        ));
-    }
-    let name = entry
-        .file_name()
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            FsError::new(
-                FsErrorKind::InvalidArgument,
-                "Encountered a non-UTF-8 filename",
-            )
-        })?;
-    let file_type = entry
-        .file_type()
-        .await
-        .map_err(|error| FsError::from_io(&error))?;
-    let (kind, navigable) = if file_type.is_dir() {
-        (EntryKind::Directory, true)
-    } else if file_type.is_file() {
-        (EntryKind::File, false)
-    } else if file_type.is_symlink() {
-        (
-            EntryKind::Symlink,
-            fs::metadata(&entry_path)
-                .await
-                .is_ok_and(|metadata| metadata.is_dir()),
-        )
-    } else {
-        (EntryKind::Other, false)
-    };
-
-    Ok(DirectoryEntry {
-        name,
-        kind,
-        navigable,
-    })
 }
 
 #[cfg(test)]

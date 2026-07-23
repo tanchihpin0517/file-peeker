@@ -22,7 +22,6 @@ pub(super) async fn read_file(connection: &RemoteConnection, path: &str) -> io::
     Ok(network_read_stream(stream))
 }
 
-#[allow(dead_code, reason = "backend-only operation awaiting Session exposure")]
 fn network_read_stream<S>(stream: S) -> ReadStream
 where
     S: Stream<Item = Result<ReadChunk, tonic::Status>> + Send + 'static,

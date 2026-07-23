@@ -60,17 +60,51 @@ cargo run -p file-peeker-client -- test start-server example.test
 Uses the in-process filesystem core to list the direct children of `PATH`.
 Relative paths are resolved from the client's working directory. Each
 child's path is written to standard output on its own line; output order follows
-the server's filesystem iteration order. Shell expressions are preserved in the
-output while `~` and `$VARIABLES` are expanded in the client environment for
-listing. After the listing completes, a debug line on standard error reports
-the entry count, elapsed milliseconds, and entries per second.
+the selected host's native filesystem iteration order. Shell expressions are
+preserved in the output while `~` and `$VARIABLES` are expanded in the client
+environment for local listing. After the listing completes, a debug line on
+standard error reports the entry count, elapsed milliseconds, and entries per
+second.
 
 With `--remote SERVER`, the matching server is started through SSH and the same
 listing operation runs on that host. Relative paths are resolved from the
-remote server's working directory.
+remote server's working directory, and shell expressions are expanded in the
+remote server's environment.
 
 ```text
 cargo run -p file-peeker-client -- test list .
 cargo run -p file-peeker-client -- test list /tmp/report-drafts
 cargo run -p file-peeker-client -- test list . --remote example.test
+```
+
+### `test open PATH [--remote SERVER]`
+
+Resolves `PATH` on the selected host and opens the regular file with the
+client operating system's default application. Local files are opened at their
+resolved path. With `--remote SERVER`, the file is completely and atomically
+downloaded into the client cache before it is opened. The system opener is
+currently supported only on macOS. Successful commands produce no standard
+output.
+
+```text
+cargo run -p file-peeker-client -- test open ./report.pdf
+cargo run -p file-peeker-client -- test open '~/reports/final.pdf' --remote example.test
+```
+
+### `test walk PATH [--remote SERVER]`
+
+Recursively walks `PATH` on the selected host and writes each descendant path
+to standard output on its own line. The root itself is omitted, directories
+precede their descendants in pre-order depth-first traversal, and symbolic
+links are emitted but never followed. Output follows filesystem traversal order
+and is not sorted.
+
+Relative paths preserve the requested root spelling in the output. After a
+successful traversal, a debug line on standard error reports the entry count,
+elapsed milliseconds, and entries per second. With `--remote SERVER`, traversal
+runs on that host through the authenticated gRPC connection.
+
+```text
+cargo run -p file-peeker-client -- test walk .
+cargo run -p file-peeker-client -- test walk ~/reports --remote example.test
 ```

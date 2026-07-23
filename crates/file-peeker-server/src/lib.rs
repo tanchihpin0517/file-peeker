@@ -11,6 +11,6 @@ pub mod protocol {
 
     pub use v1::{
         EntryKind, ListBatch, ListRequest, ListingEntry, ReadChunk, ReadRequest,
-        ResolvePathRequest, ResolvePathResponse,
+        ResolvePathRequest, ResolvePathResponse, WalkBatch, WalkEntry, WalkRequest,
     };
 }

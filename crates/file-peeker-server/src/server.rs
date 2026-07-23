@@ -163,8 +163,8 @@ mod tests {
     use file_peeker_server::protocol::{
         FILE_PEEKER_SERVICE_NAME,
         v1::{
-            ListRequest, ReadRequest, ResolvePathRequest, file_peeker_client::FilePeekerClient,
-            file_peeker_server::FilePeekerServer,
+            ListRequest, ReadRequest, ResolvePathRequest, WalkRequest,
+            file_peeker_client::FilePeekerClient, file_peeker_server::FilePeekerServer,
         },
     };
     use futures::TryStreamExt;
@@ -297,11 +297,35 @@ mod tests {
             1
         );
 
+        assert_walk_rpc(&mut client, fixture.path()).await;
         assert_read_rpc(&mut client, fixture.path()).await;
 
         cancellation_token.cancel();
         fs.cancel();
         server.await.unwrap();
+    }
+
+    async fn assert_walk_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path) {
+        tokio::fs::create_dir(fixture.join("nested")).await.unwrap();
+        tokio::fs::write(fixture.join("nested/child.txt"), b"")
+            .await
+            .unwrap();
+        let batches = client
+            .walk(authenticated(WalkRequest {
+                path: fixture.to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(
+            batches
+                .iter()
+                .flat_map(|batch| batch.entries.iter())
+                .any(|entry| entry.relative_path == "nested/child.txt" && entry.depth == 2)
+        );
     }
 
     async fn assert_read_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path) {

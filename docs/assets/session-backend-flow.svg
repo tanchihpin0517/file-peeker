@@ -56,8 +56,8 @@
 
   <rect class="backend" x="310" y="270" width="280" height="120" rx="12"/>
   <text x="450" y="308">SessionBackend</text>
-  <text class="secondary" x="450" y="332">resolve_path</text>
-  <text class="secondary" x="450" y="354">list · read · close</text>
+  <text class="secondary" x="450" y="332">selected-host filesystem</text>
+  <text class="secondary" x="450" y="354">and lifecycle capabilities</text>
   <text class="secondary" x="450" y="378">dynamic dispatch</text>
 
   <path class="edge local-edge" d="M 400 390 V 420 C 400 445 225 435 225 475"/>

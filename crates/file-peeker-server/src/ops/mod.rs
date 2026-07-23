@@ -1,20 +1,23 @@
 //! Thin gRPC adapter for the transport-independent filesystem service.
 
+mod entry;
 mod list;
 mod read;
 mod status;
+mod walk;
 
 use file_peeker_core::FsService;
 use file_peeker_server::protocol::v1::{
     ListBatch, ListRequest, ReadChunk, ReadRequest, ResolvePathRequest, ResolvePathResponse,
-    file_peeker_server::FilePeeker,
+    WalkBatch, WalkRequest, file_peeker_server::FilePeeker,
 };
 use futures::stream::BoxStream;
 use tonic::{Request, Response, Status};
 
-use self::{list::list_batches, read::read_chunks, status::fs_status};
+use self::{list::list_batches, read::read_chunks, status::fs_status, walk::walk_batches};
 
 pub(crate) const GRPC_BATCH_MAX_BYTES: usize = 1024 * 1024;
+pub(crate) const GRPC_BATCH_MAX_ENTRIES: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FilePeekerService {
@@ -31,6 +34,7 @@ impl FilePeekerService {
 impl FilePeeker for FilePeekerService {
     type ListStream = BoxStream<'static, Result<ListBatch, Status>>;
     type ReadStream = BoxStream<'static, Result<ReadChunk, Status>>;
+    type WalkStream = BoxStream<'static, Result<WalkBatch, Status>>;
 
     async fn resolve_path(
         &self,
@@ -64,5 +68,17 @@ impl FilePeeker for FilePeekerService {
             .await
             .map_err(|error| fs_status(&error))?;
         Ok(Response::new(read_chunks(stream)))
+    }
+
+    async fn walk(
+        &self,
+        request: Request<WalkRequest>,
+    ) -> Result<Response<Self::WalkStream>, Status> {
+        let stream = self
+            .fs
+            .walk_dir(&request.into_inner().path)
+            .await
+            .map_err(|error| fs_status(&error))?;
+        Ok(Response::new(walk_batches(stream)))
     }
 }

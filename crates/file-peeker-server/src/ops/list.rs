@@ -1,12 +1,12 @@
-use file_peeker_core::{DirectoryEntry, EntryKind, EntryStream, FsError};
-use file_peeker_server::protocol::v1::{EntryKind as ProtocolEntryKind, ListBatch, ListingEntry};
+use file_peeker_core::{DirectoryEntry, EntryStream, FsError};
+use file_peeker_server::protocol::v1::ListBatch;
 use futures::{StreamExt as _, stream, stream::BoxStream};
 use prost::Message as _;
 use tonic::Status;
 
-use super::{GRPC_BATCH_MAX_BYTES, status::fs_status};
-
-const GRPC_BATCH_MAX_ENTRIES: usize = 1024;
+use super::{
+    GRPC_BATCH_MAX_BYTES, GRPC_BATCH_MAX_ENTRIES, entry::convert_entry, status::fs_status,
+};
 
 pub(super) fn list_batches(stream: EntryStream) -> BoxStream<'static, Result<ListBatch, Status>> {
     stream
@@ -59,20 +59,6 @@ fn convert_chunk(entries: Vec<Result<DirectoryEntry, FsError>>) -> Vec<Result<Li
     }
 
     results
-}
-
-fn convert_entry(entry: DirectoryEntry) -> ListingEntry {
-    let kind = match entry.kind {
-        EntryKind::File => ProtocolEntryKind::File,
-        EntryKind::Directory => ProtocolEntryKind::Directory,
-        EntryKind::Symlink => ProtocolEntryKind::Symlink,
-        EntryKind::Other => ProtocolEntryKind::Other,
-    };
-    ListingEntry {
-        name: entry.name,
-        kind: kind.into(),
-        navigable: entry.navigable,
-    }
 }
 
 #[cfg(test)]

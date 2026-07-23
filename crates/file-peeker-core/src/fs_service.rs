@@ -1,7 +1,7 @@
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    directory::{EntryStream, list_dir},
+    directory::{EntryStream, WalkStream, list_dir, walk_dir},
     error::{FsError, FsErrorKind, service_cancelled_error},
     read::{ReadStream, read_file},
     resolve_path::resolve_path,
@@ -47,6 +47,21 @@ impl FsService {
     pub async fn list_dir(&self, path: &str) -> Result<EntryStream, FsError> {
         self.ensure_active()?;
         list_dir(path, self.cancellation_token.clone()).await
+    }
+
+    /// Starts a pull-based, pre-order depth-first traversal below a directory.
+    ///
+    /// The root is excluded, direct children have depth 1, sibling order is
+    /// filesystem-native, and symlinks are emitted but never followed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root cannot be opened as a directory or the
+    /// service is cancelled. Descendant and cancellation errors are emitted
+    /// terminally after any earlier entries.
+    pub async fn walk_dir(&self, path: &str) -> Result<WalkStream, FsError> {
+        self.ensure_active()?;
+        walk_dir(path, self.cancellation_token.clone()).await
     }
 
     /// Opens a file as an asynchronously consumed byte stream.
@@ -110,6 +125,15 @@ mod tests {
                 .await
                 .err()
                 .expect("listing after cancellation should fail")
+                .kind(),
+            FsErrorKind::Cancelled
+        );
+        assert_eq!(
+            clone
+                .walk_dir(".")
+                .await
+                .err()
+                .expect("walking after cancellation should fail")
                 .kind(),
             FsErrorKind::Cancelled
         );

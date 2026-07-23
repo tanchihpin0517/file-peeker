@@ -4,11 +4,15 @@ use file_peeker_core::FsService;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use self::backend::{RemoteBackend, SessionBackend};
+use self::{
+    backend::{RemoteBackend, SessionBackend},
+    file::FileService,
+};
 
 pub mod backend;
 pub(crate) mod directory;
 pub(crate) mod ffi;
+mod file;
 mod path;
 
 /// Backend target retained by a session.
@@ -38,6 +42,7 @@ pub struct Session {
     id: String,
     target: SessionTarget,
     backend: RwLock<Option<Box<dyn SessionBackend>>>,
+    file_service: FileService,
 }
 
 impl Session {
@@ -60,6 +65,7 @@ impl Session {
             id,
             target,
             backend: RwLock::new(Some(backend)),
+            file_service: FileService::default(),
         }))
     }
 
@@ -93,6 +99,7 @@ impl Session {
             id: id.into(),
             target,
             backend: RwLock::new(None),
+            file_service: FileService::default(),
         })
     }
 }
@@ -101,7 +108,7 @@ impl Session {
 mod tests {
     use async_trait::async_trait;
 
-    use super::{Session, SessionBackend, SessionTarget, backend::ReadStream};
+    use super::{FileService, Session, SessionBackend, SessionTarget, backend::ReadStream};
     use crate::EntryStream;
 
     #[derive(Debug)]
@@ -115,6 +122,10 @@ mod tests {
 
         async fn list_dir(&self, _path: &str) -> std::io::Result<EntryStream> {
             unreachable!("listing is not used by this test")
+        }
+
+        async fn walk_dir(&self, _path: &str) -> std::io::Result<crate::WalkStream> {
+            unreachable!("walk is not used by this test")
         }
 
         async fn read_file(&self, _path: &str) -> std::io::Result<ReadStream> {
@@ -183,6 +194,7 @@ mod tests {
             id: "failed-close-id".into(),
             target: SessionTarget::Local,
             backend: tokio::sync::RwLock::new(Some(Box::new(FailingCloseBackend))),
+            file_service: FileService::default(),
         });
 
         assert!(session.close().await.is_err());

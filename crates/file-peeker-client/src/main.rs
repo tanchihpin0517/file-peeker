@@ -39,11 +39,21 @@ enum TestCommand {
         #[arg(long)]
         remote: Option<String>,
     },
+    Open {
+        path: String,
+        #[arg(long)]
+        remote: Option<String>,
+    },
     SshConnection {
         server: String,
     },
     StartServer {
         server: String,
+    },
+    Walk {
+        path: String,
+        #[arg(long)]
+        remote: Option<String>,
     },
 }
 
@@ -75,8 +85,14 @@ async fn run(cli: &Cli) -> io::Result<()> {
             TestCommand::List { path, remote } => {
                 cli::list::run(path, remote.as_deref()).await?;
             }
+            TestCommand::Open { path, remote } => {
+                cli::open::run(path, remote.as_deref()).await?;
+            }
             TestCommand::SshConnection { server } => cli::ssh_connection::run(server).await?,
             TestCommand::StartServer { server } => cli::start_server::run(server).await?,
+            TestCommand::Walk { path, remote } => {
+                cli::walk::run(path, remote.as_deref()).await?;
+            }
         },
     }
     Ok(())
@@ -131,6 +147,100 @@ mod tests {
     fn test_list_requires_path() {
         let error = Cli::try_parse_from(["file-peeker-client", "test", "list"])
             .expect_err("test list should require a path");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_test_open() {
+        let cli = Cli::try_parse_from(["file-peeker-client", "test", "open", "/tmp/report.pdf"])
+            .expect("test open command should parse");
+
+        assert_eq!(
+            cli.command,
+            Command::Test {
+                command: TestCommand::Open {
+                    path: "/tmp/report.pdf".into(),
+                    remote: None
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_remote_test_open() {
+        let cli = Cli::try_parse_from([
+            "file-peeker-client",
+            "test",
+            "open",
+            "~/report.pdf",
+            "--remote",
+            "example.test",
+        ])
+        .expect("remote test open command should parse");
+
+        assert_eq!(
+            cli.command,
+            Command::Test {
+                command: TestCommand::Open {
+                    path: "~/report.pdf".into(),
+                    remote: Some("example.test".into())
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_open_requires_path() {
+        let error = Cli::try_parse_from(["file-peeker-client", "test", "open"])
+            .expect_err("test open should require a path");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_test_walk() {
+        let cli = Cli::try_parse_from(["file-peeker-client", "test", "walk", "/tmp/reports"])
+            .expect("test walk command should parse");
+
+        assert_eq!(
+            cli.command,
+            Command::Test {
+                command: TestCommand::Walk {
+                    path: "/tmp/reports".into(),
+                    remote: None
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_remote_test_walk() {
+        let cli = Cli::try_parse_from([
+            "file-peeker-client",
+            "test",
+            "walk",
+            ".",
+            "--remote",
+            "example.test",
+        ])
+        .expect("remote test walk command should parse");
+
+        assert_eq!(
+            cli.command,
+            Command::Test {
+                command: TestCommand::Walk {
+                    path: ".".into(),
+                    remote: Some("example.test".into())
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_walk_requires_path() {
+        let error = Cli::try_parse_from(["file-peeker-client", "test", "walk"])
+            .expect_err("test walk should require a path");
 
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }

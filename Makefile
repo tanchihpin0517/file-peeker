@@ -6,11 +6,15 @@ GENERATED_DIR := $(SWIFT_DIR)/Generated
 RUST_DYLIB := $(ROOT)/target/release/libfile_peeker_client.dylib
 RUST_STATICLIB := $(ROOT)/target/release/libfile_peeker_client.a
 
-.PHONY: all check rust-library bindings xcode-project xcode-build verify clean-generated
+.PHONY: all check docs-check rust-library bindings xcode-project xcode-build verify clean-generated
 
 all: check
 
 check: xcode-build
+
+docs-check:
+	bash scripts/check-docs.sh
+	git diff --check -- README.md docs scripts/check-docs.sh
 
 rust-library:
 	cargo build -p file-peeker-client --release
@@ -40,6 +44,6 @@ xcode-build: xcode-project
 		CODE_SIGNING_ALLOWED=NO \
 		build
 
-verify: check
+verify: docs-check check
 
 clean-generated: ; rm -rf "$(GENERATED_DIR)" "$(SWIFT_DIR)/FilePeeker.xcodeproj" "$(SWIFT_DIR)/DerivedData"

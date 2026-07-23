@@ -14,6 +14,20 @@ pub enum ResolvePathError {
     Operation { message: String },
 }
 
+#[derive(Clone, Debug, Eq, Error, PartialEq, uniffi::Error)]
+pub enum OpenFileError {
+    #[error("open-file operation failed: {message}")]
+    Operation { message: String },
+}
+
+impl From<io::Error> for OpenFileError {
+    fn from(error: io::Error) -> Self {
+        Self::Operation {
+            message: error.to_string(),
+        }
+    }
+}
+
 impl From<io::Error> for ResolvePathError {
     fn from(error: io::Error) -> Self {
         Self::Operation {
@@ -48,6 +62,17 @@ impl Session {
             .map_err(ResolvePathError::from)
     }
 
+    /// Opens a selected-host file with the client operating system's default
+    /// application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operation error when validation, remote staging, or the
+    /// operating-system open request fails.
+    pub async fn op_open_file_uniffi(&self, path: String) -> Result<(), OpenFileError> {
+        self.op_open_file(&path).await.map_err(OpenFileError::from)
+    }
+
     /// Starts a Swift-compatible listing adapter for one directory.
     ///
     /// # Errors
@@ -72,7 +97,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvePathError, Session};
+    use super::{OpenFileError, ResolvePathError, Session};
     use crate::SessionTarget;
 
     #[tokio::test]
@@ -87,6 +112,23 @@ mod tests {
         assert_eq!(
             error,
             ResolvePathError::Operation {
+                message: "session is closed".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn op_open_file_uniffi_maps_native_errors() {
+        let session = Session::closed_for_test("open-file-uniffi-id", SessionTarget::Local);
+
+        let error = session
+            .op_open_file_uniffi("fixture.txt".into())
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            OpenFileError::Operation {
                 message: "session is closed".into()
             }
         );

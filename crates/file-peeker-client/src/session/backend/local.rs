@@ -5,7 +5,7 @@ use file_peeker_core::FsService;
 use futures::StreamExt as _;
 
 use super::{ReadStream, SessionBackend, error::fs_error};
-use crate::EntryStream;
+use crate::{EntryStream, WalkStream};
 
 #[async_trait]
 impl SessionBackend for FsService {
@@ -15,6 +15,15 @@ impl SessionBackend for FsService {
 
     async fn list_dir(&self, path: &str) -> io::Result<EntryStream> {
         let stream = FsService::list_dir(self, path)
+            .await
+            .map_err(|error| fs_error(&error))?;
+        Ok(stream
+            .map(|result| result.map_err(|error| fs_error(&error)))
+            .boxed())
+    }
+
+    async fn walk_dir(&self, path: &str) -> io::Result<WalkStream> {
+        let stream = FsService::walk_dir(self, path)
             .await
             .map_err(|error| fs_error(&error))?;
         Ok(stream
@@ -62,6 +71,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(entries.len(), 1);
+        tokio::fs::create_dir(fixture.path().join("nested"))
+            .await
+            .unwrap();
+        tokio::fs::write(fixture.path().join("nested/child.txt"), b"")
+            .await
+            .unwrap();
+        let walked = SessionBackend::walk_dir(&backend, fixture.path().to_str().unwrap())
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(
+            walked
+                .iter()
+                .any(|entry| { entry.relative_path == "nested/child.txt" && entry.depth == 2 })
+        );
         let contents =
             SessionBackend::read_file(&backend, fixture.path().join("entry.txt").to_str().unwrap())
                 .await
@@ -106,6 +132,26 @@ mod tests {
         backend.cancel();
         let error = stream.next().await.unwrap().unwrap_err();
 
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn walk_maps_service_cancellation_to_a_terminal_io_error() {
+        let fixture = tempfile::tempdir().unwrap();
+        tokio::fs::write(fixture.path().join("one"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(fixture.path().join("two"), b"")
+            .await
+            .unwrap();
+        let backend = FsService::new();
+        let mut stream = SessionBackend::walk_dir(&backend, fixture.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(stream.next().await.unwrap().is_ok());
+        backend.cancel();
+        let error = stream.next().await.unwrap().unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
         assert!(stream.next().await.is_none());
     }

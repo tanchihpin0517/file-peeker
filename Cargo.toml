@@ -19,6 +19,7 @@ async-trait = "0.1.91"
 bytes = "1.12.1"
 clap = { version = "4.6.2", features = ["derive"] }
 crossterm = "0.29.0"
+dirs = "6.0.0"
 file-peeker-core = { version = "=0.1.0", path = "crates/file-peeker-core" }
 file-peeker-server = { version = "=0.1.0", path = "crates/file-peeker-server" }
 getrandom = "0.3.3"

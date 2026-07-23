@@ -1,17 +1,21 @@
 # Code Structure
 
-This document records the intended code structure for File Peeker. It has two
+This document records the intended code structure for File Peeker. It has three
 parts:
 
-1. the structure currently adopted by the project, including the pending TUI
-   split; and
-2. the rules and expected module growth for future features.
+1. the module structure currently adopted by the project;
+2. placement and growth rules for future changes; and
+3. implemented examples showing how those rules apply.
 
 The goal is not to make every crate mirror every operation. Each layer should
 own one coherent responsibility and expose the smallest useful interface to the
 layer above it.
 
-## Part I: Current structure plan
+Detailed operation contracts do not live here. See the relevant document in
+[Operations](README.md#add-or-change-a-feature) for caller-visible behavior,
+failure policy and resource lifetime.
+
+## Part I: Current module structure
 
 ### Responsibility boundaries
 
@@ -19,7 +23,8 @@ layer above it.
 | --- | --- | --- |
 | `file-peeker-core` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Session selection, SSH, gRPC, UniFFI, UI behavior |
 | `SessionBackend` | Primitive capabilities against the Session's selected host | Multi-step user workflows or operating-system UI actions |
-| `Session` | Public, target-independent workflows and Session lifecycle | gRPC/protobuf details or filesystem implementation details |
+| `Session` | Public, target-independent workflow entry points, backend lock/lifecycle, and selected-host/client-host phase ordering | Staging mechanics, system-command details, or protobuf |
+| Client `FileService` | Client-host file preparation and operating-system workflows after selected-host data is acquired | Backend access, selected-host primitives, transport, or Session lifecycle |
 | Remote backend modules | One gRPC request/response adapter per backend capability | Public workflow policy |
 | Server `ops` | RPC validation, protobuf conversion, transport batching and delegation to core | Client workflows and UI state |
 | `session/ffi` | UniFFI-compatible wrappers and error/state adaptation | Native Session behavior |
@@ -43,7 +48,7 @@ SessionBackend capability
 can be done against the selected host?”, while a Session operation answers
 “what workflow does the caller want?”. Simple workflows may delegate once;
 more involved workflows may compose several backend capabilities plus
-client-local behavior.
+client-host behavior.
 
 ### Core
 
@@ -58,7 +63,9 @@ crates/file-peeker-core/src/
 ├── read.rs
 └── directory/
     ├── mod.rs
-    └── list.rs
+    ├── entry.rs
+    ├── list.rs
+    └── walk.rs
 ```
 
 - `lib.rs` is a thin crate facade and re-exports public types.
@@ -66,8 +73,8 @@ crates/file-peeker-core/src/
   cancellation.
 - `resolve_path.rs` and `read.rs` hold focused operations that do not yet form
   larger domain families.
-- `directory/` is justified because directory behavior already owns shared
-  types and a listing operation.
+- `directory/` owns shared entry inspection, one-level listing, and recursive
+  traversal types and behavior.
 - Tests stay beside the behavior they verify.
 
 The asymmetry is intentional. A `file/` directory should not be created merely
@@ -84,7 +91,14 @@ crates/file-peeker-client/src/session/
 ├── path.rs
 ├── directory/
 │   ├── mod.rs
-│   └── list.rs
+│   ├── list.rs
+│   └── walk.rs
+├── file/
+│   ├── mod.rs
+│   ├── open.rs
+│   ├── opener.rs
+│   ├── service.rs
+│   └── stage.rs
 ├── backend/
 │   ├── mod.rs
 │   ├── local.rs
@@ -94,10 +108,12 @@ crates/file-peeker-client/src/session/
 │   │   └── remote.rs
 │   └── remote/
 │       ├── mod.rs
+│       ├── entry.rs
 │       ├── error.rs
 │       ├── resolve_path.rs
 │       ├── list_dir.rs
-│       └── read_file.rs
+│       ├── read_file.rs
+│       └── walk_dir.rs
 └── ffi/
     ├── mod.rs
     └── listing.rs
@@ -105,9 +121,18 @@ crates/file-peeker-client/src/session/
 
 - `session/mod.rs` owns Session construction, lifecycle and the private backend
   handle.
-- `path.rs` contains native Session path workflows.
+- `path.rs` contains Rust-native Session path workflows.
 - `directory/` contains transport-neutral directory result types and native
   Session directory workflows.
+- `file/open.rs` contains the Rust-native Session entry point and selected-host
+  coordination.
+- `file/service.rs` defines the private client `FileService` facade for
+  client-host file preparation and operating-system workflows.
+- `file/stage.rs` owns platform cache-root selection, lazy private-directory
+  creation, safe streaming publication, and incomplete-file cleanup, while
+  `file/opener.rs` owns the substitutable operating-system/test seam. They
+  remain separate because cache policy and process launching are distinct
+  responsibilities.
 - `backend/mod.rs` defines the private `SessionBackend` capability seam.
 - `backend/local.rs` adapts `FsService`; `backend/remote/` contains exact gRPC
   adapters for the same primitive capabilities.
@@ -117,9 +142,10 @@ crates/file-peeker-client/src/session/
   foreign-language boundary concern and should not leak back into the native
   stream.
 
-`read_file` currently remains backend-only. It should gain a Session-level
-operation only when there is a caller-facing file workflow, rather than being
-exposed solely to make the layers symmetrical.
+`read_file` remains a private backend primitive rather than a caller-facing
+native read operation. The Session open-file workflow consumes it directly:
+local Sessions use it to validate and open the regular file before dropping the
+stream, while remote Sessions consume the owned stream into a client-host cache.
 
 ### Server
 
@@ -132,9 +158,11 @@ crates/file-peeker-server/src/
 ├── server.rs
 └── ops/
     ├── mod.rs
+    ├── entry.rs
     ├── status.rs
     ├── list.rs
-    └── read.rs
+    ├── read.rs
+    └── walk.rs
 ```
 
 - `main.rs` is the thin CLI entry point.
@@ -142,8 +170,8 @@ crates/file-peeker-server/src/
   shutdown and the `serve` lifecycle.
 - `ops/mod.rs` is the tonic service adapter and keeps trivial delegation, such
   as path resolution, inline.
-- `ops/list.rs` and `ops/read.rs` own behavior-heavy streaming conversion and
-  batching.
+- `ops/list.rs`, `ops/read.rs`, and `ops/walk.rs` own behavior-heavy streaming
+  conversion and batching; `ops/entry.rs` shares listing-entry conversion.
 - `ops/status.rs` owns the status-to-gRPC error mapping shared by server
   operations.
 
@@ -153,9 +181,7 @@ without variation.
 
 ### TUI
 
-Status: the ownership model is implemented, but the module split below is the
-next planned refactor. At present, `App` and rendering still live in `main.rs`,
-while `BrowserContext` has its own module.
+Status: implemented.
 
 ```text
 crates/file-peeker-tui/src/
@@ -166,19 +192,21 @@ crates/file-peeker-tui/src/
     └── view.rs
 ```
 
-- `main.rs` should retain CLI parsing, terminal setup/restore, the event loop
-  and direct key-to-command mapping.
-- `app/mod.rs` should own `App`, application lifecycle, context routing and
-  commands acting on the active context.
-- `app/view.rs` should render application state without owning async tasks or
-  mutating browser state.
-- `browser_context.rs` should remain the deep browsing module: resolved Session,
+- `main.rs` retains CLI parsing, terminal setup/restore, the event loop and
+  direct key-to-command mapping.
+- `app/mod.rs` owns `App`, application lifecycle, context routing and commands
+  acting on the active context.
+- `app/view.rs` renders application state without owning async tasks or mutating
+  browser state.
+- `browser_context.rs` is the deep browsing module: selected listing source,
   current path, entries, selection, listing generation, task cancellation,
   stale-result rejection and terminal listing state.
 
 This split keeps high-level orchestration visible without fragmenting
 `BrowserContext` into state, event and task files that would need to understand
 the same invariants.
+
+## Part II: Placement and growth rules
 
 ### Placement rule for a new operation
 
@@ -188,16 +216,16 @@ Before adding a file, identify the operation's semantic owner:
 2. Put a primitive selected-host capability in `SessionBackend`.
 3. Implement local and remote adapters only when that capability must work on
    both targets.
-4. Put multi-step behavior and client-machine side effects in `Session`.
-5. Put protobuf conversion and wire batching in the remote adapter and server
+4. Put public multi-step ordering and lifecycle coordination in `Session`.
+5. Put post-backend client-host file preparation and OS actions in
+   `FileService`.
+6. Put protobuf conversion and wire batching in the remote adapter and server
    `ops`.
-6. Add an FFI or UI adapter only when that boundary has a real consumer.
+7. Add an FFI or UI adapter only when that boundary has a real consumer.
 
 A public Session workflow does not require an identically named core, backend,
 RPC and FFI operation. Layers should mirror semantics only where the semantics
 are actually shared.
-
-## Part II: Future feature structure plan
 
 ### Growth rules
 
@@ -215,99 +243,7 @@ are actually shared.
   error unless a feature explicitly requires different semantics.
 - Avoid adding FFI and UI surface area until a concrete consumer needs it.
 
-### Recursive directory traversal
-
-Recursive traversal should be a separate `walk_dir` feature rather than a mode
-of `list_dir`. Listing one directory and traversing a tree have different cost,
-ordering, cancellation and error semantics.
-
-Expected structure:
-
-```text
-crates/file-peeker-core/src/directory/
-├── mod.rs
-├── list.rs
-└── walk.rs
-
-crates/file-peeker-client/src/session/
-├── directory/
-│   ├── mod.rs
-│   ├── list.rs
-│   └── walk.rs
-└── backend/
-    ├── mod.rs
-    ├── local.rs
-    └── remote/
-        ├── mod.rs
-        └── walk_dir.rs
-
-crates/file-peeker-server/src/ops/
-├── mod.rs
-└── walk.rs
-```
-
-The first version should:
-
-- expose `FsService::walk_dir` and a distinct `WalkStream`;
-- yield a `WalkEntry` containing a relative path, entry metadata and depth;
-- exclude the requested root and assign depth `1` to direct children;
-- traverse depth-first using an explicit stack;
-- emit symlinks but never follow them;
-- avoid global collection and sorting;
-- preserve already-yielded entries when a terminal error or cancellation
-  occurs; and
-- omit `WalkOptions` until a concrete option such as maximum depth or symlink
-  policy is actually supported.
-
-Remote traversal should use a dedicated streaming `Walk` RPC because its result
-shape and server execution differ from `List`. The server may share a batching
-helper with listing only after both implementations prove the same byte and
-entry-count invariants. FFI and TUI adapters can be added later when either UI
-needs recursive results.
-
-### Local materialization and opening a file
-
-Opening a selected-host file is a Session workflow:
-
-```text
-Session::open_file(path)
-    |
-    v
-SessionBackend::cache_file(path) -> local filesystem path
-    |-- local backend: validate/resolve and return the existing local path
-    `-- remote backend: stream the file into a managed local cache
-    |
-    v
-Session invokes the client operating system's open action
-```
-
-`cache_file` belongs at the backend seam because its result depends on whether
-the selected host is local or remote. The operating-system open action belongs
-to Session because it is a workflow and a side effect on the client machine.
-Neither core nor the remote server should launch a client-side application.
-
-When this feature is added, several file workflows will exist, so a file domain
-becomes justified:
-
-```text
-crates/file-peeker-client/src/session/
-├── file/
-│   ├── mod.rs
-│   ├── read.rs
-│   ├── cache.rs
-│   └── open.rs
-└── backend/
-    └── remote/
-        └── cache_file.rs
-```
-
-The cache contract must define path lifetime, cleanup, replacement of stale
-content, filename handling and failure behavior. The remote implementation can
-initially compose the existing streaming read capability; a new server RPC is
-unnecessary unless remote materialization later needs semantics that `Read`
-cannot provide.
-
-### Future server growth
+### Server growth
 
 - Keep small validation/delegation methods in `ops/mod.rs`.
 - Give each behavior-heavy streaming RPC its own `ops/<operation>.rs` module.
@@ -318,7 +254,7 @@ cannot provide.
 - Do not add a server repository/backend abstraction while `FsService` remains
   the sole implementation.
 
-### Future TUI growth
+### TUI growth
 
 - Add `app/input.rs` and an `Action` type only when input gains modes,
   configurable bindings or a command palette.
@@ -341,6 +277,92 @@ cannot provide.
 5. Add local and remote implementations, plus protocol and server work, only
    where remote execution requires them.
 6. Add Session composition for caller workflows.
-7. Add FFI and UI adapters only for real consumers.
-8. Keep tests beside the layer-specific invariant they verify.
-9. Update this document when the new feature changes a responsibility boundary.
+7. Place client-host file actions behind `FileService` only after Session has
+   released its backend lock; selected-host primitives still follow the
+   core/backend placement rules.
+8. Add FFI and UI adapters only for real consumers.
+9. Keep tests beside the layer-specific invariant they verify.
+10. Update this document when the new feature changes a responsibility boundary.
+
+## Part III: Implemented placement examples
+
+### Recursive directory traversal
+
+Recursive traversal is a separate `walk_dir` capability rather than a mode of
+`list_dir`. Listing one directory and traversing a tree have different cost,
+ordering, cancellation and error semantics.
+
+Implemented structure:
+
+```text
+crates/file-peeker-core/src/directory/
+├── mod.rs
+├── entry.rs
+├── list.rs
+└── walk.rs
+
+crates/file-peeker-client/src/session/
+├── directory/
+│   ├── mod.rs
+│   ├── list.rs
+│   └── walk.rs
+└── backend/
+    ├── mod.rs
+    ├── local.rs
+    └── remote/
+        ├── mod.rs
+        ├── entry.rs
+        ├── list_dir.rs
+        └── walk_dir.rs
+
+crates/file-peeker-server/src/ops/
+├── mod.rs
+├── entry.rs
+├── list.rs
+└── walk.rs
+```
+
+Core list and walk share entry inspection because classification is a
+host-local filesystem concern. The client exposes separate directory workflows
+and backend capabilities. The server shares entry conversion and transport
+limits while retaining distinct List and Walk protobuf adapters. This keeps
+different traversal semantics visible without duplicating shared mechanics.
+
+Caller-visible behavior is documented in [Client API](api.md); remote batching
+and validation are owned by [Remote Protocol](protocol.md).
+
+### Opening a selected-host file
+
+Opening a selected-host file demonstrates a public Session workflow composed
+from backend primitives and a client-host service:
+
+```text
+Session::op_open_file(path)
+    -> SessionBackend::resolve_path
+    -> SessionBackend::read_file
+    -> release the backend read lock
+    -> FileService
+         |-- local: drop the validation stream and use the resolved path
+         `-- remote: FileStager::stage_download
+         -> FileOpener
+```
+
+The backend seam supplies selected-host primitives. Session owns backend
+lifecycle and phase ordering. `FileService` owns client-host preparation and
+operating-system integration but cannot access a backend. It is a workflow
+facade, not a replacement for core `FsService` or `SessionBackend`.
+
+The file domain is:
+
+```text
+crates/file-peeker-client/src/session/
+├── file/
+│   ├── mod.rs
+│   ├── open.rs
+│   ├── opener.rs
+│   ├── service.rs
+│   └── stage.rs
+```
+
+The detailed validation, staging, cache, cancellation and retention contract is
+owned by [Open File](operations/open-file.md).

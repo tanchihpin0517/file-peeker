@@ -3,7 +3,8 @@ pub mod session;
 
 pub use client::{Client, ClientCloseSessionError};
 pub use session::directory::{DirectoryEntry, EntryKind, EntryStream};
-pub use session::ffi::{ListError, Listing, ResolvePathError};
+pub use session::directory::{WalkEntry, WalkStream};
+pub use session::ffi::{ListError, Listing, OpenFileError, ResolvePathError};
 pub use session::{Session, SessionShutdownError, SessionStartError, SessionTarget};
 
 uniffi::setup_scaffolding!();

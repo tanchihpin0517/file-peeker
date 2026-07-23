@@ -12,6 +12,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 async-trait.workspace = true
 bytes.workspace = true
 clap.workspace = true
+dirs.workspace = true
 file-peeker-core.workspace = true
 file-peeker-server.workspace = true
 futures.workspace = true

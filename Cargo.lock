@@ -650,6 +650,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "dirs",
  "file-peeker-core",
  "file-peeker-server",
  "futures",

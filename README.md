@@ -25,6 +25,7 @@ Generated Xcode projects and DerivedData are not committed.
 
 ## Documentation
 
+- [Documentation index](docs/README.md)
 - [Architecture](docs/architecture.md)
 - [Code structure](docs/code-structure.md)
 - [TUI implementation](docs/tui.md)

@@ -1,11 +1,13 @@
 # File Peeker gRPC API v1
 
-File Peeker uses protobuf over plaintext HTTP/2 on IPv4 loopback. Local
-sessions connect directly. Remote sessions carry the same channel through an
-OpenSSH SOCKS5 tunnel, so the remote hop is SSH-encrypted. The protobuf package
-is `file_peeker.v1`. The server crate owns the `.proto` source and exposes the
-generated shared contract through `file_peeker_server::protocol`; the client
-depends on that library module rather than a separate protocol crate.
+The File Peeker remote client/server boundary uses protobuf over plaintext
+HTTP/2 on the server host's IPv4 loopback. Remote Sessions reach that endpoint
+through an OpenSSH SOCKS5 tunnel, so the remote hop is SSH-encrypted. Local
+Sessions bypass this protocol and call an in-process `FsService` directly. The
+protobuf package is `file_peeker.v1`. The server crate owns the `.proto` source
+and exposes the generated shared contract through
+`file_peeker_server::protocol`; the client depends on that library module rather
+than a separate protocol crate.
 
 ## Startup and authentication
 
@@ -33,15 +35,16 @@ sessions.
 ## Services
 
 The standard `grpc.health.v1.Health` service verifies startup readiness. The
-client opens one persistent channel per Session, enables HTTP/2 keepalive, and
-lets tonic reconnect it after transient transport loss. An interrupted RPC is
-not replayed or resumed; later RPCs may use the reconnected channel.
+client opens one authenticated channel per remote Session. Reconnection,
+interrupted-operation and replay behavior are owned by
+[Session Lifecycle](session-lifecycle.md).
 
 `file_peeker.v1.FilePeeker` exposes:
 
 ```proto
 rpc ResolvePath(ResolvePathRequest) returns (ResolvePathResponse);
 rpc List(ListRequest) returns (stream ListBatch);
+rpc Walk(WalkRequest) returns (stream WalkBatch);
 rpc Read(ReadRequest) returns (stream ReadChunk);
 ```
 
@@ -61,6 +64,20 @@ protobuf messages at 1 MiB. The core itself does not batch or sort entries.
 Errors may terminate a stream after valid batches, so callers retain partial
 results. Core service cancellation terminates active enumeration with gRPC
 `Cancelled`; dropping the response stream cancels unfinished enumeration.
+
+`Walk` recursively traverses the selected-host directory in pull-based,
+pre-order depth-first order. The requested root is excluded; direct children
+have depth 1. Each entry carries a non-empty root-relative path, its
+`ListingEntry` metadata, and an explicit depth. Sibling order is
+filesystem-native and unsorted. Directory symlinks are emitted with their
+normal navigation metadata but are never followed.
+
+Walk batches are non-empty and contain at most 1024 entries and at most 1 MiB
+of encoded protobuf data. A terminal filesystem or cancellation status may
+follow valid batches. The client rejects empty batches, missing nested listing
+metadata, unknown kinds, zero or out-of-range depth, and empty, absolute, or
+parent-containing relative paths; malformed data terminates the stream without
+consuming later batches.
 
 `Read` applies the same selected-host path expansion and resolution rules, then
 opens and validates a regular file from byte zero. Directories and other
@@ -83,7 +100,7 @@ Rust client as terminal invalid data.
 | --- | --- |
 | Missing path | `NotFound` |
 | Permission failure | `PermissionDenied` |
-| Non-directory list target | `FailedPrecondition` |
+| Non-directory list or walk target | `FailedPrecondition` |
 | Non-file read target | `FailedPrecondition` |
 | Invalid or non-UTF-8 path | `InvalidArgument` |
 | Service or operation cancellation | `Cancelled` |

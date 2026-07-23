@@ -1,14 +1,16 @@
+mod entry;
 mod error;
 mod list_dir;
 mod read_file;
 mod resolve_path;
+mod walk_dir;
 
 use std::io;
 
 use async_trait::async_trait;
 
 use super::{ReadStream, SessionBackend, connection::RemoteConnection};
-use crate::EntryStream;
+use crate::{EntryStream, WalkStream};
 
 #[derive(Debug)]
 pub(crate) struct RemoteBackend {
@@ -31,6 +33,10 @@ impl SessionBackend for RemoteBackend {
 
     async fn list_dir(&self, path: &str) -> io::Result<EntryStream> {
         list_dir::list_dir(&self.connection, path).await
+    }
+
+    async fn walk_dir(&self, path: &str) -> io::Result<WalkStream> {
+        walk_dir::walk_dir(&self.connection, path).await
     }
 
     async fn read_file(&self, path: &str) -> io::Result<ReadStream> {

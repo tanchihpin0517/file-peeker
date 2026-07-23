@@ -5,6 +5,7 @@ package file_peeker.v1;
 service FilePeeker {
   rpc ResolvePath(ResolvePathRequest) returns (ResolvePathResponse);
   rpc List(ListRequest) returns (stream ListBatch);
+  rpc Walk(WalkRequest) returns (stream WalkBatch);
   rpc Read(ReadRequest) returns (stream ReadChunk);
 }
 
@@ -20,6 +21,10 @@ message ListRequest {
   string path = 1;
 }
 
+message WalkRequest {
+  string path = 1;
+}
+
 message ReadRequest {
   string path = 1;
 }
@@ -30,6 +35,16 @@ message ReadChunk {
 
 message ListBatch {
   repeated ListingEntry entries = 1;
+}
+
+message WalkBatch {
+  repeated WalkEntry entries = 1;
+}
+
+message WalkEntry {
+  string relative_path = 1;
+  ListingEntry entry = 2;
+  uint64 depth = 3;
 }
 
 message ListingEntry {
