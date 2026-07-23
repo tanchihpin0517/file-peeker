@@ -10,12 +10,13 @@ state needed to display its requested listing.
 | Server process and connection lifecycle | Owned by the Session backend slot until consuming close | Starts on appearance; closes on disappearance | `App.start` creates it when given a path; `App.shutdown` closes it after terminal restoration |
 | gRPC channel and authentication | Stored in the remote Session backend | No | No |
 | Startup path | Resolves shell expressions to an absolute lexical path on the selected host | `homePath` | Optional CLI path resolved before BrowserContext creation |
-| Active listing stream | Native `EntryStream` or Swift `Listing` adapter | Consumed by `loadTask` | Each `BrowserContext` owns the task that consumes native `op_list_dir` |
+| Active listing stream | Native `EntryStream` or Swift `Listing` adapter | Consumed by `loadTask` | Each `BrowserContext` owns one root task plus a task per loading expanded directory |
 | Backend-only read stream | One local core stream or one remote gRPC response stream per operation | Not exposed | Not exposed |
-| Received directory entries | Returned one-by-one, not retained | Appended to `rows` | Appended to the matching context's `entries` |
-| Loading and terminal error | Produced by the operation | `isLoading` and `errorMessage` | One `ListingStatus` stored independently in each `BrowserContext` |
+| Received directory entries | Returned one-by-one, not retained | Appended to `rows` | Stored as visible tree rows with full path, depth, and expansion state |
+| Loading and terminal error | Produced by the operation | `isLoading` and `errorMessage` | Root `ListingStatus` plus independent expanded-directory states |
 | Selection | No | Not implemented | `selected_index` stored per `BrowserContext` |
-| Navigation | No UI state | Not implemented | `h`/`l` mutate the active context path and replace its listing |
+| Navigation | No UI state | Not implemented | `h`/`l` replace the root listing; `o` expands/collapses a subtree without changing it |
+| File opening | Stages remote files when needed and invokes the system opener | Not implemented | Browser Context owns confirmation, async opener task, and result feedback |
 
 ## Listing Data Flow
 
@@ -24,14 +25,17 @@ SwiftUI: local Session -> resolve_path("~") -> op_list_dir_uniffi(home_path) -> 
 TUI: optional path -> help screen
                    -> local Session -> resolve_path(path) -> BrowserContext root_path
                                                        -> op_list_dir(root_path) -> append entries
+                                                       -> op_list_dir(child path) -> insert subtree rows
+                                                       -> op_open_file(file path) -> system opener
 ```
 
 Both UIs preserve selected-host stream arrival order and retain partial entries
-if the stream fails. SwiftUI issues one listing per lifecycle. The TUI can run
-listings for multiple Browser Contexts concurrently. Bounded events are routed
-by context UUID; each context privately rejects stale generations and applies
-its own listing transitions. Pressing `h` or `l` changes the active context path
-and starts a replacement listing with reset selection; pressing `R` replaces
-the listing at the same path. Both clear entries and failed status first.
-Completing a stream releases its Listing but leaves the shared Session alive
-until the UI shuts down.
+if a stream fails. SwiftUI issues one listing per lifecycle. The TUI can run
+listings for multiple Browser Contexts and multiple expanded directories
+concurrently. Bounded events are routed by context UUID; each context rejects
+stale root generations and collapsed-directory request IDs before applying
+transitions. Pressing `o` toggles a navigable row inline or confirms an
+openable row through a modal. Pressing `h` or `l` changes the active context
+path and starts a replacement tree with reset selection; pressing `R` replaces
+the tree at the same path. Completing a stream releases its Listing but leaves
+the shared Session alive until the UI shuts down.

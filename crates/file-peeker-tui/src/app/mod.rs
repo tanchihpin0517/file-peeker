@@ -76,6 +76,29 @@ impl App {
         }
     }
 
+    pub(crate) fn activate_active_selection(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.activate_selected();
+        }
+    }
+
+    pub(crate) fn has_open_confirmation(&self) -> bool {
+        self.active_context()
+            .is_some_and(|context| context.pending_open_path().is_some())
+    }
+
+    pub(crate) fn confirm_active_open(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.confirm_open();
+        }
+    }
+
+    pub(crate) fn cancel_active_open_confirmation(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.cancel_open_confirmation();
+        }
+    }
+
     pub(crate) fn enter_active_selection(&mut self) {
         if let Some(context) = self.active_context_mut() {
             context.enter_selected();

@@ -1,14 +1,16 @@
-use file_peeker_client::{DirectoryEntry, EntryKind};
+use file_peeker_client::EntryKind;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    text::{Line, Text},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use super::App;
-use crate::browser_context::{BrowserContext, ListingStatus};
+use crate::browser_context::{
+    BrowserContext, BrowserRow, ExpansionStatus, ListingStatus, OpenStatus,
+};
 
 const HELP_WIDTH: u16 = 56;
 const HELP_HEIGHT: u16 = 15;
@@ -43,8 +45,8 @@ impl App {
         );
         let entries = context
             .into_iter()
-            .flat_map(BrowserContext::entries)
-            .map(entry_list_item);
+            .flat_map(BrowserContext::rows)
+            .map(row_list_item);
         let mut list_state = ListState::default()
             .with_selected(context.and_then(BrowserContext::effective_selection));
         frame.render_stateful_widget(
@@ -55,22 +57,38 @@ impl App {
             browser,
             &mut list_state,
         );
-        let controls = "j/k: select  h/l: navigate  R: refresh  q/Esc: quit";
+        let controls = "j/k: select  o: expand/open  h/l: navigate  R: refresh  q/Esc: quit";
         let status = context.map_or_else(
             || "Not started  q/Esc: quit".into(),
-            |context| match context.status() {
-                ListingStatus::Loading => {
-                    format!("Loading…  {controls}")
-                }
-                ListingStatus::Complete => {
-                    format!("{} items  {controls}", context.entries().len())
-                }
-                ListingStatus::Failed(error) => {
-                    format!("Error: {error}  {controls}")
-                }
+            |context| {
+                let message = match context.open_status() {
+                    OpenStatus::Opening(path) => format!("Opening {path}…"),
+                    OpenStatus::Opened(path) => format!("Opened {path}"),
+                    OpenStatus::Failed { path, error } => {
+                        format!("Error opening {path}: {error}")
+                    }
+                    OpenStatus::Idle => {
+                        if let Some((path, error)) = context.selected_expansion_error() {
+                            format!("Error expanding {path}: {error}")
+                        } else {
+                            match context.status() {
+                                ListingStatus::Loading => "Loading…".into(),
+                                ListingStatus::Complete => {
+                                    format!("{} items", context.rows().len())
+                                }
+                                ListingStatus::Failed(error) => format!("Error: {error}"),
+                            }
+                        }
+                    }
+                };
+                format!("{message}  {controls}")
             },
         );
         frame.render_widget(Paragraph::new(status), footer);
+
+        if let Some(path) = context.and_then(BrowserContext::pending_open_path) {
+            render_open_confirmation(frame, path);
+        }
     }
 
     fn render_help(&self, frame: &mut Frame<'_>) {
@@ -93,9 +111,60 @@ impl App {
     }
 }
 
-fn entry_list_item(entry: &DirectoryEntry) -> ListItem<'_> {
-    let (prefix, style) = entry_appearance(entry.kind);
-    ListItem::new(Line::styled(format!("{prefix}{}", entry.name), style))
+fn row_list_item(row: &BrowserRow) -> ListItem<'static> {
+    let (_, style) = entry_appearance(row.entry().kind);
+    let prefix = if row.entry().navigable {
+        match row.expansion() {
+            ExpansionStatus::Collapsed => "▸ ",
+            ExpansionStatus::Loading { .. } => "… ",
+            ExpansionStatus::Expanded { .. } => "▾ ",
+            ExpansionStatus::Failed { .. } => "! ",
+        }
+    } else {
+        entry_appearance(row.entry().kind).0
+    };
+    ListItem::new(Line::styled(
+        format!("{}{prefix}{}", "  ".repeat(row.depth()), row.entry().name),
+        style,
+    ))
+}
+
+fn render_open_confirmation(frame: &mut Frame<'_>, path: &str) {
+    let area = centered_popup_area(frame.area(), path);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Confirm open ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from("Open this file?"),
+            Line::from(""),
+            Line::styled(path.to_owned(), Style::default().fg(Color::Cyan)),
+            Line::from(""),
+            Line::from("Press o again to open · Esc/q to cancel"),
+        ]))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn centered_popup_area(area: Rect, path: &str) -> Rect {
+    let width = area.width.saturating_sub(4).clamp(1, 72);
+    let inner_width = usize::from(width.saturating_sub(2).max(1));
+    let path_lines = path.chars().count().div_ceil(inner_width).max(1);
+    let height = u16::try_from(path_lines)
+        .unwrap_or(u16::MAX)
+        .saturating_add(6)
+        .min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 fn entry_appearance(kind: EntryKind) -> (&'static str, Style) {
@@ -151,7 +220,10 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{centered_help_area, entry_appearance, sidebar_width};
+    use super::{
+        centered_help_area, centered_popup_area, entry_appearance, render_open_confirmation,
+        sidebar_width,
+    };
     use crate::{Cli, EVENT_CHANNEL_CAPACITY, app::App};
 
     fn app() -> App {
@@ -223,5 +295,38 @@ mod tests {
         assert_eq!(sidebar_width(80), 20);
         assert_eq!(sidebar_width(120), 30);
         assert_eq!(sidebar_width(200), 30);
+    }
+
+    #[test]
+    fn open_confirmation_shows_the_full_path_and_required_keys() {
+        let path = "/home/reports/annual-summary.txt";
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| render_open_confirmation(frame, path))
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+
+        assert!(rendered.contains("Confirm open"));
+        assert!(rendered.contains(path));
+        assert!(rendered.contains("Press o again to open"));
+        assert!(rendered.contains("Esc/q to cancel"));
+    }
+
+    #[test]
+    fn open_confirmation_expands_vertically_for_wrapped_paths() {
+        let short = centered_popup_area(ratatui::layout::Rect::new(0, 0, 40, 24), "/short.txt");
+        let long = centered_popup_area(
+            ratatui::layout::Rect::new(0, 0, 40, 24),
+            "/a/very/long/path/that/wraps/across/multiple/lines/report.txt",
+        );
+
+        assert!(long.height > short.height);
+        assert!(long.height <= 24);
     }
 }

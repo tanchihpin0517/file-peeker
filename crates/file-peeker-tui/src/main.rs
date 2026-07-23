@@ -64,24 +64,62 @@ fn run(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('R') => app.refresh_active_context(),
-                KeyCode::Down | KeyCode::Char('j') => app.move_active_selection(true),
-                KeyCode::Up | KeyCode::Char('k') => app.move_active_selection(false),
-                KeyCode::Char('h') => app.leave_active_directory(),
-                KeyCode::Char('l') => app.enter_active_selection(),
-                _ => {}
+            match key_action(key.code, app.has_open_confirmation()) {
+                KeyAction::Quit => return Ok(()),
+                KeyAction::Refresh => app.refresh_active_context(),
+                KeyAction::MoveDown => app.move_active_selection(true),
+                KeyAction::MoveUp => app.move_active_selection(false),
+                KeyAction::LeaveDirectory => app.leave_active_directory(),
+                KeyAction::EnterSelection => app.enter_active_selection(),
+                KeyAction::ActivateSelection => app.activate_active_selection(),
+                KeyAction::ConfirmOpen => app.confirm_active_open(),
+                KeyAction::CancelOpen => app.cancel_active_open_confirmation(),
+                KeyAction::Ignore => {}
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyAction {
+    Quit,
+    Refresh,
+    MoveDown,
+    MoveUp,
+    LeaveDirectory,
+    EnterSelection,
+    ActivateSelection,
+    ConfirmOpen,
+    CancelOpen,
+    Ignore,
+}
+
+fn key_action(code: KeyCode, has_open_confirmation: bool) -> KeyAction {
+    if has_open_confirmation {
+        return match code {
+            KeyCode::Char('q') | KeyCode::Esc => KeyAction::CancelOpen,
+            KeyCode::Char('o') => KeyAction::ConfirmOpen,
+            _ => KeyAction::Ignore,
+        };
+    }
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => KeyAction::Quit,
+        KeyCode::Char('R') => KeyAction::Refresh,
+        KeyCode::Down | KeyCode::Char('j') => KeyAction::MoveDown,
+        KeyCode::Up | KeyCode::Char('k') => KeyAction::MoveUp,
+        KeyCode::Char('h') => KeyAction::LeaveDirectory,
+        KeyCode::Char('l') => KeyAction::EnterSelection,
+        KeyCode::Char('o') => KeyAction::ActivateSelection,
+        _ => KeyAction::Ignore,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
+    use crossterm::event::KeyCode;
 
-    use super::Cli;
+    use super::{Cli, KeyAction, key_action};
 
     #[test]
     fn parses_an_optional_startup_path() {
@@ -103,5 +141,19 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::DisplayHelp);
         assert!(error.to_string().contains("Usage: file-peeker [PATH]"));
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn confirmation_keys_cancel_or_confirm_without_quitting() {
+        assert_eq!(key_action(KeyCode::Esc, true), KeyAction::CancelOpen);
+        assert_eq!(key_action(KeyCode::Char('q'), true), KeyAction::CancelOpen);
+        assert_eq!(key_action(KeyCode::Char('o'), true), KeyAction::ConfirmOpen);
+        assert_eq!(key_action(KeyCode::Char('j'), true), KeyAction::Ignore);
+    }
+
+    #[test]
+    fn quit_keys_still_exit_without_a_confirmation() {
+        assert_eq!(key_action(KeyCode::Esc, false), KeyAction::Quit);
+        assert_eq!(key_action(KeyCode::Char('q'), false), KeyAction::Quit);
     }
 }
