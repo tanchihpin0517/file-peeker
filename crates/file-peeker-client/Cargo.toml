@@ -9,14 +9,18 @@ license.workspace = true
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
+async-trait.workspace = true
+bytes.workspace = true
 clap.workspace = true
-file-peeker-protocol = { version = "=0.1.0", path = "../file-peeker-protocol" }
+file-peeker-core.workspace = true
+file-peeker-server.workspace = true
 futures.workspace = true
 hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 tower.workspace = true

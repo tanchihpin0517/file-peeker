@@ -3,18 +3,29 @@ syntax = "proto3";
 package file_peeker.v1;
 
 service FilePeeker {
-  rpc CurrentRoot(CurrentRootRequest) returns (CurrentRootResponse);
+  rpc ResolvePath(ResolvePathRequest) returns (ResolvePathResponse);
   rpc List(ListRequest) returns (stream ListBatch);
+  rpc Read(ReadRequest) returns (stream ReadChunk);
 }
 
-message CurrentRootRequest {}
+message ResolvePathRequest {
+  string path = 1;
+}
 
-message CurrentRootResponse {
+message ResolvePathResponse {
   string path = 1;
 }
 
 message ListRequest {
   string path = 1;
+}
+
+message ReadRequest {
+  string path = 1;
+}
+
+message ReadChunk {
+  bytes data = 1;
 }
 
 message ListBatch {

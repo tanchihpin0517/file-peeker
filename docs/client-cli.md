@@ -1,48 +1,36 @@
 # Client CLI
 
-`file-peeker-client` is a test-only command-line tool for exercising local and
-remote server provisioning, startup, and gRPC connections.
+`file-peeker-client` is a test-only command-line tool for exercising the native
+local backend and remote server provisioning, startup, and gRPC connections.
 
 ## `test` subcommands
 
 All test-only operations are nested under the top-level `test` command.
 
-### `test connect [--force] [SERVER]`
+### `test connect [--force] SERVER`
 
-Without `SERVER`, ensures the server is installed from Git under
-`~/.file-peeker/servers/VERSION`, starts it locally, authenticates a persistent
-gRPC channel, checks the standard Health service, and prints the port and token as
-one line of JSON. Use `--force` to reinstall the server first.
-
-With `SERVER`, ensures the server is installed from Git and performs the same
-checks through SSH. `--force` also reinstalls the remote server. Exiting either
-test closes the server's stdin lifetime lease.
+Ensures the server is installed from Git on `SERVER`, starts it through SSH,
+authenticates a persistent gRPC channel, checks the standard Health service,
+and prints the port and token as one line of JSON. `--force` reinstalls the
+remote server first. Exiting closes the server's stdin lifetime lease.
 
 ```text
-cargo run -p file-peeker-client -- test connect
-cargo run -p file-peeker-client -- test connect --force
 cargo run -p file-peeker-client -- test connect example.test
+cargo run -p file-peeker-client -- test connect --force example.test
 ```
 
-### `test install [--force] [--from-source PATH] [SERVER]`
+### `test install [--force] [--from-source PATH] SERVER`
 
-Checks for the matching server executable under
-`~/.file-peeker/servers/VERSION/bin/file-peeker-server` and attempts to install
-it from Git with Cargo using the version directory as `--root` when it is
-missing. The resolved executable path is written to local standard output. Use
-`--force` to reinstall the server even when the executable already exists.
-Providing `SERVER` runs the same Git installation over SSH.
+Checks for the matching server executable on `SERVER` and attempts to install
+it from Git with Cargo when it is missing. The resolved remote executable path
+is written to local standard output. Use `--force` to reinstall it.
 
-`--from-source PATH` selects an independent source-install workflow. Without
-`SERVER`, Cargo installs `PATH/crates/file-peeker-server` locally. With
-`SERVER`, the command uploads the Git-aware contents of local `PATH` to
+`--from-source PATH` selects an independent source-install workflow. The
+command uploads the Git-aware contents of local `PATH` to
 `.file-peeker/debug/repo` and installs that uploaded package over SSH. This
 option does not change normal connection provisioning, which remains Git-only.
 
 ```text
-cargo run -p file-peeker-client -- test install
-cargo run -p file-peeker-client -- test install --force
-cargo run -p file-peeker-client -- test install --from-source /path/to/file-peeker
 cargo run -p file-peeker-client -- test install example.test
 cargo run -p file-peeker-client -- test install --force example.test
 cargo run -p file-peeker-client -- test install --force --from-source /path/to/file-peeker example.test
@@ -69,12 +57,11 @@ cargo run -p file-peeker-client -- test start-server example.test
 
 ### `test list PATH [--remote SERVER]`
 
-Ensures the server is installed from Git, starts it locally, and lists the direct
-children of `PATH`. Relative paths are resolved from the server's reported
-working directory, which locally inherits the client's working directory. Each
+Uses the in-process filesystem core to list the direct children of `PATH`.
+Relative paths are resolved from the client's working directory. Each
 child's path is written to standard output on its own line; output order follows
 the server's filesystem iteration order. Shell expressions are preserved in the
-output while `~` and `$VARIABLES` are expanded in the server environment for
+output while `~` and `$VARIABLES` are expanded in the client environment for
 listing. After the listing completes, a debug line on standard error reports
 the entry count, elapsed milliseconds, and entries per second.
 

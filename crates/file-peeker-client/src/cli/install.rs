@@ -1,8 +1,8 @@
 use std::{io, path::Path, process::Stdio};
 
-use file_peeker_client::connection::{local, remote};
+use file_peeker_client::session::backend::connection::remote;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader, copy},
+    io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, copy},
     process::{Child, Command},
 };
 
@@ -12,13 +12,9 @@ const SERVER_ERROR_PREFIX: &str = "FILE_PEEKER_SERVER_ERROR=";
 const SOURCE_INSTALL_SCRIPT: &str = include_str!("install-server-from-source.sh");
 const SOURCE_INSTALL_HEREDOC: &str = "FILE_PEEKER_SOURCE_INSTALL_SCRIPT";
 
-pub async fn run(
-    destination: Option<&str>,
-    force_install: bool,
-    source: Option<&Path>,
-) -> io::Result<()> {
-    let executable = match (destination, source) {
-        (Some(destination), Some(source)) => {
+pub async fn run(destination: &str, force_install: bool, source: Option<&Path>) -> io::Result<()> {
+    let executable = match source {
+        Some(source) => {
             upload_project_dir(source, destination, DEFAULT_REMOTE_PROJECT_DIR).await?;
             install_remote_server_from_source(
                 destination,
@@ -27,72 +23,10 @@ pub async fn run(
             )
             .await?
         }
-        (None, Some(source)) => install_local_server_from_source(force_install, source).await?,
-        (Some(destination), None) => install_remote_server(destination, force_install).await?,
-        (None, None) => local::get_server_executable(force_install)
-            .await?
-            .to_string_lossy()
-            .into_owned(),
+        None => install_remote_server(destination, force_install).await?,
     };
     println!("{executable}");
     Ok(())
-}
-
-async fn install_local_server_from_source(
-    force_install: bool,
-    source: &Path,
-) -> io::Result<String> {
-    let source = source.to_str().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "server source path must be valid UTF-8",
-        )
-    })?;
-    let mut command = Command::new("sh");
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-    let mut child = command.spawn()?;
-    let Some(mut stdin) = child.stdin.take() else {
-        stop_process(&mut child).await;
-        return Err(io::Error::other(
-            "source installer standard input is unavailable",
-        ));
-    };
-    let Some(stdout) = child.stdout.take() else {
-        drop(stdin);
-        stop_process(&mut child).await;
-        return Err(io::Error::other(
-            "source installer standard output is unavailable",
-        ));
-    };
-    let mut command_output = tokio::io::stdout();
-    let executable = run_source_installer(
-        &mut stdin,
-        &mut BufReader::new(stdout),
-        force_install,
-        source,
-        &mut command_output,
-    )
-    .await;
-    drop(stdin);
-
-    let executable = match executable {
-        Ok(executable) => executable,
-        Err(error) => {
-            stop_process(&mut child).await;
-            return Err(error);
-        }
-    };
-    let status = child.wait().await?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "source installer failed with {status}"
-        )));
-    }
-    Ok(executable)
 }
 
 async fn run_source_installer(

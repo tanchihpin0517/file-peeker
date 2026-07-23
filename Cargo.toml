@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "crates/file-peeker-client",
-    "crates/file-peeker-protocol",
+    "crates/file-peeker-core",
     "crates/file-peeker-server",
     "crates/file-peeker-tui",
     "tools/uniffi-bindgen",
@@ -15,8 +15,12 @@ rust-version = "1.88"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+async-trait = "0.1.91"
+bytes = "1.12.1"
 clap = { version = "4.6.2", features = ["derive"] }
 crossterm = "0.29.0"
+file-peeker-core = { version = "=0.1.0", path = "crates/file-peeker-core" }
+file-peeker-server = { version = "=0.1.0", path = "crates/file-peeker-server" }
 getrandom = "0.3.3"
 futures = "0.3.33"
 hyper-util = { version = "0.1.17", features = ["tokio"] }
@@ -45,7 +49,7 @@ tonic = { version = "0.14.6", features = ["transport"] }
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tokio-stream = { version = "0.1.17", features = ["net"] }
-tokio-util = "0.7.16"
+tokio-util = { version = "0.7.16", features = ["io"] }
 tower = "0.5.2"
 uniffi = "=0.31.2"
 uuid = { version = "1.24.0", features = ["v4"] }

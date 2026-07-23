@@ -1,46 +1,43 @@
 # File Peeker API
 
 The public application API is the Rust `file-peeker-client` crate, exported to
-Swift through UniFFI. The Rust API exposes directory listings as streams; the
-Swift API exposes the same server batches through `Listing.nextBatch()`.
+Swift through UniFFI. Both APIs expose directory listings one entry at a time.
 
 ## Public interface
 
 ```rust
-pub type ListStream =
-    BoxStream<'static, io::Result<Vec<DirectoryEntry>>>;
+pub type EntryStream = BoxStream<'static, io::Result<DirectoryEntry>>;
 
 impl Client {
     pub fn new() -> Arc<Client>;
 
     pub async fn start_session(
         &self,
-        config: SessionConfig,
-    ) -> Result<String, ConnectError>;
+        target: SessionTarget,
+    ) -> Result<String, SessionStartError>;
 
     pub async fn get_session(&self, id: String) -> Option<Arc<Session>>;
-    pub async fn close_session(&self, id: String) -> Result<(), CloseSessionError>;
+    pub async fn close_session(&self, id: String) -> Result<(), ClientCloseSessionError>;
 }
 
 impl Session {
     pub fn id(&self) -> String;
     pub fn target(&self) -> SessionTarget;
-    pub async fn op_current_root(&self) -> io::Result<String>;
-    pub async fn op_current_root_uniffi(&self) -> Result<String, CurrentRootError>;
-    pub async fn op_list(&self, path: &str) -> io::Result<ListStream>;
-    pub async fn op_list_uniffi(
+    pub async fn op_resolve_path(&self, path: &str) -> io::Result<String>;
+    pub async fn op_resolve_path_uniffi(
+        &self,
+        path: String,
+    ) -> Result<String, ResolvePathError>;
+    pub async fn op_list_dir(&self, path: &str) -> io::Result<EntryStream>;
+    pub async fn op_list_dir_uniffi(
         &self,
         path: String,
     ) -> Result<Arc<Listing>, ListError>;
-    pub async fn close(&self) -> Result<(), CloseError>;
+    pub async fn close(&self) -> Result<(), SessionShutdownError>;
 }
 
 impl Listing {
-    pub async fn next_batch(&self) -> Result<Option<Vec<DirectoryEntry>>, ListError>;
-}
-
-pub struct SessionConfig {
-    pub target: SessionTarget,
+    pub async fn next_entry(&self) -> Result<Option<DirectoryEntry>, ListError>;
 }
 
 pub enum SessionTarget {
@@ -48,45 +45,67 @@ pub enum SessionTarget {
     Remote { destination: String },
 }
 
-pub enum ConnectError {
-    ServerStart { message: String },
+pub enum SessionStartError {
+    Backend { message: String },
 }
 
-pub enum CloseError {
-    ServerShutdown { message: String },
+pub enum SessionShutdownError {
+    Backend { message: String },
 }
 
-pub enum CloseSessionError {
+pub enum ClientCloseSessionError {
     NotFound { id: String },
-    ServerShutdown { message: String },
+    Backend { message: String },
 }
 
-pub struct DirectoryEntry {
-    pub name: String,
-    pub kind: EntryKind,
-    pub navigable: bool,
+pub enum ResolvePathError {
+    Operation { message: String },
 }
 
-pub enum EntryKind { File, Directory, Symlink, Other }
+pub use file_peeker_core::{DirectoryEntry, EntryKind};
 ```
 
-`Client.start_session` is asynchronous. A local target reuses or installs the
-matching server below `~/.file-peeker/servers/VERSION`, then starts it directly.
-A remote target provisions and starts the matching server over SSH. Both paths
-authenticate a gRPC health check and return a UUID only when startup
-succeeds. The Client strongly retains the Session, which owns the server process
-and, for remote targets, the SSH transport. `Client.close_session` removes and
-gracefully closes the retained Session. Direct Rust `Session.close()` and Swift
-`Session.closeUniffi()` remain idempotent but do not unregister it. Dropping Client releases all retained
-sessions; unclosed connections use their non-blocking fallback cleanup.
+`Client.start_session` is asynchronous. A local target constructs an in-process
+filesystem service without installing or starting a server. A remote target
+provisions and starts the matching server over SSH, then authenticates a gRPC
+health check. In both cases the core uses native filesystem APIs on the machine
+where it runs: the client machine for a local Session and the server machine for
+a remote Session. The Client strongly retains the Session, which owns either the
+native service or the remote process and SSH transport. `Client.close_session`
+removes and gracefully closes the retained Session. Direct Rust
+`Session.close()` and Swift `Session.closeUniffi()` remain idempotent but do not
+unregister it. Dropping Client releases all retained sessions; unclosed remote
+connections use their non-blocking fallback cleanup.
 
-`Session.op_list` is the native Rust API. Its `ListStream` yields
-`Vec<DirectoryEntry>` batches from the server-streaming RPC in order. Batching
-is the default list semantic; there is no flattened native listing API.
-Dropping the stream cancels unfinished work.
+The Rust client uses its private `SessionBackend` trait as the unified operation
+interface for both targets. `Session` invokes the same `resolve_path`, `list_dir`,
+and `close` methods in either mode. Filesystem operations use `FsService`
+locally and authenticated gRPC remotely. Public callers therefore use one
+`Session` API without selecting a transport-specific operation surface.
 
-`Session.op_list_uniffi` wraps that native stream for Swift. Its async
-`nextBatch()` method returns one native batch. Completion is idempotent, and
+The backend trait also has a `read_file` operation reserved for later `Session`
+exposure. Both implementations return a demand-driven
+`BoxStream<io::Result<Bytes>>`: successful items are ordered and non-empty, but
+their sizes and boundaries are not part of the interface. The local adapter maps
+core errors into `io::Error`; the remote adapter maps transport-bounded
+`ReadChunk` messages directly into `Bytes`. Open and regular-file validation
+failures occur before a stream is returned, while later filesystem, protocol, or
+cancellation failures are one terminal stream item.
+
+`Session.op_resolve_path` expands `~` and environment variables using the
+selected host's environment, makes the result absolute, and lexically removes
+`.` and `..`. It does not require the target to exist or resolve symbolic links.
+Resolving an already resolved path returns the same path. The UniFFI adapter
+provides the same operation through `opResolvePathUniffi`.
+
+`Session.op_list_dir` is the native Rust API. Its `EntryStream` yields shared-core
+`DirectoryEntry` values in order. The remote server batches entries only for
+gRPC transport, and the remote client flattens those messages back into the same
+entry stream. The client does not define a second listing model. Dropping the
+stream cancels unfinished work.
+
+`Session.op_list_dir_uniffi` wraps that native stream for Swift. Its async
+`nextEntry()` method returns one entry. Completion is idempotent, and
 terminal stream errors are repeated consistently.
 
 ## Swift usage
@@ -97,32 +116,26 @@ and `.remote`:
 ```swift
 let client = Client()
 let sessionID = try await client.startSession(
-    config: SessionConfig(
-        target: .remote(destination: "example.test")
-    )
+    target: .remote(destination: "example.test")
 )
 guard let session = await client.getSession(id: sessionID) else {
     fatalError("started session was not retained")
 }
 
-let localSessionID = try await client.startSession(
-    config: SessionConfig(target: .local)
-)
+let localSessionID = try await client.startSession(target: .local)
 guard let localSession = await client.getSession(id: localSessionID) else {
     fatalError("started session was not retained")
 }
 
-let listing = try await localSession.opListUniffi(path: "/tmp")
-while let batch = try await listing.nextBatch() {
-    for entry in batch {
-        print(entry.name)
-    }
+let listing = try await localSession.opListDirUniffi(path: "/tmp")
+while let entry = try await listing.nextEntry() {
+    print(entry.name)
 }
 
 try await client.closeSession(id: localSessionID)
 ```
 
-The SwiftUI application starts a local Session when its browser appears, uses
-`opCurrentRootUniffi()` as Home, and consumes listing batches incrementally.
-Rows are display-only. The retained Session stays alive after listing completes
-and closes when the browser disappears.
+The SwiftUI application starts a local Session when its browser appears,
+resolves `"~"` through `opResolvePathUniffi()` as Home, and consumes listing
+entries incrementally. Rows are display-only. The retained Session stays alive
+after listing completes and closes when the browser disappears.

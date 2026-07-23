@@ -1,271 +1,169 @@
-use std::{io, time::Duration};
-
-use file_peeker_protocol::v1::{EntryKind, ListBatch, ListingEntry};
-use futures::{StreamExt, stream::BoxStream};
-use prost::Message;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::CancellationToken;
+use file_peeker_core::{DirectoryEntry, EntryKind, EntryStream, FsError};
+use file_peeker_server::protocol::v1::{EntryKind as ProtocolEntryKind, ListBatch, ListingEntry};
+use futures::{StreamExt as _, stream, stream::BoxStream};
+use prost::Message as _;
 use tonic::Status;
 
-use crate::utils::resolve_path;
+use super::{GRPC_BATCH_MAX_BYTES, status::fs_status};
 
-const BATCH_TARGET_BYTES: usize = 1024 * 1024;
-const BATCH_MAX_ENTRIES: usize = 1024;
-const BATCH_MAX_DELAY: Duration = Duration::from_millis(25);
-const BATCH_CHANNEL_CAPACITY: usize = 2;
+const GRPC_BATCH_MAX_ENTRIES: usize = 1024;
 
-pub(super) async fn list(
-    path: String,
-    cancellation: CancellationToken,
-) -> Result<BoxStream<'static, Result<ListBatch, Status>>, Status> {
-    let path = resolve_path(&path).map_err(Status::invalid_argument)?;
-    let directory_entries = tokio::task::spawn_blocking(move || std::fs::read_dir(path))
-        .await
-        .map_err(|error| Status::internal(format!("directory worker failed: {error}")))?
-        .map_err(|error| io_status(&error))?;
-    let (sender, receiver) = mpsc::channel(BATCH_CHANNEL_CAPACITY);
-    let runtime = tokio::runtime::Handle::current();
-
-    tokio::task::spawn_blocking(move || {
-        produce_batches(directory_entries, &cancellation, &sender, &runtime);
-    });
-
-    Ok(ReceiverStream::new(receiver).boxed())
+pub(super) fn list_batches(stream: EntryStream) -> BoxStream<'static, Result<ListBatch, Status>> {
+    stream
+        .chunks(GRPC_BATCH_MAX_ENTRIES)
+        .flat_map(|entries| stream::iter(convert_chunk(entries)))
+        .boxed()
 }
 
-fn produce_batches(
-    directory_entries: std::fs::ReadDir,
-    cancellation: &CancellationToken,
-    sender: &mpsc::Sender<Result<ListBatch, Status>>,
-    runtime: &tokio::runtime::Handle,
-) {
+fn convert_chunk(entries: Vec<Result<DirectoryEntry, FsError>>) -> Vec<Result<ListBatch, Status>> {
+    let mut results = Vec::new();
     let mut batch = Vec::new();
-    let mut batch_bytes = 0_usize;
-    let mut batch_started = None;
+    let mut batch_bytes = 0;
 
-    for result in directory_entries {
-        if cancellation.is_cancelled() {
-            return;
-        }
-
-        let entry = match result {
+    for entry in entries {
+        let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                if !send_batch(sender, &mut batch, cancellation, runtime) {
-                    return;
+                if !batch.is_empty() {
+                    results.push(Ok(ListBatch { entries: batch }));
                 }
-                let _ = send_result(sender, Err(io_status(&error)), cancellation, runtime);
-                return;
+                results.push(Err(fs_status(&error)));
+                return results;
             }
         };
-        let listing_entry = match convert_entry(&entry) {
-            Ok(entry) => entry,
-            Err(status) => {
-                if !send_batch(sender, &mut batch, cancellation, runtime) {
-                    return;
-                }
-                let _ = send_result(sender, Err(status), cancellation, runtime);
-                return;
+        let entry = convert_entry(entry);
+        let entry_bytes = prost::encoding::key_len(1)
+            + prost::encoding::encoded_len_varint(entry.encoded_len() as u64)
+            + entry.encoded_len();
+        if entry_bytes > GRPC_BATCH_MAX_BYTES {
+            if !batch.is_empty() {
+                results.push(Ok(ListBatch { entries: batch }));
             }
-        };
-        let entry_bytes = repeated_message_bytes(&listing_entry);
-
-        if !batch.is_empty() && batch_bytes.saturating_add(entry_bytes) > BATCH_TARGET_BYTES {
-            if !send_batch(sender, &mut batch, cancellation, runtime) {
-                return;
-            }
+            results.push(Err(Status::resource_exhausted(
+                "directory entry exceeds the gRPC listing batch limit",
+            )));
+            return results;
+        }
+        if !batch.is_empty() && batch_bytes + entry_bytes > GRPC_BATCH_MAX_BYTES {
+            results.push(Ok(ListBatch {
+                entries: std::mem::take(&mut batch),
+            }));
             batch_bytes = 0;
-            batch_started = None;
         }
-        if batch.is_empty() {
-            batch_started = Some(std::time::Instant::now());
-        }
-        batch_bytes = batch_bytes.saturating_add(entry_bytes);
-        batch.push(listing_entry);
-
-        let deadline_reached =
-            batch_started.is_some_and(|started| started.elapsed() >= BATCH_MAX_DELAY);
-        if batch.len() == BATCH_MAX_ENTRIES || deadline_reached {
-            if !send_batch(sender, &mut batch, cancellation, runtime) {
-                return;
-            }
-            batch_bytes = 0;
-            batch_started = None;
-        }
+        batch.push(entry);
+        batch_bytes += entry_bytes;
     }
 
-    let _ = send_batch(sender, &mut batch, cancellation, runtime);
-}
-
-fn send_batch(
-    sender: &mpsc::Sender<Result<ListBatch, Status>>,
-    batch: &mut Vec<ListingEntry>,
-    cancellation: &CancellationToken,
-    runtime: &tokio::runtime::Handle,
-) -> bool {
-    if batch.is_empty() {
-        return true;
+    if !batch.is_empty() {
+        results.push(Ok(ListBatch { entries: batch }));
     }
-    send_result(
-        sender,
-        Ok(ListBatch {
-            entries: std::mem::take(batch),
-        }),
-        cancellation,
-        runtime,
-    )
+
+    results
 }
 
-fn send_result(
-    sender: &mpsc::Sender<Result<ListBatch, Status>>,
-    result: Result<ListBatch, Status>,
-    cancellation: &CancellationToken,
-    runtime: &tokio::runtime::Handle,
-) -> bool {
-    runtime.block_on(async {
-        tokio::select! {
-            () = cancellation.cancelled() => false,
-            result = sender.send(result) => result.is_ok(),
-        }
-    })
-}
-
-fn repeated_message_bytes(entry: &ListingEntry) -> usize {
-    let encoded = entry.encoded_len();
-    1 + varint_len(encoded) + encoded
-}
-
-fn varint_len(mut value: usize) -> usize {
-    let mut bytes = 1;
-    while value >= 0x80 {
-        value >>= 7;
-        bytes += 1;
-    }
-    bytes
-}
-
-fn convert_entry(entry: &std::fs::DirEntry) -> Result<ListingEntry, Status> {
-    let entry_path = entry.path();
-    if entry_path.to_str().is_none() {
-        return Err(Status::invalid_argument("Encountered a non-UTF-8 path"));
-    }
-    let name = entry
-        .file_name()
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| Status::invalid_argument("Encountered a non-UTF-8 filename"))?;
-    let file_type = entry.file_type().map_err(|error| io_status(&error))?;
-    let (kind, navigable) = if file_type.is_dir() {
-        (EntryKind::Directory, true)
-    } else if file_type.is_file() {
-        (EntryKind::File, false)
-    } else if file_type.is_symlink() {
-        (
-            EntryKind::Symlink,
-            std::fs::metadata(&entry_path).is_ok_and(|metadata| metadata.is_dir()),
-        )
-    } else {
-        (EntryKind::Other, false)
+fn convert_entry(entry: DirectoryEntry) -> ListingEntry {
+    let kind = match entry.kind {
+        EntryKind::File => ProtocolEntryKind::File,
+        EntryKind::Directory => ProtocolEntryKind::Directory,
+        EntryKind::Symlink => ProtocolEntryKind::Symlink,
+        EntryKind::Other => ProtocolEntryKind::Other,
     };
-
-    Ok(ListingEntry {
-        name,
+    ListingEntry {
+        name: entry.name,
         kind: kind.into(),
-        navigable,
-    })
-}
-
-fn io_status(error: &io::Error) -> Status {
-    match error.kind() {
-        io::ErrorKind::NotFound => Status::not_found(error.to_string()),
-        io::ErrorKind::PermissionDenied => Status::permission_denied(error.to_string()),
-        io::ErrorKind::NotADirectory => Status::failed_precondition(error.to_string()),
-        _ => Status::internal(error.to_string()),
+        navigable: entry.navigable,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use file_peeker_core::{DirectoryEntry, EntryKind, FsError, FsErrorKind};
+    use prost::Message as _;
+    use tonic::Code;
 
-    use futures::TryStreamExt;
-    use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
+    use super::{GRPC_BATCH_MAX_BYTES, convert_chunk};
 
-    use super::{BATCH_MAX_ENTRIES, list, produce_batches};
+    #[test]
+    fn keeps_small_chunks_together() {
+        let batches = convert_chunk(vec![Ok(DirectoryEntry {
+            name: "reports".into(),
+            kind: EntryKind::Directory,
+            navigable: true,
+        })]);
+        assert_eq!(batches.len(), 1);
+        let batch = batches[0].as_ref().unwrap();
+        assert_eq!(batch.entries.len(), 1);
+        assert_eq!(batch.entries[0].name, "reports");
+        assert!(batch.entries[0].navigable);
+    }
 
-    #[tokio::test]
-    async fn lists_a_directory_in_non_empty_bounded_batches() {
-        let fixture = tempfile::tempdir().unwrap();
-        for index in 0..=BATCH_MAX_ENTRIES {
-            tokio::fs::write(fixture.path().join(format!("file-{index}")), b"")
-                .await
-                .unwrap();
-        }
+    #[test]
+    fn splits_large_chunks_without_reordering() {
+        let entries = (0..3)
+            .map(|index| DirectoryEntry {
+                name: format!("{index}-{}", "x".repeat(GRPC_BATCH_MAX_BYTES / 2)),
+                kind: EntryKind::File,
+                navigable: false,
+            })
+            .map(Ok)
+            .collect();
 
-        let batches = list(
-            fixture.path().to_string_lossy().into_owned(),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
+        let batches = convert_chunk(entries)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
-        assert_eq!(
-            batches
-                .iter()
-                .map(|batch| batch.entries.len())
-                .sum::<usize>(),
-            BATCH_MAX_ENTRIES + 1
-        );
-        assert!(batches.iter().all(|batch| !batch.entries.is_empty()));
+        assert_eq!(batches.len(), 3);
         assert!(
             batches
                 .iter()
-                .all(|batch| batch.entries.len() <= BATCH_MAX_ENTRIES)
+                .all(|batch| batch.encoded_len() <= GRPC_BATCH_MAX_BYTES)
+        );
+        assert_eq!(
+            batches
+                .iter()
+                .flat_map(|batch| batch.entries.iter())
+                .map(|entry| &entry.name[..1])
+                .collect::<Vec<_>>(),
+            ["0", "1", "2"]
         );
     }
 
-    #[tokio::test]
-    async fn empty_directory_completes_without_batches() {
-        let fixture = tempfile::tempdir().unwrap();
-        let batches = list(
-            fixture.path().to_string_lossy().into_owned(),
-            CancellationToken::new(),
-        )
-        .await
+    #[test]
+    fn rejects_single_entries_larger_than_the_grpc_limit() {
+        let error = convert_chunk(vec![Ok(DirectoryEntry {
+            name: "x".repeat(GRPC_BATCH_MAX_BYTES),
+            kind: EntryKind::File,
+            navigable: false,
+        })])
+        .pop()
         .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
+        .unwrap_err();
 
-        assert!(batches.is_empty());
+        assert_eq!(error.code(), Code::ResourceExhausted);
     }
 
-    #[tokio::test]
-    async fn cancellation_unblocks_a_backpressured_directory_worker() {
-        let fixture = tempfile::tempdir().unwrap();
-        for index in 0..=(BATCH_MAX_ENTRIES * 3) {
-            std::fs::write(fixture.path().join(format!("file-{index}")), b"").unwrap();
-        }
-        let directory_entries = std::fs::read_dir(fixture.path()).unwrap();
-        let cancellation = CancellationToken::new();
-        let worker_cancellation = cancellation.clone();
-        let (sender, _receiver) = mpsc::channel(1);
-        let runtime = tokio::runtime::Handle::current();
-        let worker = tokio::task::spawn_blocking(move || {
-            produce_batches(directory_entries, &worker_cancellation, &sender, &runtime);
-        });
+    #[test]
+    fn empty_chunks_emit_no_grpc_messages() {
+        assert!(convert_chunk(Vec::new()).is_empty());
+    }
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        cancellation.cancel();
+    #[test]
+    fn flushes_entries_before_a_terminal_core_error() {
+        let results = convert_chunk(vec![
+            Ok(DirectoryEntry {
+                name: "kept".into(),
+                kind: EntryKind::File,
+                navigable: false,
+            }),
+            Err(FsError::new(FsErrorKind::PermissionDenied, "denied")),
+        ]);
 
-        tokio::time::timeout(Duration::from_secs(1), worker)
-            .await
-            .expect("cancelled worker should not remain blocked")
-            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().unwrap().entries[0].name, "kept");
+        assert_eq!(
+            results[1].as_ref().unwrap_err().code(),
+            Code::PermissionDenied
+        );
     }
 }

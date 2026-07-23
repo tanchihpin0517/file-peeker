@@ -25,14 +25,14 @@ enum TestCommand {
     Connect {
         #[arg(long)]
         force: bool,
-        server: Option<String>,
+        server: String,
     },
     Install {
         #[arg(long)]
         force: bool,
         #[arg(long)]
         from_source: Option<String>,
-        server: Option<String>,
+        server: String,
     },
     List {
         path: String,
@@ -63,19 +63,14 @@ async fn run(cli: &Cli) -> io::Result<()> {
     match &cli.command {
         Command::Test { command } => match command {
             TestCommand::Connect { force, server } => {
-                cli::connect::run(server.as_deref(), *force).await?;
+                cli::connect::run(server, *force).await?;
             }
             TestCommand::Install {
                 force,
                 from_source,
                 server,
             } => {
-                cli::install::run(
-                    server.as_deref(),
-                    *force,
-                    from_source.as_deref().map(Path::new),
-                )
-                .await?;
+                cli::install::run(server, *force, from_source.as_deref().map(Path::new)).await?;
             }
             TestCommand::List { path, remote } => {
                 cli::list::run(path, remote.as_deref()).await?;
@@ -151,7 +146,7 @@ mod tests {
                 command: TestCommand::Install {
                     force: false,
                     from_source: None,
-                    server: Some("example.test".into())
+                    server: "example.test".into()
                 }
             }
         );
@@ -174,7 +169,7 @@ mod tests {
                 command: TestCommand::Install {
                     force: true,
                     from_source: None,
-                    server: Some("example.test".into())
+                    server: "example.test".into()
                 }
             }
         );
@@ -182,42 +177,22 @@ mod tests {
 
     #[test]
     fn parses_test_install_without_server() {
-        let cli = Cli::try_parse_from(["file-peeker-client", "test", "install"])
-            .expect("hostless test install command should parse");
-
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                command: TestCommand::Install {
-                    force: false,
-                    from_source: None,
-                    server: None
-                }
-            }
-        );
+        let error = Cli::try_parse_from(["file-peeker-client", "test", "install"])
+            .expect_err("test install should require a remote server");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
-    fn parses_local_test_install_from_source() {
-        let cli = Cli::try_parse_from([
+    fn test_install_from_source_requires_server() {
+        let error = Cli::try_parse_from([
             "file-peeker-client",
             "test",
             "install",
             "--from-source",
             "/tmp/file-peeker-source",
         ])
-        .expect("local source install command should parse");
-
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                command: TestCommand::Install {
-                    force: false,
-                    from_source: Some("/tmp/file-peeker-source".into()),
-                    server: None,
-                }
-            }
-        );
+        .expect_err("source install should require a remote server");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
@@ -239,7 +214,7 @@ mod tests {
                 command: TestCommand::Install {
                     force: true,
                     from_source: Some("/tmp/file-peeker-source".into()),
-                    server: Some("example.test".into()),
+                    server: "example.test".into(),
                 }
             }
         );
@@ -299,7 +274,7 @@ mod tests {
             Command::Test {
                 command: TestCommand::Connect {
                     force: false,
-                    server: Some("example.test".into())
+                    server: "example.test".into()
                 }
             }
         );
@@ -307,18 +282,9 @@ mod tests {
 
     #[test]
     fn parses_test_connect_without_server() {
-        let cli = Cli::try_parse_from(["file-peeker-client", "test", "connect"])
-            .expect("hostless test connect command should parse");
-
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                command: TestCommand::Connect {
-                    force: false,
-                    server: None
-                }
-            }
-        );
+        let error = Cli::try_parse_from(["file-peeker-client", "test", "connect"])
+            .expect_err("test connect should require a remote server");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
@@ -337,25 +303,16 @@ mod tests {
             Command::Test {
                 command: TestCommand::Connect {
                     force: true,
-                    server: Some("example.test".into())
+                    server: "example.test".into()
                 }
             }
         );
     }
 
     #[test]
-    fn parses_forced_local_test_connect() {
-        let cli = Cli::try_parse_from(["file-peeker-client", "test", "connect", "--force"])
-            .expect("local test connect --force command should parse");
-
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                command: TestCommand::Connect {
-                    force: true,
-                    server: None
-                }
-            }
-        );
+    fn forced_test_connect_requires_server() {
+        let error = Cli::try_parse_from(["file-peeker-client", "test", "connect", "--force"])
+            .expect_err("forced test connect should require a remote server");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 }

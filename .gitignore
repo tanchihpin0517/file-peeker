@@ -6,3 +6,4 @@
 /swift/DerivedData/
 *.xcresult
 .DS_Store
+.plans/

@@ -1,6 +1,6 @@
 use std::{io, path::Path, time::Duration};
 
-use file_peeker_protocol::FILE_PEEKER_SERVICE_NAME;
+use file_peeker_server::protocol::FILE_PEEKER_SERVICE_NAME;
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use tokio::{
@@ -15,7 +15,6 @@ use tonic::{
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 use tower::service_fn;
 
-pub mod local;
 pub mod remote;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -40,78 +39,36 @@ pub struct ConnectionInfo {
     pub token: String,
 }
 
-/// Configuration used to create a managed connection.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ConnectionConfig {
-    Local {
-        force_install: bool,
-    },
-    Remote {
-        destination: String,
-        force_install: bool,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub(super) enum ConnectionRoute {
-    Local,
-    Ssh { socks_port: u16 },
-}
-
-impl ConnectionRoute {
-    async fn open_stream(&self, server_port: u16) -> io::Result<tokio::net::TcpStream> {
-        match self {
-            Self::Local => local::open_local_stream(server_port).await,
-            Self::Ssh { socks_port } => {
-                remote::open_operation_stream(*socks_port, server_port).await
-            }
-        }
-    }
-}
-
 /// An initialized route to one managed File Peeker server process.
 #[derive(Debug)]
-pub struct Connection {
-    child: Option<Child>,
-    stdin: Option<ChildStdin>,
-    stdout: Option<BufReader<ChildStdout>>,
+pub struct RemoteConnection {
     info: ConnectionInfo,
-    channel: Option<Channel>,
+    server: Option<RemoteServer>,
 }
 
-impl Connection {
+#[derive(Debug)]
+struct RemoteServer {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    channel: Channel,
+}
+
+impl RemoteConnection {
     /// Creates and initializes a connection for the configured target.
     ///
     /// # Errors
     ///
     /// Returns an error when installation, startup, connection, authentication,
     /// or the initial health check fails.
-    pub async fn from(config: ConnectionConfig) -> io::Result<Self> {
-        match config {
-            ConnectionConfig::Local { force_install } => {
-                let (child, stdin, stdout, info) = local::prepare(force_install).await?;
-                Self::initialize(ConnectionRoute::Local, child, stdin, stdout, info).await
-            }
-            ConnectionConfig::Remote {
-                destination,
-                force_install,
-            } => {
-                let (socks_port, child, stdin, stdout, info) =
-                    remote::prepare(Path::new("ssh"), &destination, force_install).await?;
-                Self::initialize(
-                    ConnectionRoute::Ssh { socks_port },
-                    child,
-                    stdin,
-                    stdout,
-                    info,
-                )
-                .await
-            }
-        }
+    pub async fn from(destination: &str, force_install: bool) -> io::Result<Self> {
+        let (socks_port, child, stdin, stdout, info) =
+            remote::prepare(Path::new("ssh"), destination, force_install).await?;
+        Self::initialize(socks_port, child, stdin, stdout, info).await
     }
 
     pub(super) async fn initialize(
-        route: ConnectionRoute,
+        socks_port: u16,
         mut child: Child,
         stdin: ChildStdin,
         stdout: BufReader<ChildStdout>,
@@ -122,12 +79,12 @@ impl Connection {
             .http2_keep_alive_interval(KEEPALIVE_INTERVAL)
             .keep_alive_timeout(KEEPALIVE_TIMEOUT)
             .keep_alive_while_idle(true);
-        let connector_route = route.clone();
         let server_port = info.server_port;
         let channel = endpoint
-            .connect_with_connector(service_fn(move |_uri: Uri| {
-                let route = connector_route.clone();
-                async move { route.open_stream(server_port).await.map(TokioIo::new) }
+            .connect_with_connector(service_fn(move |_uri: Uri| async move {
+                remote::open_operation_stream(socks_port, server_port)
+                    .await
+                    .map(TokioIo::new)
             }))
             .await
             .map_err(io::Error::other);
@@ -151,11 +108,13 @@ impl Connection {
         }
 
         Ok(Self {
-            child: Some(child),
-            stdin: Some(stdin),
-            stdout: Some(stdout),
             info,
-            channel: Some(channel),
+            server: Some(RemoteServer {
+                child,
+                stdin,
+                stdout,
+                channel,
+            }),
         })
     }
 
@@ -165,8 +124,9 @@ impl Connection {
     }
 
     pub(crate) fn channel(&self) -> io::Result<Channel> {
-        self.channel
-            .clone()
+        self.server
+            .as_ref()
+            .map(|server| server.channel.clone())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))
     }
 
@@ -181,15 +141,19 @@ impl Connection {
     /// Returns an error when the server exits unsuccessfully or misses the
     /// bounded shutdown deadline.
     pub async fn close(mut self) -> io::Result<()> {
-        self.channel.take();
-        shutdown_server_process(&mut self.stdin, &mut self.stdout, &mut self.child).await
+        let server = self
+            .server
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
+        shutdown_server_process(server).await
     }
 }
 
-impl Drop for Connection {
+impl Drop for RemoteConnection {
     fn drop(&mut self) {
-        self.channel.take();
-        stop_server_process(&mut self.stdin, &mut self.stdout, &mut self.child);
+        if let Some(server) = self.server.take() {
+            stop_server_process(server);
+        }
     }
 }
 
@@ -276,48 +240,50 @@ async fn stop_child(child: &mut Child) {
     let _ = child.wait().await;
 }
 
-async fn shutdown_server_process(
-    stdin: &mut Option<ChildStdin>,
-    stdout: &mut Option<BufReader<ChildStdout>>,
-    child: &mut Option<Child>,
-) -> io::Result<()> {
-    drop(stdin.take());
-    drop(stdout.take());
-    if let Some(mut child) = child.take() {
-        match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-            Ok(Ok(status)) if status.success() => {}
-            Ok(Ok(status)) => {
-                return Err(io::Error::other(format!(
-                    "server process exited unsuccessfully: {status}"
-                )));
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => {
-                stop_child(&mut child).await;
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "server did not stop within 5 seconds",
-                ));
-            }
+async fn shutdown_server_process(server: RemoteServer) -> io::Result<()> {
+    let RemoteServer {
+        mut child,
+        stdin,
+        stdout,
+        channel,
+    } = server;
+    drop(channel);
+    drop(stdin);
+    drop(stdout);
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(status)) if status.success() => {}
+        Ok(Ok(status)) => {
+            return Err(io::Error::other(format!(
+                "server process exited unsuccessfully: {status}"
+            )));
+        }
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            stop_child(&mut child).await;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "server did not stop within 5 seconds",
+            ));
         }
     }
     Ok(())
 }
 
-fn stop_server_process(
-    stdin: &mut Option<ChildStdin>,
-    stdout: &mut Option<BufReader<ChildStdout>>,
-    child: &mut Option<Child>,
-) {
-    stdin.take();
-    stdout.take();
-    if let Some(mut child) = child.take() {
-        let _ = child.start_kill();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = child.wait().await;
-            });
-        }
+fn stop_server_process(server: RemoteServer) {
+    let RemoteServer {
+        mut child,
+        stdin,
+        stdout,
+        channel,
+    } = server;
+    drop(channel);
+    drop(stdin);
+    drop(stdout);
+    let _ = child.start_kill();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let _ = child.wait().await;
+        });
     }
 }
 

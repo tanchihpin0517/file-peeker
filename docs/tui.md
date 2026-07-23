@@ -35,7 +35,7 @@ Each Browser Context represents one independent browsing instance:
 | --- | --- |
 | `id` | UUID used to route asynchronous events |
 | `session` | Resolved, Client-owned Session used by this context's listings |
-| `path` | Directory requested by this context |
+| `root_path` | Absolute lexical directory path resolved by the Session |
 | `entries` | Batches accumulated in server arrival order |
 | `selected_index` | Independent visual selection for this context |
 | `ListingStatus` | Mutually exclusive loading, complete, or failed outcome |
@@ -52,16 +52,17 @@ identity keeps those instances independent.
    sessionless so the shared render loop displays clap-generated help.
 2. With a path, `App::start` creates one local Session through the App-owned
    Client and obtains the retained Session.
-3. App passes the path unchanged to the server, where `~` and environment
-   variables are expanded and relative results use the server's working
-   directory. App creates the initial Browser Context with that Session and
-   path, which starts the first listing immediately.
-4. The context-owned task consumes the native batched `op_list` stream with
+3. App resolves the path through the Session. The selected host expands `~` and
+   environment variables, makes the path absolute against its working
+   directory, and lexically normalizes it. App creates the initial Browser
+   Context with that Session and resolved root path, which starts the first
+   listing immediately.
+4. The context-owned task consumes the native entry `op_list_dir` stream with
    `try_next`.
-5. Every batch, completion, or failure is sent through a bounded channel as a
+5. Every entry, completion, or failure is sent through a bounded channel as a
    private context event containing the context UUID and generation.
 6. App routes the event by UUID. The matching Browser Context rejects stale
-   generations and applies the batch or terminal transition itself.
+   generations and applies the entry or terminal transition itself.
 
 The bounded event channel lets filesystem/network work continue asynchronously
 while preserving backpressure through the listing stream. The synchronous
@@ -69,7 +70,14 @@ terminal loop redraws approximately every 50 milliseconds and handles a bounded
 number of listing events per frame. Only the active context is rendered;
 inactive contexts continue loading independently.
 
-## Refresh and cancellation
+## Navigation, refresh, and cancellation
+
+Lowercase `l` enters the selected entry when its `navigable` field is true;
+files and other non-navigable entries have no action. Lowercase `h` changes to
+the current path's lexical parent and has no action at the filesystem root. A
+path change aborts the current listing, updates the context path, resets the
+selection, and starts a replacement listing. The attempted path remains visible
+if that listing fails, so `R` can retry it.
 
 Uppercase `R` refreshes only the active context. Refresh aborts its current
 listing task, increments its generation, clears entries and failed status, marks
@@ -92,7 +100,7 @@ The reversed selection modifier is applied on top of the entry-specific style.
 
 ## Errors and shutdown
 
-A terminal listing error leaves earlier batches visible and displays the error
+A terminal listing error leaves earlier entries visible and displays the error
 for that context. A Session closed before a refresh is reported through the
 same failed-event path.
 
@@ -108,10 +116,10 @@ failures use the same shutdown path.
 - The help screen is informational and exits with `q` or `Esc`.
 - Only the active context is visible and refreshable from the keyboard.
 - There is not yet a command to create, select, close, or lay out contexts.
-- Entries retain server order. Selection is visual only; there is no navigation,
-  activation, sorting, searching, or file opening.
+- Entries retain server order. Navigation changes the active context's path;
+  there is no sorting or searching.
 
 Unit tests cover empty App ownership, harmless empty shutdown, initial listing,
-partial-result errors, refresh clearing, selection preservation and clamping,
-stale-event rejection, bounded backpressure, drop cancellation, and responsive
-layout.
+partial-result errors, navigation and failed navigation, refresh clearing,
+selection preservation and clamping, stale-event rejection, bounded
+backpressure, drop cancellation, and responsive layout.

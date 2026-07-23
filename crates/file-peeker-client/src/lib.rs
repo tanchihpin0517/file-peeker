@@ -1,12 +1,10 @@
 mod client;
-pub mod connection;
-mod ops;
-mod session;
+pub mod session;
 
-pub use client::{Client, CloseSessionError};
-pub use ops::list::ListStream;
-pub use ops::{CurrentRootError, DirectoryEntry, EntryKind, ListError, Listing};
-pub use session::{CloseError, ConnectError, Session, SessionConfig, SessionTarget};
+pub use client::{Client, ClientCloseSessionError};
+pub use session::directory::{DirectoryEntry, EntryKind, EntryStream};
+pub use session::ffi::{ListError, Listing, ResolvePathError};
+pub use session::{Session, SessionShutdownError, SessionStartError, SessionTarget};
 
 uniffi::setup_scaffolding!();
 

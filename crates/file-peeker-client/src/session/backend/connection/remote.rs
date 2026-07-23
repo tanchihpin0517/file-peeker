@@ -207,8 +207,8 @@ mod tests {
 
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, duplex};
 
+    use super::super::{ConnectionInfo, SERVER_READY_PREFIX, ensure_server_command};
     use super::{get_server_executable, ssh_command, start_server};
-    use crate::connection::{ConnectionInfo, SERVER_READY_PREFIX, ensure_server_command};
 
     #[test]
     fn ssh_command_uses_dynamic_forwarding() {

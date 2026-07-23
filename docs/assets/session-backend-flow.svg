@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1130" viewBox="0 0 900 1130" role="img" aria-labelledby="title description">
+  <title id="title">Unified SessionBackend operation flow</title>
+  <desc id="description">From top to bottom, callers use one Session API and Session delegates through SessionBackend. The local FsService and the remote File Peeker server both connect to the same shared file-peeker-core implementation, which accesses the filesystem on the host where it executes.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-head"/>
+    </marker>
+    <style>
+      :root {
+        --text: #172033;
+        --muted-text: #526078;
+        --surface: #f7f9fc;
+        --surface-strong: #e9eef8;
+        --border: #8491a8;
+        --local-surface: #e4f6ec;
+        --local-border: #27875b;
+        --remote-surface: #e5efff;
+        --remote-border: #3478c8;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --text: #eef3fb;
+          --muted-text: #b5c0d3;
+          --surface: #202938;
+          --surface-strong: #2b3850;
+          --border: #8390a6;
+          --local-surface: #173d30;
+          --local-border: #5bc792;
+          --remote-surface: #193a62;
+          --remote-border: #72aef2;
+        }
+      }
+      text { fill: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 16px; text-anchor: middle; }
+      .secondary { fill: var(--muted-text); font-size: 14px; }
+      .label { fill: var(--muted-text); font-size: 13px; font-weight: 600; letter-spacing: .08em; }
+      .node { fill: var(--surface); stroke: var(--border); stroke-width: 2; }
+      .backend { fill: var(--surface-strong); stroke: var(--border); stroke-width: 2.5; }
+      .local-node { fill: var(--local-surface); stroke: var(--local-border); stroke-width: 2; }
+      .remote-node { fill: var(--remote-surface); stroke: var(--remote-border); stroke-width: 2; }
+      .edge { fill: none; stroke: var(--border); stroke-width: 2.5; marker-end: url(#arrow); }
+      .local-edge { stroke: var(--local-border); }
+      .remote-edge { stroke: var(--remote-border); }
+      .arrow-head { fill: var(--border); }
+    </style>
+  </defs>
+
+  <path class="edge" d="M 450 110 V 145"/>
+  <path class="edge" d="M 450 235 V 270"/>
+  <rect class="node" x="330" y="30" width="240" height="80" rx="12"/>
+  <text x="450" y="63">Rust / Swift / TUI</text>
+  <text class="secondary" x="450" y="88">caller</text>
+
+  <rect class="node" x="330" y="145" width="240" height="90" rx="12"/>
+  <text x="450" y="183">Session</text>
+  <text class="secondary" x="450" y="209">one public API</text>
+
+  <rect class="backend" x="310" y="270" width="280" height="120" rx="12"/>
+  <text x="450" y="308">SessionBackend</text>
+  <text class="secondary" x="450" y="332">resolve_path</text>
+  <text class="secondary" x="450" y="354">list · read · close</text>
+  <text class="secondary" x="450" y="378">dynamic dispatch</text>
+
+  <path class="edge local-edge" d="M 400 390 V 420 C 400 445 225 435 225 475"/>
+  <path class="edge remote-edge" d="M 500 390 V 420 C 500 445 675 435 675 475"/>
+  <text class="label" x="225" y="450">LOCAL IMPLEMENTATION</text>
+  <text class="label" x="675" y="450">REMOTE IMPLEMENTATION</text>
+
+  <rect class="local-node" x="100" y="475" width="250" height="90" rx="12"/>
+  <text x="225" y="513">FsService</text>
+  <text class="secondary" x="225" y="539">native adapter</text>
+  <path class="edge local-edge" d="M 225 565 V 715 C 225 750 400 735 400 780"/>
+
+  <rect class="remote-node" x="550" y="475" width="250" height="90" rx="12"/>
+  <text x="675" y="513">RemoteBackend</text>
+  <text class="secondary" x="675" y="539">transport adapter</text>
+  <path class="edge remote-edge" d="M 675 565 V 650"/>
+  <text class="secondary" x="755" y="596">gRPC over SSH</text>
+  <text class="secondary" x="755" y="619">authenticated</text>
+
+  <rect class="remote-node" x="550" y="650" width="250" height="90" rx="12"/>
+  <text x="675" y="688">File Peeker server</text>
+  <text class="secondary" x="675" y="714">remote service adapter</text>
+  <path class="edge remote-edge" d="M 675 740 V 750 C 675 775 500 760 500 780"/>
+
+  <rect class="backend" x="310" y="780" width="280" height="100" rx="12"/>
+  <text x="450" y="819">file-peeker-core</text>
+  <text class="secondary" x="450" y="846">shared filesystem implementation</text>
+
+  <path class="edge local-edge" d="M 400 880 V 910 C 400 935 225 925 225 965"/>
+  <path class="edge remote-edge" d="M 500 880 V 910 C 500 935 675 925 675 965"/>
+
+  <rect class="local-node" x="100" y="965" width="250" height="100" rx="12"/>
+  <text x="225" y="1004">Client-host filesystem</text>
+  <text class="secondary" x="225" y="1031">native filesystem API</text>
+
+  <rect class="remote-node" x="550" y="965" width="250" height="100" rx="12"/>
+  <text x="675" y="1004">Remote-host filesystem</text>
+  <text class="secondary" x="675" y="1031">native filesystem API</text>
+
+  <text x="450" y="1100">Same core code and result types on both paths</text>
+  <text class="secondary" x="450" y="1125">Only the core's execution location changes</text>
+</svg>

@@ -647,8 +647,11 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 name = "file-peeker-client"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "clap",
- "file-peeker-protocol",
+ "file-peeker-core",
+ "file-peeker-server",
  "futures",
  "hyper-util",
  "serde",
@@ -656,6 +659,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-health",
  "tower",
@@ -666,15 +670,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-peeker-protocol"
+name = "file-peeker-core"
 version = "0.1.0"
 dependencies = [
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
+ "bytes",
+ "futures",
+ "shellexpand",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -682,12 +687,13 @@ name = "file-peeker-server"
 version = "0.1.0"
 dependencies = [
  "clap",
- "file-peeker-protocol",
+ "file-peeker-core",
  "futures",
  "getrandom 0.3.4",
  "prost",
+ "prost-build",
+ "protoc-bin-vendored",
  "serde_json",
- "shellexpand",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -695,6 +701,8 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-health",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]

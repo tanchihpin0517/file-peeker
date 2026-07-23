@@ -1,6 +1,6 @@
-use std::{fmt, io, sync::Arc};
+use std::{fmt, io, path::Path, sync::Arc};
 
-use file_peeker_client::{DirectoryEntry, ListStream, Session};
+use file_peeker_client::{DirectoryEntry, EntryStream, Session};
 use futures::{FutureExt as _, TryStreamExt as _, future::BoxFuture};
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
@@ -23,7 +23,7 @@ pub(crate) enum ListingStatus {
 
 pub(crate) struct BrowserContext {
     id: BrowserContextId,
-    path: String,
+    root_path: String,
     entries: Vec<DirectoryEntry>,
     selected_index: Option<usize>,
     status: ListingStatus,
@@ -38,7 +38,7 @@ impl fmt::Debug for BrowserContext {
         formatter
             .debug_struct("BrowserContext")
             .field("id", &self.id)
-            .field("path", &self.path)
+            .field("root_path", &self.root_path)
             .field("entries", &self.entries)
             .field("selected_index", &self.selected_index)
             .field("status", &self.status)
@@ -50,20 +50,20 @@ impl fmt::Debug for BrowserContext {
 impl BrowserContext {
     pub(crate) fn new(
         session: Arc<Session>,
-        path: String,
+        root_path: String,
         events: mpsc::Sender<BrowserContextEvent>,
     ) -> Self {
-        Self::from_source(session, path, events)
+        Self::from_source(session, root_path, events)
     }
 
     fn from_source(
         source: Arc<dyn BrowserSource>,
-        path: String,
+        root_path: String,
         events: mpsc::Sender<BrowserContextEvent>,
     ) -> Self {
         let mut context = Self {
             id: BrowserContextId::new(),
-            path,
+            root_path,
             entries: Vec::new(),
             selected_index: None,
             status: ListingStatus::Loading,
@@ -80,8 +80,8 @@ impl BrowserContext {
         self.id
     }
 
-    pub(crate) fn path(&self) -> &str {
-        &self.path
+    pub(crate) fn root_path(&self) -> &str {
+        &self.root_path
     }
 
     pub(crate) fn entries(&self) -> &[DirectoryEntry] {
@@ -115,12 +115,37 @@ impl BrowserContext {
         self.start_listing();
     }
 
+    pub(crate) fn enter_selected(&mut self) {
+        let Some(entry) = self
+            .effective_selection()
+            .and_then(|index| self.entries.get(index))
+            .filter(|entry| entry.navigable)
+        else {
+            return;
+        };
+        let root_path = Path::new(&self.root_path).join(&entry.name);
+        self.change_root_path(&root_path);
+    }
+
+    pub(crate) fn leave(&mut self) {
+        let Some(parent) = Path::new(&self.root_path).parent() else {
+            return;
+        };
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        }
+        .to_path_buf();
+        self.change_root_path(&parent);
+    }
+
     pub(crate) fn apply(&mut self, event: BrowserContextEvent) {
         if event.context_id != self.id || event.generation != self.generation {
             return;
         }
         match event.result {
-            ListingResult::Batch(entries) => self.append_entries(entries),
+            ListingResult::Entry(entry) => self.append_entry(entry),
             ListingResult::Finished => {
                 self.status = ListingStatus::Complete;
                 self.listing_task = None;
@@ -139,18 +164,24 @@ impl BrowserContext {
         self.abort_listing();
     }
 
+    fn change_root_path(&mut self, root_path: &Path) {
+        self.root_path = root_path.to_string_lossy().into_owned();
+        self.selected_index = None;
+        self.start_listing();
+    }
+
     fn start_listing(&mut self) {
         self.abort_listing();
         self.generation = self.generation.wrapping_add(1);
         self.entries.clear();
         self.status = ListingStatus::Loading;
         let source = Arc::clone(&self.source);
-        let path = self.path.clone();
+        let root_path = self.root_path.clone();
         let context_id = self.id;
         let generation = self.generation;
         let events = self.events.clone();
         self.listing_task = Some(tokio::spawn(run_listing(
-            source, path, context_id, generation, events,
+            source, root_path, context_id, generation, events,
         )));
     }
 
@@ -160,9 +191,9 @@ impl BrowserContext {
         }
     }
 
-    fn append_entries(&mut self, entries: Vec<DirectoryEntry>) {
-        self.entries.extend(entries);
-        if self.selected_index.is_none() && !self.entries.is_empty() {
+    fn append_entry(&mut self, entry: DirectoryEntry) {
+        self.entries.push(entry);
+        if self.selected_index.is_none() {
             self.selected_index = Some(0);
         }
     }
@@ -183,12 +214,12 @@ impl Drop for BrowserContext {
 }
 
 trait BrowserSource: fmt::Debug + Send + Sync {
-    fn list(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<ListStream>>;
+    fn list_dir(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<EntryStream>>;
 }
 
 impl BrowserSource for Session {
-    fn list(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<ListStream>> {
-        async move { self.op_list(&path).await }.boxed()
+    fn list_dir(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<EntryStream>> {
+        async move { self.op_list_dir(&path).await }.boxed()
     }
 }
 
@@ -207,30 +238,25 @@ impl BrowserContextEvent {
 
 #[derive(Debug)]
 enum ListingResult {
-    Batch(Vec<DirectoryEntry>),
+    Entry(DirectoryEntry),
     Finished,
     Failed(String),
 }
 
 async fn run_listing(
     source: Arc<dyn BrowserSource>,
-    path: String,
+    root_path: String,
     context_id: BrowserContextId,
     generation: u64,
     events: mpsc::Sender<BrowserContextEvent>,
 ) {
-    let result = match source.list(path).await {
+    let result = match source.list_dir(root_path).await {
         Ok(mut listing) => loop {
             match listing.try_next().await {
-                Ok(Some(entries)) => {
-                    if send_result(
-                        &events,
-                        context_id,
-                        generation,
-                        ListingResult::Batch(entries),
-                    )
-                    .await
-                    .is_err()
+                Ok(Some(entry)) => {
+                    if send_result(&events, context_id, generation, ListingResult::Entry(entry))
+                        .await
+                        .is_err()
                     {
                         return;
                     }
@@ -258,7 +284,6 @@ async fn send_result(
         })
         .await
 }
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -268,14 +293,15 @@ mod tests {
         time::Duration,
     };
 
-    use file_peeker_client::{DirectoryEntry, EntryKind, ListStream};
+    use file_peeker_client::{DirectoryEntry, EntryKind, EntryStream};
     use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream};
     use tokio::sync::mpsc;
 
     use super::{BrowserContext, BrowserContextEvent, BrowserSource, ListingStatus};
 
     struct ScriptedBrowserSource {
-        listings: Mutex<VecDeque<io::Result<ListStream>>>,
+        listings: Mutex<VecDeque<io::Result<EntryStream>>>,
+        requested_paths: Mutex<Vec<String>>,
     }
 
     impl std::fmt::Debug for ScriptedBrowserSource {
@@ -287,16 +313,22 @@ mod tests {
     }
 
     impl ScriptedBrowserSource {
-        fn new(listings: impl IntoIterator<Item = io::Result<ListStream>>) -> Arc<Self> {
+        fn new(listings: impl IntoIterator<Item = io::Result<EntryStream>>) -> Arc<Self> {
             Arc::new(Self {
                 listings: Mutex::new(listings.into_iter().collect()),
+                requested_paths: Mutex::new(Vec::new()),
             })
+        }
+
+        fn requested_paths(&self) -> Vec<String> {
+            self.requested_paths.lock().unwrap().clone()
         }
     }
 
     impl BrowserSource for ScriptedBrowserSource {
-        fn list(self: Arc<Self>, _path: String) -> BoxFuture<'static, io::Result<ListStream>> {
+        fn list_dir(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<EntryStream>> {
             async move {
+                self.requested_paths.lock().unwrap().push(path);
                 self.listings
                     .lock()
                     .unwrap()
@@ -315,12 +347,20 @@ mod tests {
         }
     }
 
-    fn listing<I>(batches: I) -> ListStream
+    fn directory(name: &str) -> DirectoryEntry {
+        DirectoryEntry {
+            name: name.into(),
+            kind: EntryKind::Directory,
+            navigable: true,
+        }
+    }
+
+    fn listing<I>(entries: I) -> EntryStream
     where
-        I: IntoIterator<Item = io::Result<Vec<DirectoryEntry>>>,
+        I: IntoIterator<Item = io::Result<DirectoryEntry>>,
         I::IntoIter: Send + 'static,
     {
-        stream::iter(batches).boxed()
+        stream::iter(entries).boxed()
     }
 
     fn context(
@@ -344,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn creation_starts_and_completes_a_listing() {
-        let source = ScriptedBrowserSource::new([Ok(listing([Ok(vec![entry("one")])]))]);
+        let source = ScriptedBrowserSource::new([Ok(listing([Ok(entry("one"))]))]);
         let (mut context, mut receiver) = context(source, 4);
 
         assert_eq!(context.status(), &ListingStatus::Loading);
@@ -359,7 +399,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_failure_preserves_partial_entries() {
         let source = ScriptedBrowserSource::new([Ok(listing([
-            Ok(vec![entry("kept")]),
+            Ok(entry("kept")),
             Err(io::Error::other("failed")),
         ]))]);
         let (mut context, mut receiver) = context(source, 4);
@@ -374,8 +414,8 @@ mod tests {
     #[tokio::test]
     async fn refresh_clears_entries_and_rejects_queued_stale_results() {
         let source = ScriptedBrowserSource::new([
-            Ok(listing([Ok(vec![entry("stale")])])),
-            Ok(listing([Ok(vec![entry("current")])])),
+            Ok(listing([Ok(entry("stale"))])),
+            Ok(listing([Ok(entry("current"))])),
         ]);
         let (mut context, mut receiver) = context(source, 8);
         let stale = receiver.recv().await.expect("stale batch");
@@ -398,12 +438,13 @@ mod tests {
     #[tokio::test]
     async fn refresh_preserves_then_clamps_selection() {
         let source = ScriptedBrowserSource::new([
-            Ok(listing([Ok(vec![entry("a"), entry("b"), entry("c")])])),
-            Ok(listing([Ok(vec![entry("new-a"), entry("new-b")])])),
+            Ok(listing([Ok(entry("a")), Ok(entry("b")), Ok(entry("c"))])),
+            Ok(listing([Ok(entry("new-a")), Ok(entry("new-b"))])),
         ]);
         let (mut context, mut receiver) = context(source, 8);
-        apply_next(&mut context, &mut receiver).await;
-        apply_next(&mut context, &mut receiver).await;
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
         context.move_selection(true);
         context.move_selection(true);
 
@@ -411,17 +452,103 @@ mod tests {
         assert!(context.entries().is_empty());
         assert_eq!(context.selected_index, Some(2));
         apply_next(&mut context, &mut receiver).await;
+        assert_eq!(context.effective_selection(), Some(0));
+        apply_next(&mut context, &mut receiver).await;
         assert_eq!(context.effective_selection(), Some(1));
         apply_next(&mut context, &mut receiver).await;
         assert_eq!(context.selected_index, Some(1));
     }
 
     #[tokio::test]
+    async fn entering_selected_directory_changes_path_and_rejects_stale_results() {
+        let source = ScriptedBrowserSource::new([
+            Ok(listing([Ok(directory("reports"))])),
+            Ok(listing([Ok(entry("current"))])),
+        ]);
+        let (mut context, mut receiver) = context(Arc::clone(&source), 8);
+        apply_next(&mut context, &mut receiver).await;
+        let stale_completion = receiver.recv().await.expect("stale completion");
+
+        context.enter_selected();
+        assert_eq!(context.root_path(), "/home/reports");
+        assert!(context.entries().is_empty());
+        assert_eq!(context.effective_selection(), None);
+        assert_eq!(context.status(), &ListingStatus::Loading);
+
+        context.apply(stale_completion);
+        assert_eq!(context.status(), &ListingStatus::Loading);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        assert_eq!(context.entries(), [entry("current")]);
+        assert_eq!(source.requested_paths(), ["/home", "/home/reports"]);
+    }
+
+    #[tokio::test]
+    async fn entering_non_navigable_entry_does_nothing() {
+        let source = ScriptedBrowserSource::new([Ok(listing([Ok(entry("report.txt"))]))]);
+        let (mut context, mut receiver) = context(Arc::clone(&source), 4);
+        apply_next(&mut context, &mut receiver).await;
+
+        context.enter_selected();
+
+        assert_eq!(context.root_path(), "/home");
+        assert_eq!(context.entries(), [entry("report.txt")]);
+        assert_eq!(source.requested_paths(), ["/home"]);
+    }
+
+    #[tokio::test]
+    async fn leaving_changes_to_parent_and_does_nothing_at_root() {
+        let source = ScriptedBrowserSource::new([
+            Ok(listing([Ok(entry("initial"))])),
+            Ok(listing([Ok(entry("parent"))])),
+        ]);
+        let (mut context, mut receiver) = context(Arc::clone(&source), 8);
+        apply_next(&mut context, &mut receiver).await;
+        let stale_completion = receiver.recv().await.expect("stale completion");
+
+        context.leave();
+        assert_eq!(context.root_path(), "/");
+        assert_eq!(context.effective_selection(), None);
+        context.apply(stale_completion);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.leave();
+        tokio::task::yield_now().await;
+        assert_eq!(context.root_path(), "/");
+        assert_eq!(source.requested_paths(), ["/home", "/"]);
+    }
+
+    #[tokio::test]
+    async fn failed_navigation_keeps_attempted_path() {
+        let source = ScriptedBrowserSource::new([
+            Ok(listing([Ok(directory("missing"))])),
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing directory")),
+        ]);
+        let (mut context, mut receiver) = context(source, 8);
+        apply_next(&mut context, &mut receiver).await;
+        let stale_completion = receiver.recv().await.expect("stale completion");
+
+        context.enter_selected();
+        context.apply(stale_completion);
+        while matches!(context.status(), ListingStatus::Loading) {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        assert_eq!(context.root_path(), "/home/missing");
+        assert_eq!(
+            context.status(),
+            &ListingStatus::Failed("missing directory".into())
+        );
+    }
+
+    #[tokio::test]
     async fn bounded_events_backpressure_the_listing() {
-        let source = ScriptedBrowserSource::new([Ok(listing([
-            Ok(vec![entry("one")]),
-            Ok(vec![entry("two")]),
-        ]))]);
+        let source =
+            ScriptedBrowserSource::new([Ok(listing([Ok(entry("one")), Ok(entry("two"))]))]);
         let (mut context, mut receiver) = context(source, 1);
 
         tokio::time::timeout(Duration::from_secs(1), async {

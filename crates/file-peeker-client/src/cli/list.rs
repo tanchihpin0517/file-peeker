@@ -4,7 +4,7 @@ use std::{
     time::Instant,
 };
 
-use file_peeker_client::{Client, ListStream, Session, SessionConfig, SessionTarget};
+use file_peeker_client::{Client, EntryStream, Session, SessionTarget};
 use futures::TryStreamExt as _;
 
 const OUTPUT_FLUSH_INTERVAL: u64 = 1024;
@@ -19,7 +19,7 @@ pub async fn run(path: &str, remote: Option<&str>) -> io::Result<()> {
     };
     let client = Client::new();
     let session_id = client
-        .start_session(SessionConfig { target })
+        .start_session(target)
         .await
         .map_err(|error| io::Error::other(error.to_string()))?;
     let session = client
@@ -37,7 +37,7 @@ pub async fn run(path: &str, remote: Option<&str>) -> io::Result<()> {
 
 async fn run_with_session(session: &Session, path: &str) -> io::Result<()> {
     let started = Instant::now();
-    let mut entries = session.op_list(path).await?;
+    let mut entries = session.op_list_dir(path).await?;
     let mut output = io::stdout().lock();
     let stats = write_listing(Path::new(path), &mut entries, &mut output).await?;
     output.flush()?;
@@ -64,18 +64,16 @@ struct ListStats {
 
 async fn write_listing(
     parent: &Path,
-    batches: &mut ListStream,
+    entries: &mut EntryStream,
     output: &mut impl Write,
 ) -> io::Result<ListStats> {
     let mut stats = ListStats { entries: 0 };
-    while let Some(batch) = batches.try_next().await? {
-        for entry in batch {
-            let path = child_path(parent, &entry.name)?;
-            writeln!(output, "{}", path.display())?;
-            stats.entries += 1;
-            if stats.entries.is_multiple_of(OUTPUT_FLUSH_INTERVAL) {
-                output.flush()?;
-            }
+    while let Some(entry) = entries.try_next().await? {
+        let path = child_path(parent, &entry.name)?;
+        writeln!(output, "{}", path.display())?;
+        stats.entries += 1;
+        if stats.entries.is_multiple_of(OUTPUT_FLUSH_INTERVAL) {
+            output.flush()?;
         }
     }
     Ok(stats)
@@ -98,7 +96,7 @@ fn child_path(parent: &Path, name: &str) -> io::Result<PathBuf> {
 mod tests {
     use std::{io, path::Path};
 
-    use file_peeker_client::{DirectoryEntry, EntryKind, ListStream};
+    use file_peeker_client::{DirectoryEntry, EntryKind, EntryStream};
     use futures::{StreamExt as _, stream};
 
     use super::{ListStats, OUTPUT_FLUSH_INTERVAL, child_path, write_listing};
@@ -111,8 +109,8 @@ mod tests {
         }
     }
 
-    fn listing(batches: Vec<io::Result<Vec<DirectoryEntry>>>) -> ListStream {
-        stream::iter(batches).boxed()
+    fn listing(entries: Vec<io::Result<DirectoryEntry>>) -> EntryStream {
+        stream::iter(entries).boxed()
     }
 
     #[derive(Default)]
@@ -135,7 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn writes_child_paths_from_the_listing_stream() {
-        let mut entries = listing(vec![Ok(vec![entry("notes.txt"), entry("docs")])]);
+        let mut entries = listing(vec![Ok(entry("notes.txt")), Ok(entry("docs"))]);
         let mut output = Vec::new();
 
         let stats = write_listing(Path::new("/fixture"), &mut entries, &mut output)
@@ -160,11 +158,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flushes_each_full_transport_sized_batch() {
+    async fn flushes_output_at_the_entry_interval() {
         let entries = (0..OUTPUT_FLUSH_INTERVAL)
             .map(|index| entry(&format!("file-{index}")))
+            .map(Ok)
             .collect();
-        let mut entries = listing(vec![Ok(entries)]);
+        let mut entries = listing(entries);
         let mut output = FlushCountingWriter::default();
 
         let stats = write_listing(Path::new("/fixture"), &mut entries, &mut output)
@@ -194,7 +193,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_child_names_are_rejected() {
-        let mut entries = listing(vec![Ok(vec![entry("../escape")])]);
+        let mut entries = listing(vec![Ok(entry("../escape"))]);
 
         let error = write_listing(Path::new("/fixture"), &mut entries, &mut Vec::new())
             .await

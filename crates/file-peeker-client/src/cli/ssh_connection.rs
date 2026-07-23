@@ -1,6 +1,6 @@
 use std::{io, path::Path};
 
-use file_peeker_client::connection::remote::create_ssh_connection;
+use file_peeker_client::session::backend::connection::remote::create_ssh_connection;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 pub async fn run(destination: &str) -> io::Result<()> {

@@ -32,9 +32,7 @@ final class BrowserModel: ObservableObject {
         loadTask = Task {
             var startedID: String?
             do {
-                let id = try await client.startSession(
-                    config: SessionConfig(target: .local)
-                )
+                let id = try await client.startSession(target: .local)
                 startedID = id
                 try Task.checkCancellation()
                 guard requestGeneration == generation,
@@ -46,16 +44,16 @@ final class BrowserModel: ObservableObject {
                 sessionID = id
                 session = newSession
 
-                let path = try await newSession.opCurrentRootUniffi()
+                let path = try await newSession.opResolvePathUniffi(path: "~")
                 try Task.checkCancellation()
                 guard requestGeneration == generation else { return }
                 homePath = path
 
-                let listing = try await newSession.opListUniffi(path: path)
-                while let batch = try await listing.nextBatch() {
+                let listing = try await newSession.opListDirUniffi(path: path)
+                while let entry = try await listing.nextEntry() {
                     try Task.checkCancellation()
                     guard requestGeneration == generation else { return }
-                    append(batch)
+                    append(entry)
                 }
 
                 guard requestGeneration == generation else { return }
@@ -91,10 +89,8 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private func append(_ batch: [DirectoryEntry]) {
-        for entry in batch {
-            rows.append(BrowserRow(id: nextRowID, entry: entry))
-            nextRowID &+= 1
-        }
+    private func append(_ entry: DirectoryEntry) {
+        rows.append(BrowserRow(id: nextRowID, entry: entry))
+        nextRowID &+= 1
     }
 }

@@ -1,26 +1,19 @@
 # Startup routine
 
-Every `Session` owns one local or remote Rust server, one memory-only token, one
-reconnectable gRPC channel, and one stdin lifetime lease.
+Every `Session` owns either a native filesystem core or a managed remote server
+connection.
 
 ```text
-Local:  Session -> HTTP/2 127.0.0.1:PORT -> server
+Local:  Session -> in-process filesystem core
 Remote: Session -> SOCKS 127.0.0.1:PROXY -> SSH -> remote loopback server
 ```
 
 ## Local startup
 
-1. Reuse or install the matching executable below
-   `~/.file-peeker/servers/VERSION`.
-2. Spawn `file-peeker-server serve` with piped stdin and stdout.
-3. Parse `FILE_PEEKER_SERVER_STARTUP={port,token}` from stdout.
-4. Open an eager tonic channel to the loopback port.
-5. Send an authenticated `grpc.health.v1.Health/Check`; return the Session only
-   when the service reports `SERVING`.
-
-The server chooses an ephemeral port and accepts only IPv4 loopback traffic.
-The client uses a five-second connect/health timeout and enables HTTP/2 PING
-every 15 idle seconds with a five-second timeout.
+1. Construct an in-process `FsService`.
+2. Retain it as the Session's local backend.
+3. Return the Session without installing a server, spawning a child, opening a
+   port, or performing a health check.
 
 ## Remote startup
 
@@ -39,11 +32,12 @@ new SOCKS stream. RPCs and listings are never automatically replayed.
 ## Shutdown
 
 `Client.close_session` removes the retained Session; native `Session.close` and
-UniFFI `Session.close_uniffi` are idempotent without unregistering it. Explicit close drops the channel and stdin
-lease. Server EOF cancels active listings and drives tonic graceful shutdown.
-The client waits up to five seconds for the managed child, then kills and reaps
-it while returning a shutdown timeout. Drop uses best-effort non-blocking
-kill/reap cleanup.
+UniFFI `Session.close_uniffi` are idempotent without unregistering it. Closing a
+local Session cancels its core service and active listings. Closing a remote
+Session drops the channel and stdin lease. Server EOF cancels active listings
+and drives tonic graceful shutdown. The client waits up to five seconds for a
+managed remote child, then kills and reaps it while returning a shutdown
+timeout. Drop uses best-effort non-blocking cleanup.
 
 The protobuf API has no custom Hello, Heartbeat, or Shutdown RPC. Authentication
 is sensitive `authorization: Bearer TOKEN` metadata on both FilePeeker and
