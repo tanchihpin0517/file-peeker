@@ -84,6 +84,8 @@ pub(crate) struct BrowserContext {
     root_path: String,
     rows: Vec<BrowserRow>,
     selected_index: Option<usize>,
+    viewport_offset: usize,
+    viewport_height: usize,
     status: ListingStatus,
     root_listing_task: Option<JoinHandle<()>>,
     directory_listing_tasks: HashMap<u64, JoinHandle<()>>,
@@ -105,6 +107,8 @@ impl fmt::Debug for BrowserContext {
             .field("root_path", &self.root_path)
             .field("rows", &self.rows)
             .field("selected_index", &self.selected_index)
+            .field("viewport_offset", &self.viewport_offset)
+            .field("viewport_height", &self.viewport_height)
             .field("status", &self.status)
             .field("generation", &self.generation)
             .field("pending_open_path", &self.pending_open_path)
@@ -132,6 +136,8 @@ impl BrowserContext {
             root_path,
             rows: Vec::new(),
             selected_index: None,
+            viewport_offset: 0,
+            viewport_height: 0,
             status: ListingStatus::Loading,
             root_listing_task: None,
             directory_listing_tasks: HashMap::new(),
@@ -191,6 +197,15 @@ impl BrowserContext {
         (!self.rows.is_empty()).then(|| self.selected_index.unwrap_or(0).min(self.rows.len() - 1))
     }
 
+    pub(crate) fn viewport_offset(&self) -> usize {
+        self.viewport_offset
+    }
+
+    pub(crate) fn set_viewport(&mut self, offset: usize, height: usize) {
+        self.viewport_offset = offset;
+        self.viewport_height = height;
+    }
+
     pub(crate) fn move_selection(&mut self, down: bool) {
         self.clear_settled_open_status();
         if self.rows.is_empty() {
@@ -204,6 +219,30 @@ impl BrowserContext {
         } else {
             current.saturating_sub(1)
         });
+    }
+
+    pub(crate) fn scroll_half_page(&mut self, down: bool) {
+        self.clear_settled_open_status();
+        let Some(current) = self.effective_selection() else {
+            return;
+        };
+        if self.viewport_height == 0 {
+            return;
+        }
+
+        let distance = (self.viewport_height / 2).max(1);
+        let last = self.rows.len() - 1;
+        let max_offset = self.rows.len().saturating_sub(self.viewport_height);
+        if down {
+            self.selected_index = Some(current.saturating_add(distance).min(last));
+            self.viewport_offset = self
+                .viewport_offset
+                .saturating_add(distance)
+                .min(max_offset);
+        } else {
+            self.selected_index = Some(current.saturating_sub(distance));
+            self.viewport_offset = self.viewport_offset.saturating_sub(distance);
+        }
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -319,6 +358,7 @@ impl BrowserContext {
     fn change_root_path(&mut self, root_path: &Path) {
         self.root_path = root_path.to_string_lossy().into_owned();
         self.selected_index = None;
+        self.viewport_offset = 0;
         self.pending_open_path = None;
         self.start_root_listing();
     }
@@ -794,6 +834,41 @@ mod tests {
         assert_eq!(context.entries(), [entry("one")]);
         assert_eq!(context.status(), &ListingStatus::Complete);
         assert_eq!(context.effective_selection(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn half_page_scroll_moves_selection_and_viewport_and_clamps_at_boundaries() {
+        let source = ScriptedBrowserSource::new([Ok(listing(
+            (0..12).map(|index| Ok(entry(&format!("item-{index}")))),
+        ))]);
+        let (mut context, mut receiver) = context(source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+        context.set_viewport(0, 6);
+
+        context.scroll_half_page(true);
+        assert_eq!(context.effective_selection(), Some(3));
+        assert_eq!(context.viewport_offset(), 3);
+
+        context.scroll_half_page(false);
+        assert_eq!(context.effective_selection(), Some(0));
+        assert_eq!(context.viewport_offset(), 0);
+
+        context.selected_index = Some(10);
+        context.set_viewport(6, 6);
+        context.scroll_half_page(true);
+        assert_eq!(context.effective_selection(), Some(11));
+        assert_eq!(context.viewport_offset(), 6);
+        context.scroll_half_page(true);
+        assert_eq!(context.effective_selection(), Some(11));
+        assert_eq!(context.viewport_offset(), 6);
+
+        context.selected_index = Some(4);
+        context.set_viewport(4, 6);
+        context.scroll_half_page(false);
+        assert_eq!(context.effective_selection(), Some(1));
+        assert_eq!(context.viewport_offset(), 1);
     }
 
     #[tokio::test]

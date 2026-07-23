@@ -76,6 +76,12 @@ impl App {
         }
     }
 
+    pub(crate) fn scroll_active_half_page(&mut self, down: bool) {
+        if let Some(context) = self.active_context_mut() {
+            context.scroll_half_page(down);
+        }
+    }
+
     pub(crate) fn activate_active_selection(&mut self) {
         if let Some(context) = self.active_context_mut() {
             context.activate_selected();

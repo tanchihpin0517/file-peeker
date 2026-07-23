@@ -16,7 +16,7 @@ const HELP_WIDTH: u16 = 56;
 const HELP_HEIGHT: u16 = 15;
 
 impl App {
-    pub(crate) fn render(&self, frame: &mut Frame<'_>) {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>) {
         if self.active_context().is_none() {
             self.render_help(frame);
             return;
@@ -43,21 +43,19 @@ impl App {
                 .block(Block::default().title(" Locations ").borders(Borders::ALL)),
             sidebar,
         );
-        let entries = context
-            .into_iter()
-            .flat_map(BrowserContext::rows)
-            .map(row_list_item);
-        let mut list_state = ListState::default()
-            .with_selected(context.and_then(BrowserContext::effective_selection));
-        frame.render_stateful_widget(
-            List::new(entries)
-                .block(Block::default().title(" Files ").borders(Borders::ALL))
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-                .highlight_symbol("> "),
+        let context = self
+            .active_context_mut()
+            .expect("active context was checked before rendering");
+        let (viewport_offset, viewport_height) = render_file_list(
+            frame,
             browser,
-            &mut list_state,
+            context.rows().iter().map(row_list_item),
+            context.effective_selection(),
+            context.viewport_offset(),
         );
-        let controls = "j/k: select  o: expand/open  h/l: navigate  R: refresh  q/Esc: quit";
+        context.set_viewport(viewport_offset, viewport_height);
+        let context = self.active_context();
+        let controls = "j/k: select  Ctrl-D/U: half-page  o: expand/open  h/l: navigate  R: refresh  q/Esc: quit";
         let status = context.map_or_else(
             || "Not started  q/Esc: quit".into(),
             |context| {
@@ -109,6 +107,30 @@ impl App {
             footer,
         );
     }
+}
+
+fn render_file_list<'a>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    entries: impl IntoIterator<Item = ListItem<'a>>,
+    selected: Option<usize>,
+    viewport_offset: usize,
+) -> (usize, usize) {
+    let block = Block::default().title(" Files ").borders(Borders::ALL);
+    let viewport_height = usize::from(block.inner(area).height);
+    let mut list_state = ListState::default()
+        .with_offset(viewport_offset)
+        .with_selected(selected);
+    frame.render_stateful_widget(
+        List::new(entries)
+            .block(block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ")
+            .scroll_padding(1),
+        area,
+        &mut list_state,
+    );
+    (list_state.offset(), viewport_height)
 }
 
 fn row_list_item(row: &BrowserRow) -> ListItem<'static> {
@@ -217,12 +239,13 @@ mod tests {
         Terminal,
         backend::TestBackend,
         style::{Color, Modifier},
+        widgets::ListItem,
     };
     use tokio::sync::mpsc;
 
     use super::{
-        centered_help_area, centered_popup_area, entry_appearance, render_open_confirmation,
-        sidebar_width,
+        centered_help_area, centered_popup_area, entry_appearance, render_file_list,
+        render_open_confirmation, sidebar_width,
     };
     use crate::{Cli, EVENT_CHANNEL_CAPACITY, app::App};
 
@@ -233,7 +256,7 @@ mod tests {
 
     #[test]
     fn startup_screen_renders_help_inside_ratatui() {
-        let app = app();
+        let mut app = app();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         let rendered: String = terminal
@@ -262,6 +285,51 @@ mod tests {
             centered_help_area(ratatui::layout::Rect::new(3, 2, 40, 10)),
             ratatui::layout::Rect::new(3, 2, 40, 10)
         );
+    }
+
+    fn render_test_list(
+        terminal: &mut Terminal<TestBackend>,
+        selected: usize,
+        viewport_offset: usize,
+    ) -> usize {
+        let mut rendered_offset = viewport_offset;
+        terminal
+            .draw(|frame| {
+                let (offset, viewport_height) = render_file_list(
+                    frame,
+                    frame.area(),
+                    (0..10).map(|index| ListItem::new(format!("Item {index}"))),
+                    Some(selected),
+                    viewport_offset,
+                );
+                assert_eq!(viewport_height, 5);
+                rendered_offset = offset;
+            })
+            .unwrap();
+        rendered_offset
+    }
+
+    #[test]
+    fn file_list_scrolls_only_near_the_viewport_border() {
+        let mut terminal = Terminal::new(TestBackend::new(20, 7)).unwrap();
+
+        let mut offset = render_test_list(&mut terminal, 0, 0);
+        offset = render_test_list(&mut terminal, 1, offset);
+        offset = render_test_list(&mut terminal, 2, offset);
+        offset = render_test_list(&mut terminal, 3, offset);
+        assert_eq!(offset, 0);
+
+        offset = render_test_list(&mut terminal, 4, offset);
+        assert_eq!(offset, 1);
+        offset = render_test_list(&mut terminal, 5, offset);
+        assert_eq!(offset, 2);
+
+        offset = render_test_list(&mut terminal, 4, offset);
+        offset = render_test_list(&mut terminal, 3, offset);
+        assert_eq!(offset, 2);
+
+        offset = render_test_list(&mut terminal, 2, offset);
+        assert_eq!(offset, 1);
     }
 
     #[test]

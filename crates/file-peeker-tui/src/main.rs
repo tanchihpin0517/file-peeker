@@ -1,7 +1,7 @@
 use std::{error::Error, io, time::Duration};
 
 use clap::{CommandFactory, Parser};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
@@ -64,11 +64,13 @@ fn run(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            match key_action(key.code, app.has_open_confirmation()) {
+            match key_action(key.code, key.modifiers, app.has_open_confirmation()) {
                 KeyAction::Quit => return Ok(()),
                 KeyAction::Refresh => app.refresh_active_context(),
                 KeyAction::MoveDown => app.move_active_selection(true),
                 KeyAction::MoveUp => app.move_active_selection(false),
+                KeyAction::HalfPageDown => app.scroll_active_half_page(true),
+                KeyAction::HalfPageUp => app.scroll_active_half_page(false),
                 KeyAction::LeaveDirectory => app.leave_active_directory(),
                 KeyAction::EnterSelection => app.enter_active_selection(),
                 KeyAction::ActivateSelection => app.activate_active_selection(),
@@ -86,6 +88,8 @@ enum KeyAction {
     Refresh,
     MoveDown,
     MoveUp,
+    HalfPageDown,
+    HalfPageUp,
     LeaveDirectory,
     EnterSelection,
     ActivateSelection,
@@ -94,13 +98,20 @@ enum KeyAction {
     Ignore,
 }
 
-fn key_action(code: KeyCode, has_open_confirmation: bool) -> KeyAction {
+fn key_action(code: KeyCode, modifiers: KeyModifiers, has_open_confirmation: bool) -> KeyAction {
     if has_open_confirmation {
         return match code {
             KeyCode::Char('q') | KeyCode::Esc => KeyAction::CancelOpen,
             KeyCode::Char('o') => KeyAction::ConfirmOpen,
             _ => KeyAction::Ignore,
         };
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('d') => return KeyAction::HalfPageDown,
+            KeyCode::Char('u') => return KeyAction::HalfPageUp,
+            _ => {}
+        }
     }
     match code {
         KeyCode::Char('q') | KeyCode::Esc => KeyAction::Quit,
@@ -117,7 +128,7 @@ fn key_action(code: KeyCode, has_open_confirmation: bool) -> KeyAction {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::{Cli, KeyAction, key_action};
 
@@ -145,15 +156,57 @@ mod tests {
 
     #[test]
     fn confirmation_keys_cancel_or_confirm_without_quitting() {
-        assert_eq!(key_action(KeyCode::Esc, true), KeyAction::CancelOpen);
-        assert_eq!(key_action(KeyCode::Char('q'), true), KeyAction::CancelOpen);
-        assert_eq!(key_action(KeyCode::Char('o'), true), KeyAction::ConfirmOpen);
-        assert_eq!(key_action(KeyCode::Char('j'), true), KeyAction::Ignore);
+        assert_eq!(
+            key_action(KeyCode::Esc, KeyModifiers::NONE, true),
+            KeyAction::CancelOpen
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('q'), KeyModifiers::NONE, true),
+            KeyAction::CancelOpen
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('o'), KeyModifiers::NONE, true),
+            KeyAction::ConfirmOpen
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('j'), KeyModifiers::NONE, true),
+            KeyAction::Ignore
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('d'), KeyModifiers::CONTROL, true),
+            KeyAction::Ignore
+        );
     }
 
     #[test]
     fn quit_keys_still_exit_without_a_confirmation() {
-        assert_eq!(key_action(KeyCode::Esc, false), KeyAction::Quit);
-        assert_eq!(key_action(KeyCode::Char('q'), false), KeyAction::Quit);
+        assert_eq!(
+            key_action(KeyCode::Esc, KeyModifiers::NONE, false),
+            KeyAction::Quit
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('q'), KeyModifiers::NONE, false),
+            KeyAction::Quit
+        );
+    }
+
+    #[test]
+    fn control_d_and_u_scroll_by_half_a_page() {
+        assert_eq!(
+            key_action(KeyCode::Char('d'), KeyModifiers::CONTROL, false),
+            KeyAction::HalfPageDown
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('u'), KeyModifiers::CONTROL, false),
+            KeyAction::HalfPageUp
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('d'), KeyModifiers::NONE, false),
+            KeyAction::Ignore
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('u'), KeyModifiers::NONE, false),
+            KeyAction::Ignore
+        );
     }
 }
