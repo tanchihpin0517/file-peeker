@@ -23,6 +23,7 @@ Rustdoc remains authoritative for exact signatures.
 | `Session` | `op_walk_dir` | Rust only | Native `WalkStream` |
 | `Session` | `op_open_file` | Rust | Opens a selected-host regular file |
 | `Session` | `op_open_file_uniffi` | Swift adapter | Opens a selected-host regular file |
+| `Session` | `op_copy_file_from` | Rust only | Streams a file from another Session |
 | `Session` | `close` | Rust | Idempotent Session shutdown |
 | `Session` | `close_uniffi` | Swift adapter | Idempotent Session shutdown |
 | `Listing` | `next_entry` | Rust and Swift | Next `DirectoryEntry`, completion, or sticky error |
@@ -47,7 +48,7 @@ connections use their non-blocking fallback cleanup.
 
 The Rust client uses its private `SessionBackend` trait as the unified primitive
 interface for both targets. `Session` invokes the same `resolve_path`,
-`list_dir`, `walk_dir`, `read_file`, and `close` methods in either mode. Host-local
+`list_dir`, `walk_dir`, `read_file`, `write_file`, and `close` methods in either mode. Host-local
 filesystem behavior is implemented by core `FsService`; selected-host
 dispatch uses `SessionBackend`, with native execution locally and authenticated
 gRPC remotely. Public callers therefore use one `Session` API without selecting
@@ -61,6 +62,14 @@ core errors into `io::Error`; the remote adapter maps transport-bounded
 `ReadChunk` messages directly into `Bytes`. Open and regular-file validation
 failures occur before a stream is returned, while later filesystem, protocol, or
 cancellation failures are one terminal stream item.
+
+`Session::op_copy_file_from` is a destination-oriented native Rust operation.
+It accepts a source Session/path, a destination directory and separate
+single-component filename, plus `CopyConflict::{FailIfExists, Replace}`. It
+returns `CopyResult` with the selected-host destination path and copied byte
+count. The source and destination backend locks are released before streaming
+starts. This API has no UniFFI or Swift surface. See
+[Copy File](operations/copy-file.md) for its routing and atomicity contract.
 
 `Session.op_open_file` validates a regular file on the selected host. Local
 files are opened at their existing resolved path. Remote files are fully and

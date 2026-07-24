@@ -48,6 +48,13 @@ pub(crate) struct BrowserRow {
     expansion: ExpansionStatus,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SelectedEntry {
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) kind: EntryKind,
+}
+
 impl BrowserRow {
     fn new(path: String, depth: usize, entry: DirectoryEntry) -> Self {
         Self {
@@ -195,6 +202,17 @@ impl BrowserContext {
 
     pub(crate) fn effective_selection(&self) -> Option<usize> {
         (!self.rows.is_empty()).then(|| self.selected_index.unwrap_or(0).min(self.rows.len() - 1))
+    }
+
+    pub(crate) fn selected_entry(&self) -> Option<SelectedEntry> {
+        let row = self
+            .effective_selection()
+            .and_then(|index| self.rows.get(index))?;
+        Some(SelectedEntry {
+            path: row.path.clone(),
+            name: row.entry.name.clone(),
+            kind: row.entry.kind,
+        })
     }
 
     pub(crate) fn viewport_offset(&self) -> usize {

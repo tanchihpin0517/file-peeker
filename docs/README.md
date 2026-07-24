@@ -18,7 +18,8 @@ documentation.
 1. [Code structure](code-structure.md) records the current module layout and
    placement rules.
 2. Read the relevant operation document, such as
-   [Open file](operations/open-file.md).
+   [Open file](operations/open-file.md) or
+   [Copy file](operations/copy-file.md).
 3. Use [Client API](api.md) to verify the caller-facing surface.
 
 ### Work on a frontend or command-line tool
@@ -40,6 +41,7 @@ and link to that owner rather than duplicate implementation details.
 | [Remote protocol](protocol.md) | RPCs, protobuf shapes, wire limits and gRPC status mapping |
 | [Client API](api.md) | Caller-visible Rust and UniFFI surface |
 | [Open file](operations/open-file.md) | Open-file workflow, staging, cache location, failure handling and retention |
+| [Copy file](operations/copy-file.md) | Session-to-Session routes, streaming, conflicts, atomic publication and cancellation |
 | [TUI implementation](tui.md) | TUI state, tasks, events, input and rendering behavior |
 | [State ownership](state-ownership.md) | Cross-client and cross-UI ownership comparison |
 | [Client test CLI](client-cli.md) | Test CLI commands and output behavior |
@@ -53,4 +55,3 @@ and link to that owner rather than duplicate implementation details.
   behavior.
 - Use the terms defined in [Architecture](architecture.md) consistently,
   especially *client host*, *selected host* and *server host*.
-

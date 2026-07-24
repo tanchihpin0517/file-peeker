@@ -7,6 +7,7 @@ service FilePeeker {
   rpc List(ListRequest) returns (stream ListBatch);
   rpc Walk(WalkRequest) returns (stream WalkBatch);
   rpc Read(ReadRequest) returns (stream ReadChunk);
+  rpc Write(stream WriteFrame) returns (WriteResponse);
 }
 
 message ResolvePathRequest {
@@ -31,6 +32,33 @@ message ReadRequest {
 
 message ReadChunk {
   bytes data = 1;
+}
+
+message WriteFrame {
+  oneof payload {
+    WriteHeader header = 1;
+    bytes data = 2;
+    WriteCommit commit = 3;
+  }
+}
+
+message WriteHeader {
+  string directory = 1;
+  string name = 2;
+  WriteConflict conflict = 3;
+}
+
+message WriteCommit {}
+
+enum WriteConflict {
+  WRITE_CONFLICT_UNSPECIFIED = 0;
+  WRITE_CONFLICT_FAIL_IF_EXISTS = 1;
+  WRITE_CONFLICT_REPLACE = 2;
+}
+
+message WriteResponse {
+  string path = 1;
+  uint64 bytes_written = 2;
 }
 
 message ListBatch {

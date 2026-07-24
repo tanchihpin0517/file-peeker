@@ -5,6 +5,7 @@ use crate::{
     error::{FsError, FsErrorKind, service_cancelled_error},
     read::{ReadStream, read_file},
     resolve_path::resolve_path,
+    write::{WriteConflict, WriteResult, write_file},
 };
 
 /// A clonable filesystem service whose clones share one terminal cancellation state.
@@ -78,6 +79,31 @@ impl FsService {
     pub async fn read_file(&self, path: &str) -> Result<ReadStream, FsError> {
         self.ensure_active()?;
         read_file(path, self.cancellation_token.clone()).await
+    }
+
+    /// Atomically writes a streamed regular file into a selected-host directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid filename, inaccessible destination,
+    /// conflict, source/write failure, or service cancellation. Failed writes
+    /// never publish a partial destination.
+    pub async fn write_file(
+        &self,
+        directory: &str,
+        name: &str,
+        conflict: WriteConflict,
+        source: ReadStream,
+    ) -> Result<WriteResult, FsError> {
+        self.ensure_active()?;
+        write_file(
+            directory,
+            name,
+            conflict,
+            source,
+            self.cancellation_token.clone(),
+        )
+        .await
     }
 
     /// Permanently cancels this service, all of its clones, and active streams.

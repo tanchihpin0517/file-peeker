@@ -1,3 +1,4 @@
+pub(crate) mod copy;
 mod open;
 mod opener;
 mod service;

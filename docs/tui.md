@@ -1,151 +1,140 @@
 # TUI Implementation
 
-The `file-peeker-tui` crate is a read-only Ratatui frontend backed by the shared
-Rust Client. Its current UI displays one active browser context, while its state
-and event model support multiple concurrent directory listings.
+The `file-peeker-tui` crate is a Ratatui frontend backed by the shared
+Rust Client. It presents ordered browser tabs across local and SSH Sessions
+while rendering one active Browser Context at a time.
 
 ## Ownership
 
 ```text
 main
 └── App
-    ├── Client
-    │   └── Session registry
-    ├── started Session IDs
-    ├── BrowserContext map
-    │   ├── Context A -> Session 1 -> /path/a -> visible tree rows
-    │   └── Context B -> Session 1 -> /path/b -> visible tree rows
-    └── active BrowserContext ID
+    ├── Client and allocated-Session cleanup ledger
+    ├── ordered SessionRecord IDs + lookup
+    │   └── target, stable label, lifecycle state, Client ID/Session,
+    │       last-active Browser Context
+    ├── ordered Browser Context IDs + lookup
+    │   └── BrowserTab -> SessionRecord ID + BrowserContext
+    ├── active Browser Context and selected Session IDs
+    ├── bounded Browser Context event channel
+    ├── unbounded low-volume lifecycle event channel
+    ├── lazy transfer clipboard and one tracked transfer task
+    └── tracked start, resolve-path, and close tasks
 ```
 
-`App` always creates and owns the Client. When a startup path is supplied,
-Sessions remain strongly owned by the Client's registry and each Browser
-Context also retains its resolved Session behind its `BrowserSource` trait
-object. `Client::get_session` is used once after startup, not on each refresh.
+`app/session.rs` owns only TUI Session presentation. Its UUID exists before a
+Client Session is allocated, so a `Starting` row has stable identity. Labels
+are derived once: `Local` or the raw SSH destination, with monotonic `#2`,
+`#3`, and later suffixes for duplicates. Removing an earlier duplicate never
+renames survivors.
 
-`main` parses an optional path, creates the event channel and help text, owns the
-terminal lifecycle and event receiver, and maps key presses to App commands. It
-always creates App, calls `App::start` with that optional path, runs the
-draw/input loop, restores the terminal, and calls `App::shutdown`.
+Lookup maps route events by identity. Separate order vectors define Session
+Manager order and tab order. Central App helpers insert, activate, and remove
+records so active and last-active references remain valid.
 
-## Browser Context
+## Startup and asynchronous lifecycle
 
-Each Browser Context represents one independent browsing instance:
+With a CLI path, App synchronously starts one local Session, records its Client
+ID for cleanup, resolves the path on that Session, creates the first Browser
+Context, and activates it before terminal initialization. Without a path, App
+starts sessionless and opens Session Manager over the normal empty shell.
 
-| Field | Purpose |
-| --- | --- |
-| `id` | UUID used to route asynchronous events |
-| `source` | Listing source; production stores the resolved, Client-owned Session behind `BrowserSource` |
-| `root_path` | Absolute lexical directory path resolved by the Session |
-| `rows` | Visible entries with their full selected-host path, tree depth, and expansion state |
-| `selected_index` | Independent visual selection for this context |
-| `ListingStatus` | Mutually exclusive loading, complete, or failed outcome |
-| listing tasks | One root task plus independently cancellable expanded-directory tasks |
-| `generation` and request IDs | Reject events from replaced roots or collapsed directory requests |
-| open state | Pending confirmation, opener task, and opening/success/failure feedback |
+Interactive Session startup first inserts a `Starting` row and spawns a tracked
+task. After `Client::start_session` succeeds, the task immediately sends a
+`SessionAllocated` event before awaiting `Client::get_session`; App adds that
+ID to its cleanup ledger. The row then becomes `Ready` or retains a visible
+`Failed` error. The available states are deliberately `Starting`, `Ready`,
+`Failed`, and `Closing`; there is no heartbeat from which to claim connected
+or disconnected state.
 
-Browser Contexts are stored in a `HashMap<BrowserContextId, BrowserContext>`.
-Multiple contexts may reference the same Session, the same path, or both. UUID
-identity keeps those instances independent.
+New Browser submits its path to a tracked `Session::op_resolve_path` task.
+Events include a fresh request UUID and Session-record UUID. Only the currently
+open matching dialog accepts the result. Success appends and activates a new
+Browser Context; failure preserves both input and error for correction. Cancel
+aborts the task and late events are ignored.
 
-## Startup and listing flow
+Browser listing and file-open events remain on a bounded channel to preserve
+filesystem/network backpressure. Session lifecycle events use a separate
+unbounded channel because they are low-volume and must not strand an allocated
+Client Session while waiting to report its ID. App pumps a bounded number of
+browser events and all available lifecycle events once per 50 ms terminal-loop
+iteration.
 
-1. `App::start` receives the optional path. Without one, it leaves the app
-   sessionless so the shared render loop displays clap-generated help.
-2. With a path, `App::start` creates one local Session through the App-owned
-   Client and obtains the retained Session.
-3. App resolves the path through the Session. The selected host expands `~` and
-   environment variables, makes the path absolute against its working
-   directory, and lexically normalizes it. App creates the initial Browser
-   Context with that Session and resolved root path, which starts the first
-   listing immediately.
-4. The context-owned root task consumes the native entry `op_list_dir` stream
-   with `try_next`.
-5. Every entry, completion, or failure is sent through a bounded channel as a
-   private context event containing the context UUID and generation.
-6. App routes the event by UUID. The matching Browser Context rejects stale
-   generations and applies the entry or terminal transition itself.
+## Browser Contexts and tabs
 
-The bounded event channel lets filesystem/network and file-opening work continue
-asynchronously while preserving listing-stream backpressure. The synchronous
-terminal loop redraws approximately every 50 milliseconds and handles a bounded
-number of events per frame. Only the active context is rendered; inactive
-contexts continue loading independently.
+Each Browser Context independently owns its resolved root, visible tree rows,
+selection, viewport, expansion state, loading/error state, open confirmation,
+and listing/open tasks. Inactive contexts keep their state and continue
+loading. Browser events carry Context UUID and generation/request identity;
+removed contexts and stale listing generations are ignored.
 
-## Inline expansion, opening, and navigation
+The tab strip displays `SessionLabel:compact-path`, keeps the active tab
+visible at narrow widths, and does not wrap. The header displays the active
+Session label and full path. `[` and `]` switch tabs with wrapping. `n` creates
+another browser on the active tab's Session and defaults to its full root path.
+`x` immediately closes the active read-only Context without closing its
+Session. Removal activates the Context that moves into the same order index, or
+the preceding final Context.
 
-Lowercase `l` enters the selected entry when its `navigable` field is true;
-files and other non-navigable entries have no action. Lowercase `h` changes to
-the current path's lexical parent and has no action at the filesystem root. A
-path change aborts the current listing, updates the context path, resets the
-selection, and starts a replacement listing. The attempted path remains visible
-if that listing fails, so `R` can retry it.
+The Files list occupies the full body; there is no placeholder Locations
+sidebar. With no tabs, the shell explains `S: sessions` and `q/Esc: quit`.
 
-Lowercase `o` is context-sensitive. On a navigable directory or directory
-symlink it starts a separate `op_list_dir` request and streams children directly
-beneath the selected row without changing the context root. Each row stores its
-full path, so nested expansions and `l` navigation operate on the selected row
-rather than reconstructing a path from only the root. Multiple directories may
-load concurrently. Children retain their per-directory selected-host order and
-are indented by depth.
+Within a browser, `j`/`k` or arrows move selection, `Ctrl-D`/`Ctrl-U` scroll,
+`h`/`l` navigate, `o` expands a navigable row or opens a file confirmation, and
+`R` refreshes. Expansion, navigation, streaming, stale-event rejection, and
+file-open behavior are owned by `browser_context.rs`. File confirmation
+captures input: `o` confirms, `q`/`Esc` cancels, and all other keys are ignored.
 
-Pressing `o` on an expanded, loading, or failed directory collapses it, aborts
-every active listing in that subtree, removes all descendant rows, and rejects
-already queued events by request ID. Collapsed contents are not cached:
-re-expanding starts a fresh listing. A failed expansion retains partial children
-and shows an error marker until it is collapsed.
+`y` copies the selected regular file into an App-owned lazy clipboard containing
+only source Session identity, full path, and original name. Closing the source
+Browser Context does not clear it; closing its Session does. `p` streams that
+file into the active Context root, including local/remote upload, download, and
+relay routes. Only one transfer runs at a time. The footer shows an
+indeterminate `Copying…` state and the final byte count.
 
-On a regular file or non-directory symlink, `o` opens a modal containing the
-full path. The modal snapshots that path and captures input: `o` confirms,
-`Esc` or `q` cancels the modal without exiting, and other keys do nothing.
-Confirmation calls `Session::op_open_file` asynchronously. The footer reports
-opening, success, or failure. Navigable symlinks expand; other special entries
-have no `o` action.
+Paste initially fails if the destination name exists. `AlreadyExists` opens a
+capturing overwrite confirmation: `Enter`/`y` restarts from byte zero with
+replace semantics, while `q`/`Esc` cancels. Successful paste retains the
+clipboard and refreshes the original destination Context only when it still
+exists with the same Session and root. Switching tabs or closing that Context
+does not cancel the transfer.
 
-Uppercase `R` refreshes only the active context. Refresh aborts its root and
-expanded-directory listing tasks, increments its generation, clears rows,
-expansion errors, and failed root status, marks the Listing Status as loading,
-and starts a replacement root listing using the same Session and path.
-The selected numeric index is retained while loading, displayed at the nearest
-currently available row, and clamped permanently when the stream terminates.
+## Session Manager and dialogs
 
-Aborting a task drops its native stream; a future remote-backed context would
-consequently drop its gRPC response stream. The context's root generation and
-per-expansion request checks separately protect against events that were already
-queued before cancellation. Dropping a Browser Context aborts all listing and
-opening tasks. `Up`/`Down` and `k`/`j` move the active context's selection
-within the visible rows. The first received entry is selected automatically.
-Lowercase `r` has no action. Outside the confirmation modal, `q` and `Esc` exit.
+`S` opens Session Manager. It lists Sessions in creation order with label,
+target summary, lifecycle state, and browser count. `j`/`k` or arrows move
+selection while preserving Session identity across row changes.
 
-Entry kinds use aligned prefixes and styles so they remain distinguishable in
-the list: files use a two-space prefix and terminal defaults, directory actions
-use `▸`, `…`, `▾`, or `!` for collapsed, loading, expanded, or failed state,
-symlinks use cyan, and other entries use a yellow `?`. The reversed selection
-modifier is applied on top of the entry-specific style.
+- `a` opens the Local/SSH chooser. Local starts immediately; SSH accepts an
+  unmodified printable destination.
+- `Enter` on a ready Session activates its most recently active Context, or
+  opens New Browser at `~` when it has none.
+- `n` opens New Browser for the selected ready Session.
+- `d` removes an unallocated failed row or asks to close a ready Session.
+- `q`, `Esc`, or `S` dismisses the manager without quitting.
 
-## Errors and shutdown
+Confirmed Session close changes the row to `Closing`, drops all of its Browser
+Contexts, and starts `Client::close_session` without blocking input. Completion
+removes the row. Since Client removal precedes backend shutdown, a close error
+is terminal and is retained in the application footer rather than exposed as a
+fake retry.
 
-A terminal listing error leaves earlier entries visible and displays the error
-for that context. A Session closed before a refresh is reported through the
-same failed-event path.
+Input routing uses one explicit mode with modal confirmation, chooser/text
+dialogs, Session Manager, then main browser/empty state precedence. Undefined
+keys in a capturing mode are ignored and never leak to navigation, yank/paste,
+or process quit.
 
-Shutdown aborts every Browser Context listing and opening task, then attempts to
-close every Session started by App. All Sessions are attempted even if one close
-fails; the first close error is returned after cleanup. Startup and
-terminal-initialization failures use the same shutdown path.
+## Rendering and shutdown
 
-## Current UI limits
+Rendering uses a header, one-row tab strip, full-width Files body, and
+mode-aware footer. Overlays use `Clear`, constrain themselves to the current
+terminal, wrap paths/destinations/errors, and show starting, resolving, failed,
+and closing feedback.
 
-- Startup without a path displays help; `file-peeker PATH` creates one local
-  browser context.
-- The help screen is informational and exits with `q` or `Esc`.
-- Only the active context is visible and refreshable from the keyboard.
-- There is not yet a command to create, select, close, or lay out contexts.
-- Entries retain selected-host filesystem order within each directory. There is
-  no sorting or searching.
-
-Unit tests cover empty App ownership, harmless empty shutdown, initial listing,
-partial-result errors, navigation and failed navigation, refresh clearing,
-selection preservation and clamping, nested expansion, collapse/reload,
-stale-event rejection, bounded backpressure, open confirmation and failures,
-drop cancellation, popup rendering, and responsive layout.
+Shutdown first aborts and joins the active transfer, then cancels and drops all
+Browser Context work, aborts and joins path
+tasks, aborts and joins startup tasks, and drains already-enqueued allocation
+events. Already-running close tasks are allowed to finish because they may have
+consumed their Client registry entries. App then attempts every remaining ID in
+the allocation ledger and returns the first close error only after attempting
+all cleanup.

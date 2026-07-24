@@ -1,10 +1,13 @@
 use std::io;
 
 use async_trait::async_trait;
-use file_peeker_core::FsService;
-use futures::StreamExt as _;
+use file_peeker_core::{FsError, FsService, WriteConflict};
+use futures::{FutureExt as _, StreamExt as _};
 
-use super::{ReadStream, SessionBackend, error::fs_error};
+use super::{
+    BackendWriteConflict, BackendWriteResult, ReadStream, SessionBackend, WriteFuture,
+    error::fs_error,
+};
 use crate::{EntryStream, WalkStream};
 
 #[async_trait]
@@ -38,6 +41,34 @@ impl SessionBackend for FsService {
         Ok(stream
             .map(|result| result.map_err(|error| fs_error(&error)))
             .boxed())
+    }
+
+    fn write_file(
+        &self,
+        directory: String,
+        name: String,
+        conflict: BackendWriteConflict,
+        source: ReadStream,
+    ) -> WriteFuture {
+        let service = self.clone();
+        async move {
+            let source = source
+                .map(|result| result.map_err(|error| FsError::from_io(&error)))
+                .boxed();
+            let conflict = match conflict {
+                BackendWriteConflict::FailIfExists => WriteConflict::FailIfExists,
+                BackendWriteConflict::Replace => WriteConflict::Replace,
+            };
+            let result = service
+                .write_file(&directory, &name, conflict, source)
+                .await
+                .map_err(|error| fs_error(&error))?;
+            Ok(BackendWriteResult {
+                path: result.path,
+                bytes_written: result.bytes_written,
+            })
+        }
+        .boxed()
     }
 
     async fn close(self: Box<Self>) -> io::Result<()> {

@@ -15,6 +15,8 @@ pub(crate) mod ffi;
 mod file;
 mod path;
 
+pub use file::copy::{CopyConflict, CopyResult};
+
 /// Backend target retained by a session.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum SessionTarget {

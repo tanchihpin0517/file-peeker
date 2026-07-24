@@ -4,6 +4,7 @@ use tonic::Status;
 pub(super) fn fs_status(error: &FsError) -> Status {
     match error.kind() {
         FsErrorKind::InvalidArgument => Status::invalid_argument(error.message()),
+        FsErrorKind::AlreadyExists => Status::already_exists(error.message()),
         FsErrorKind::NotFound => Status::not_found(error.message()),
         FsErrorKind::PermissionDenied => Status::permission_denied(error.message()),
         FsErrorKind::NotDirectory | FsErrorKind::NotFile => {
@@ -25,6 +26,7 @@ mod tests {
     fn preserves_core_error_codes_and_messages() {
         let cases = [
             (FsErrorKind::InvalidArgument, Code::InvalidArgument),
+            (FsErrorKind::AlreadyExists, Code::AlreadyExists),
             (FsErrorKind::NotFound, Code::NotFound),
             (FsErrorKind::PermissionDenied, Code::PermissionDenied),
             (FsErrorKind::NotDirectory, Code::FailedPrecondition),

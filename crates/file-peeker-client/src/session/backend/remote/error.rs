@@ -7,6 +7,7 @@ pub(super) fn operation_status_error(status: &tonic::Status) -> io::Error {
         Code::NotFound => io::ErrorKind::NotFound,
         Code::PermissionDenied => io::ErrorKind::PermissionDenied,
         Code::InvalidArgument => io::ErrorKind::InvalidInput,
+        Code::AlreadyExists => io::ErrorKind::AlreadyExists,
         Code::FailedPrecondition => io::ErrorKind::NotADirectory,
         Code::Cancelled => io::ErrorKind::Interrupted,
         Code::DeadlineExceeded => io::ErrorKind::TimedOut,
@@ -38,6 +39,7 @@ mod tests {
     fn native_and_remote_fs_errors_have_identical_public_results() {
         let cases = [
             (FsErrorKind::InvalidArgument, Code::InvalidArgument),
+            (FsErrorKind::AlreadyExists, Code::AlreadyExists),
             (FsErrorKind::NotFound, Code::NotFound),
             (FsErrorKind::PermissionDenied, Code::PermissionDenied),
             (FsErrorKind::NotDirectory, Code::FailedPrecondition),

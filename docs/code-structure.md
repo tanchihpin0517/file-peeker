@@ -61,6 +61,7 @@ crates/file-peeker-core/src/
 ├── fs_service.rs
 ├── resolve_path.rs
 ├── read.rs
+├── write.rs
 └── directory/
     ├── mod.rs
     ├── entry.rs
@@ -71,7 +72,7 @@ crates/file-peeker-core/src/
 - `lib.rs` is a thin crate facade and re-exports public types.
 - `FsService` is the cohesive entry point for filesystem behavior and shared
   cancellation.
-- `resolve_path.rs` and `read.rs` hold focused operations that do not yet form
+- `resolve_path.rs`, `read.rs`, and `write.rs` hold focused operations that do not yet form
   larger domain families.
 - `directory/` owns shared entry inspection, one-level listing, and recursive
   traversal types and behavior.
@@ -95,6 +96,7 @@ crates/file-peeker-client/src/session/
 │   └── walk.rs
 ├── file/
 │   ├── mod.rs
+│   ├── copy.rs
 │   ├── open.rs
 │   ├── opener.rs
 │   ├── service.rs
@@ -113,6 +115,7 @@ crates/file-peeker-client/src/session/
 │       ├── resolve_path.rs
 │       ├── list_dir.rs
 │       ├── read_file.rs
+│       ├── write_file.rs
 │       └── walk_dir.rs
 └── ffi/
     ├── mod.rs
@@ -126,6 +129,8 @@ crates/file-peeker-client/src/session/
   Session directory workflows.
 - `file/open.rs` contains the Rust-native Session entry point and selected-host
   coordination.
+- `file/copy.rs` owns the destination-oriented Session-to-Session streamed copy
+  workflow.
 - `file/service.rs` defines the private client `FileService` facade for
   client-host file preparation and operating-system workflows.
 - `file/stage.rs` owns platform cache-root selection, lazy private-directory
@@ -135,7 +140,8 @@ crates/file-peeker-client/src/session/
   responsibilities.
 - `backend/mod.rs` defines the private `SessionBackend` capability seam.
 - `backend/local.rs` adapts `FsService`; `backend/remote/` contains exact gRPC
-  adapters for the same primitive capabilities.
+  adapters for the same primitive capabilities. `remote/write_file.rs` owns
+  client-streaming request framing and response validation.
 - `backend/connection/` owns remote connection and server-process lifecycle,
   not filesystem operations.
 - `ffi/` adapts native APIs for UniFFI. Its sticky listing state is a
@@ -162,6 +168,7 @@ crates/file-peeker-server/src/
     ├── status.rs
     ├── list.rs
     ├── read.rs
+    ├── write.rs
     └── walk.rs
 ```
 
@@ -170,7 +177,7 @@ crates/file-peeker-server/src/
   shutdown and the `serve` lifecycle.
 - `ops/mod.rs` is the tonic service adapter and keeps trivial delegation, such
   as path resolution, inline.
-- `ops/list.rs`, `ops/read.rs`, and `ops/walk.rs` own behavior-heavy streaming
+- `ops/list.rs`, `ops/read.rs`, `ops/write.rs`, and `ops/walk.rs` own behavior-heavy streaming
   conversion and batching; `ops/entry.rs` shares listing-entry conversion.
 - `ops/status.rs` owns the status-to-gRPC error mapping shared by server
   operations.
@@ -189,13 +196,16 @@ crates/file-peeker-tui/src/
 ├── browser_context.rs
 └── app/
     ├── mod.rs
+    ├── session.rs
     └── view.rs
 ```
 
 - `main.rs` retains CLI parsing, terminal setup/restore, the event loop and
   direct key-to-command mapping.
-- `app/mod.rs` owns `App`, application lifecycle, context routing and commands
-  acting on the active context.
+- `app/mod.rs` owns `App`, ordered Session and tab records, lifecycle event/task
+  routing, explicit UI modes, and application commands.
+- `app/session.rs` narrowly owns TUI Session identity, derived labels, target
+  presentation, and Starting/Ready/Failed/Closing state.
 - `app/view.rs` renders application state without owning async tasks or mutating
   browser state.
 - `browser_context.rs` is the deep browsing module: selected listing source,
@@ -256,8 +266,8 @@ are actually shared.
 
 ### TUI growth
 
-- Add `app/input.rs` and an `Action` type only when input gains modes,
-  configurable bindings or a command palette.
+- Keep the current pure mode-aware key mapping in `main.rs`; add
+  `app/input.rs` only if configurable bindings or a command palette justify it.
 - Add a `locations/` or sidebar domain only when it owns state and actions, not
   merely because a second panel is rendered.
 - Keep `BrowserContext` cohesive until recursive traversal, search or another

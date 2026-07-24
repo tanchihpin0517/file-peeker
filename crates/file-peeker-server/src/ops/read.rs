@@ -1,10 +1,9 @@
+use file_peeker_server::protocol::FILE_DATA_CHUNK_MAX_BYTES;
 use file_peeker_server::protocol::v1::ReadChunk;
 use futures::{StreamExt as _, stream, stream::BoxStream};
 use tonic::Status;
 
 use super::status::fs_status;
-
-const GRPC_READ_CHUNK_MAX_BYTES: usize = 64 * 1024;
 
 pub(super) fn read_chunks(
     stream: file_peeker_core::ReadStream,
@@ -20,7 +19,7 @@ pub(super) fn read_chunks(
             },
         };
         debug_assert!(!bytes.is_empty());
-        let chunk = bytes.split_to(bytes.len().min(GRPC_READ_CHUNK_MAX_BYTES));
+        let chunk = bytes.split_to(bytes.len().min(FILE_DATA_CHUNK_MAX_BYTES));
         let pending = if bytes.is_empty() { None } else { Some(bytes) };
         Some((
             Ok(ReadChunk {
@@ -38,12 +37,12 @@ mod tests {
     use futures::{StreamExt as _, TryStreamExt as _, stream};
     use tonic::Code;
 
-    use super::{GRPC_READ_CHUNK_MAX_BYTES, read_chunks};
+    use super::{FILE_DATA_CHUNK_MAX_BYTES, read_chunks};
 
     #[tokio::test]
     async fn splits_arbitrary_core_chunks_at_the_grpc_limit() {
         let small = b"prefix".to_vec();
-        let large = vec![0x5a; GRPC_READ_CHUNK_MAX_BYTES * 2 + 17];
+        let large = vec![0x5a; FILE_DATA_CHUNK_MAX_BYTES * 2 + 17];
         let expected = [small.as_slice(), large.as_slice()].concat();
         let stream: file_peeker_core::ReadStream =
             stream::iter([Ok(small.into()), Ok(large.into())]).boxed();
@@ -52,7 +51,7 @@ mod tests {
 
         assert!(
             chunks.iter().all(
-                |chunk| !chunk.data.is_empty() && chunk.data.len() <= GRPC_READ_CHUNK_MAX_BYTES
+                |chunk| !chunk.data.is_empty() && chunk.data.len() <= FILE_DATA_CHUNK_MAX_BYTES
             )
         );
         assert_eq!(

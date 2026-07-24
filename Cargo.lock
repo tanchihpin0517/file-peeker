@@ -687,6 +687,7 @@ dependencies = [
 name = "file-peeker-server"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "file-peeker-core",
  "futures",
@@ -715,6 +716,7 @@ dependencies = [
  "file-peeker-client",
  "futures",
  "ratatui",
+ "tempfile",
  "tokio",
  "uuid",
 ]

@@ -5,18 +5,19 @@ mod list;
 mod read;
 mod status;
 mod walk;
+mod write;
 
 use file_peeker_core::FsService;
 use file_peeker_server::protocol::v1::{
     ListBatch, ListRequest, ReadChunk, ReadRequest, ResolvePathRequest, ResolvePathResponse,
-    WalkBatch, WalkRequest, file_peeker_server::FilePeeker,
+    WalkBatch, WalkRequest, WriteFrame, WriteResponse, file_peeker_server::FilePeeker,
 };
 use futures::stream::BoxStream;
 use tonic::{Request, Response, Status};
 
 use self::{list::list_batches, read::read_chunks, status::fs_status, walk::walk_batches};
 
-pub(crate) const GRPC_BATCH_MAX_BYTES: usize = 1024 * 1024;
+pub(crate) const GRPC_BATCH_MAX_BYTES: usize = file_peeker_server::protocol::GRPC_MESSAGE_MAX_BYTES;
 pub(crate) const GRPC_BATCH_MAX_ENTRIES: usize = 1024;
 
 #[derive(Clone, Debug)]
@@ -80,5 +81,12 @@ impl FilePeeker for FilePeekerService {
             .await
             .map_err(|error| fs_status(&error))?;
         Ok(Response::new(walk_batches(stream)))
+    }
+
+    async fn write(
+        &self,
+        request: Request<tonic::Streaming<WriteFrame>>,
+    ) -> Result<Response<WriteResponse>, Status> {
+        write::write_file(&self.fs, request).await
     }
 }

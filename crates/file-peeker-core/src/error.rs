@@ -8,6 +8,7 @@ const SERVICE_CANCELLED_MESSAGE: &str = "filesystem service is cancelled";
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FsErrorKind {
     InvalidArgument,
+    AlreadyExists,
     NotFound,
     PermissionDenied,
     NotDirectory,
@@ -45,8 +46,9 @@ impl FsError {
     }
 
     #[must_use]
-    pub(crate) fn from_io(error: &io::Error) -> Self {
+    pub fn from_io(error: &io::Error) -> Self {
         let kind = match error.kind() {
+            io::ErrorKind::AlreadyExists => FsErrorKind::AlreadyExists,
             io::ErrorKind::NotFound => FsErrorKind::NotFound,
             io::ErrorKind::PermissionDenied => FsErrorKind::PermissionDenied,
             io::ErrorKind::NotADirectory => FsErrorKind::NotDirectory,

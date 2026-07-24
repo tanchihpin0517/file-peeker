@@ -35,7 +35,9 @@ pub(crate) async fn serve() -> Result<(), ServerError> {
     let fs = FsService::new();
     let service = ops::FilePeekerService::new(fs.clone());
     let file_peeker = tonic::service::interceptor::InterceptedService::new(
-        FilePeekerServer::new(service).max_encoding_message_size(ops::GRPC_BATCH_MAX_BYTES),
+        FilePeekerServer::new(service)
+            .max_encoding_message_size(ops::GRPC_BATCH_MAX_BYTES)
+            .max_decoding_message_size(ops::GRPC_BATCH_MAX_BYTES),
         AuthInterceptor::new(Arc::clone(&token)),
     );
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -163,11 +165,12 @@ mod tests {
     use file_peeker_server::protocol::{
         FILE_PEEKER_SERVICE_NAME,
         v1::{
-            ListRequest, ReadRequest, ResolvePathRequest, WalkRequest,
-            file_peeker_client::FilePeekerClient, file_peeker_server::FilePeekerServer,
+            ListRequest, ReadRequest, ResolvePathRequest, WalkRequest, WriteCommit, WriteConflict,
+            WriteFrame, WriteHeader, file_peeker_client::FilePeekerClient,
+            file_peeker_server::FilePeekerServer, write_frame,
         },
     };
-    use futures::TryStreamExt;
+    use futures::{TryStreamExt, stream};
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
     use tokio_util::sync::CancellationToken;
@@ -299,6 +302,7 @@ mod tests {
 
         assert_walk_rpc(&mut client, fixture.path()).await;
         assert_read_rpc(&mut client, fixture.path()).await;
+        assert_write_rpc(&mut client, fixture.path()).await;
 
         cancellation_token.cancel();
         fs.cancel();
@@ -357,6 +361,53 @@ mod tests {
             .await
             .expect_err("directory read should fail before streaming");
         assert_eq!(error.code(), Code::FailedPrecondition);
+    }
+
+    async fn assert_write_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path) {
+        let frames = stream::iter([
+            WriteFrame {
+                payload: Some(write_frame::Payload::Header(WriteHeader {
+                    directory: fixture.to_string_lossy().into_owned(),
+                    name: "written.bin".into(),
+                    conflict: WriteConflict::FailIfExists as i32,
+                })),
+            },
+            WriteFrame {
+                payload: Some(write_frame::Payload::Data(b"streamed ".to_vec())),
+            },
+            WriteFrame {
+                payload: Some(write_frame::Payload::Data(b"write".to_vec())),
+            },
+            WriteFrame {
+                payload: Some(write_frame::Payload::Commit(WriteCommit {})),
+            },
+        ]);
+        let response = client
+            .write(authenticated(frames))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.bytes_written, 14);
+        assert_eq!(
+            tokio::fs::read(fixture.join("written.bin")).await.unwrap(),
+            b"streamed write"
+        );
+
+        let incomplete = stream::iter([
+            WriteFrame {
+                payload: Some(write_frame::Payload::Header(WriteHeader {
+                    directory: fixture.to_string_lossy().into_owned(),
+                    name: "incomplete.bin".into(),
+                    conflict: WriteConflict::FailIfExists as i32,
+                })),
+            },
+            WriteFrame {
+                payload: Some(write_frame::Payload::Data(b"prefix".to_vec())),
+            },
+        ]);
+        let error = client.write(authenticated(incomplete)).await.unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert!(!fixture.join("incomplete.bin").exists());
     }
 
     fn authenticated<T>(message: T) -> Request<T> {

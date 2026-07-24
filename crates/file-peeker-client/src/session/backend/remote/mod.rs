@@ -4,12 +4,15 @@ mod list_dir;
 mod read_file;
 mod resolve_path;
 mod walk_dir;
+mod write_file;
 
 use std::io;
 
 use async_trait::async_trait;
 
-use super::{ReadStream, SessionBackend, connection::RemoteConnection};
+use super::{
+    BackendWriteConflict, ReadStream, SessionBackend, WriteFuture, connection::RemoteConnection,
+};
 use crate::{EntryStream, WalkStream};
 
 #[derive(Debug)]
@@ -41,6 +44,16 @@ impl SessionBackend for RemoteBackend {
 
     async fn read_file(&self, path: &str) -> io::Result<ReadStream> {
         read_file::read_file(&self.connection, path).await
+    }
+
+    fn write_file(
+        &self,
+        directory: String,
+        name: String,
+        conflict: BackendWriteConflict,
+        source: ReadStream,
+    ) -> WriteFuture {
+        write_file::write_file(&self.connection, directory, name, conflict, source)
     }
 
     async fn close(self: Box<Self>) -> io::Result<()> {

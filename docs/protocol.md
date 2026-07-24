@@ -46,6 +46,7 @@ rpc ResolvePath(ResolvePathRequest) returns (ResolvePathResponse);
 rpc List(ListRequest) returns (stream ListBatch);
 rpc Walk(WalkRequest) returns (stream WalkBatch);
 rpc Read(ReadRequest) returns (stream ReadChunk);
+rpc Write(stream WriteFrame) returns (WriteResponse);
 ```
 
 `ResolvePath` expands `~` and environment variables in the server environment,
@@ -94,11 +95,28 @@ splitting core items of any size; the core interface itself has no maximum chunk
 size. A successful empty `ReadChunk` violates the protocol and is exposed by the
 Rust client as terminal invalid data.
 
+`Write` is client-streaming and authenticated like every other File Peeker RPC.
+Its first frame is exactly one header containing destination directory,
+single-component name, and `FAIL_IF_EXISTS` or `REPLACE`. Zero or more
+non-empty data frames of at most 64 KiB follow. Exactly one commit frame must
+then be followed immediately by end-of-stream. Header plus commit writes a
+valid empty file.
+
+Missing payloads, invalid conflict values, misplaced or duplicate headers,
+empty or oversized data, frames after commit, and EOF without commit return
+`InvalidArgument`. A client source error ends the request without commit; the
+server removes its partial file instead of publishing the prefix. The server
+returns the absolute selected-host path and byte count only after atomic
+publication. Both request decoding and response encoding enforce the 1 MiB
+message limit. Dropping or cancelling either side cancels the write and cleans
+up incomplete data.
+
 ## Status mapping
 
 | Filesystem result | gRPC status |
 | --- | --- |
 | Missing path | `NotFound` |
+| Existing destination under fail-if-exists | `AlreadyExists` |
 | Permission failure | `PermissionDenied` |
 | Non-directory list or walk target | `FailedPrecondition` |
 | Non-file read target | `FailedPrecondition` |
