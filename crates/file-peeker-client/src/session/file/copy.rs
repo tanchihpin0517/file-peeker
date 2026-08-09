@@ -4,7 +4,6 @@ use super::with_context;
 use crate::session::{
     Session,
     backend::{BackendWriteConflict, BackendWriteResult},
-    session_closed,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,8 +34,7 @@ impl Session {
         conflict: CopyConflict,
     ) -> io::Result<CopyResult> {
         let stream = {
-            let backend = source.backend.read().await;
-            let backend = backend.as_ref().ok_or_else(session_closed)?;
+            let backend = source.backend().await?;
             let resolved_path = backend.resolve_path(source_path).await.map_err(|error| {
                 with_context(
                     &error,
@@ -52,8 +50,7 @@ impl Session {
         };
 
         let write = {
-            let backend = self.backend.read().await;
-            let backend = backend.as_ref().ok_or_else(session_closed)?;
+            let backend = self.backend().await?;
             backend.write_file(
                 destination_directory.to_owned(),
                 destination_name.to_owned(),

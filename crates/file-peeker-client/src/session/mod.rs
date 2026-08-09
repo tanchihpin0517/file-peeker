@@ -2,7 +2,7 @@ use std::{io, sync::Arc};
 
 use file_peeker_core::FsService;
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 use self::{
     backend::{RemoteBackend, SessionBackend},
@@ -80,6 +80,16 @@ impl Session {
             backend: RwLock::new(Some(backend)),
             file_service: FileService::default(),
         }))
+    }
+
+    /// Borrows the open backend, or fails when this session is closed.
+    ///
+    /// The returned guard holds the backend read lock, so callers must drop it
+    /// before an owned stream is handed back to a caller. Session shutdown then
+    /// cancels in-flight work instead of waiting on it.
+    async fn backend(&self) -> io::Result<RwLockReadGuard<'_, dyn SessionBackend>> {
+        RwLockReadGuard::try_map(self.backend.read().await, Option::as_deref)
+            .map_err(|_| session_closed())
     }
 
     /// Gracefully shuts down this session. Repeated calls succeed.

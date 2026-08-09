@@ -2,7 +2,7 @@ use std::io;
 
 use futures::stream::BoxStream;
 
-use crate::session::{Session, session_closed};
+use crate::session::Session;
 
 pub type WalkEntry = file_peeker_core::WalkEntry;
 pub type WalkStream = BoxStream<'static, io::Result<WalkEntry>>;
@@ -18,12 +18,7 @@ impl Session {
     /// Returns an I/O error when the Session is closed or the selected-host
     /// traversal cannot be started. Later errors are terminal stream items.
     pub async fn op_walk_dir(&self, path: &str) -> io::Result<WalkStream> {
-        let backend = self.backend.read().await;
-        backend
-            .as_ref()
-            .ok_or_else(session_closed)?
-            .walk_dir(path)
-            .await
+        self.backend().await?.walk_dir(path).await
     }
 }
 

@@ -1,7 +1,7 @@
 use std::io;
 
 use super::with_context;
-use crate::session::{Session, session_closed};
+use crate::session::Session;
 
 impl Session {
     /// Opens a regular file from the selected host with the client operating
@@ -17,8 +17,7 @@ impl Session {
     /// operating system rejects the open request.
     pub async fn op_open_file(&self, path: &str) -> io::Result<()> {
         let (resolved_path, stream) = {
-            let backend = self.backend.read().await;
-            let backend = backend.as_ref().ok_or_else(session_closed)?;
+            let backend = self.backend().await?;
             let resolved_path = backend.resolve_path(path).await.map_err(|error| {
                 with_context(&error, format!("cannot resolve file path `{path}`"))
             })?;
