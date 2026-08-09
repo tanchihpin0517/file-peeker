@@ -1,8 +1,8 @@
 # File Peeker v1 Architecture
 
 File Peeker is a read-only browser whose filesystem behavior lives in a reusable
-Rust core. A shared client exposes the same typed asynchronous API to Ratatui
-and to SwiftUI through UniFFI.
+Rust core. A shared client exposes one typed asynchronous API to the Ratatui
+frontend and to the command-line interface.
 
 See [Code Structure](code-structure.md) for the current module plan, operation
 placement rules, and the expected structure for future features.
@@ -22,7 +22,7 @@ placement rules, and the expected structure for future features.
 ```text
 User -> Ratatui ─┐                  ┌-> native core -> client-host filesystem
                  ├-> Rust client --┤
-User -> SwiftUI ─┘                  └-> SSH/gRPC -> server -> remote core -> remote host filesystem
+User -> CLI     ─┘                  └-> SSH/gRPC -> server -> remote core -> remote host filesystem
 ```
 
 Both paths use the same core filesystem implementation. “Local” is relative to
@@ -35,11 +35,10 @@ virtual filesystem.
 
 `file-peeker-core` owns absolute lexical path resolution, directory enumeration,
 entry classification, backpressure, cancellable file reading, and filesystem
-errors. It has no protobuf or UniFFI dependency.
-Both backends use its `DirectoryEntry` and `EntryKind` value types. The client
-exposes those types to Swift with UniFFI remote-type metadata instead of
-defining client-owned copies. Each core instance calls the native filesystem
-APIs of its own host.
+errors. It has no protobuf dependency.
+Both backends use its `DirectoryEntry` and `EntryKind` value types, which the
+client re-exports instead of defining client-owned copies. Each core instance
+calls the native filesystem APIs of its own host.
 
 `Client` strongly retains its Sessions by UUID. A local Session owns an
 in-process core service and starts no executable or network connection. A
@@ -49,8 +48,10 @@ open a replacement SOCKS stream when its channel reconnects.
 
 Core `FsService` executes host-local filesystem primitives on the machine that
 owns that core instance. The Rust client obtains a unified selected-host
-interface through its private async `SessionBackend` trait. `Session` delegates
-the same `resolve_path`, `list_dir`, `walk_dir`, `read_file`, and `close`
+interface through its private async `SessionBackend` trait. `Session` borrows
+the open backend through one guarded accessor that yields the closed-session
+error when the slot is empty, then delegates the same `resolve_path`,
+`list_dir`, `walk_dir`, `read_file`, and `close`
 primitives through that trait, regardless of its target. `read_file` is not exposed as a
 caller-facing native read operation; it supports the Session open-file
 workflow. `FsService` implements the local backend with native core calls;
@@ -69,8 +70,7 @@ client `FileService`. `FileService` never accesses a backend. It uses the
 resolved path directly for local Sessions or atomically stages the owned stream
 for remote Sessions, then invokes the client operating-system opener. Releasing
 the lock before entering `FileService` lets Session shutdown cancel an active
-remote stream without waiting for the whole copy. UniFFI adapters remain
-separate from those native workflows under `session/ffi`.
+remote stream without waiting for the whole copy.
 
 ```text
 Session::op_open_file
@@ -168,7 +168,6 @@ The UI-facing listing flow is:
 
 ```text
 Session.op_resolve_path(path) -> absolute lexical selected-host path
-Session.op_resolve_path_uniffi(path) -> UniFFI error-mapping adapter
 Session.op_list_dir(path) -> EntryStream
 EntryStream.try_next() -> Some(entry)
 EntryStream.try_next() -> Some(entry)
@@ -181,11 +180,12 @@ entries already returned to the caller.
 
 ## UI display ownership
 
-SwiftUI and the TUI consume the same Session API but own their display and task
-state independently. Both append entries in selected-host stream order, retain
-partial results after a terminal error, and keep the Session alive after an
-individual listing completes.
+The TUI owns its display and task state independently of the client. It appends
+entries in selected-host stream order, retains partial results after a terminal
+error, and keeps the Session alive after an individual listing completes. The
+client deliberately owns no browsing state, so a second frontend would own its
+own tree, selection, and expansion state.
 
-See [Client and UI State Ownership](state-ownership.md) for the cross-frontend
-ownership matrix and [TUI Implementation](tui.md) for concrete event routing,
-navigation, refresh and shutdown behavior.
+See [Client and UI State Ownership](state-ownership.md) for the ownership matrix
+and [TUI Implementation](tui.md) for concrete event routing, navigation, refresh
+and shutdown behavior.

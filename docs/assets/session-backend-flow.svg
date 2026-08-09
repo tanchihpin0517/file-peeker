@@ -47,7 +47,7 @@
   <path class="edge" d="M 450 110 V 145"/>
   <path class="edge" d="M 450 235 V 270"/>
   <rect class="node" x="330" y="30" width="240" height="80" rx="12"/>
-  <text x="450" y="63">Rust / Swift / TUI</text>
+  <text x="450" y="63">Rust / CLI / TUI</text>
   <text class="secondary" x="450" y="88">caller</text>
 
   <rect class="node" x="330" y="145" width="240" height="90" rx="12"/>

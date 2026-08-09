@@ -8,8 +8,7 @@ host.
 
 `Session::op_open_file(path)` resolves and validates a regular file on the
 selected host, prepares a client-host path, and asks the client operating system
-to open it with the default application. Its UniFFI equivalent is
-`opOpenFileUniffi`.
+to open it with the default application.
 
 The production system opener currently supports macOS only. On other platforms,
 validation or remote staging may complete, but the final open request returns an

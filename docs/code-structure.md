@@ -21,19 +21,19 @@ failure policy and resource lifetime.
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| `file-peeker-core` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Session selection, SSH, gRPC, UniFFI, UI behavior |
+| `file-peeker-core` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Session selection, SSH, gRPC, UI behavior |
 | `SessionBackend` | Primitive capabilities against the Session's selected host | Multi-step user workflows or operating-system UI actions |
 | `Session` | Public, target-independent workflow entry points, backend lock/lifecycle, and selected-host/client-host phase ordering | Staging mechanics, system-command details, or protobuf |
 | Client `FileService` | Client-host file preparation and operating-system workflows after selected-host data is acquired | Backend access, selected-host primitives, transport, or Session lifecycle |
 | Remote backend modules | One gRPC request/response adapter per backend capability | Public workflow policy |
 | Server `ops` | RPC validation, protobuf conversion, transport batching and delegation to core | Client workflows and UI state |
-| `session/ffi` | UniFFI-compatible wrappers and error/state adaptation | Native Session behavior |
 | TUI | Application state, input routing, rendering and task ownership | Filesystem and transport semantics |
+| `test_support` | Scripted Session fixtures behind the `test-support` feature | Production behavior; it is never enabled in release builds |
 
 The main boundary is:
 
 ```text
-UI / FFI
+UI
    |
    v
 Session workflow
@@ -117,9 +117,7 @@ crates/file-peeker-client/src/session/
 │       ├── read_file.rs
 │       ├── write_file.rs
 │       └── walk_dir.rs
-└── ffi/
-    ├── mod.rs
-    └── listing.rs
+└── test_support.rs
 ```
 
 - `session/mod.rs` owns Session construction, lifecycle and the private backend
@@ -144,9 +142,9 @@ crates/file-peeker-client/src/session/
   client-streaming request framing and response validation.
 - `backend/connection/` owns remote connection and server-process lifecycle,
   not filesystem operations.
-- `ffi/` adapts native APIs for UniFFI. Its sticky listing state is a
-  foreign-language boundary concern and should not leak back into the native
-  stream.
+- `test_support.rs` provides scripted `Session` fixtures for other crates. It is
+  compiled only under the `test-support` feature, which consumers enable from
+  `[dev-dependencies]`.
 
 `read_file` remains a private backend primitive rather than a caller-facing
 native read operation. The Session open-file workflow consumes it directly:
@@ -231,10 +229,10 @@ Before adding a file, identify the operation's semantic owner:
    `FileService`.
 6. Put protobuf conversion and wire batching in the remote adapter and server
    `ops`.
-7. Add an FFI or UI adapter only when that boundary has a real consumer.
+7. Add a UI adapter only when that boundary has a real consumer.
 
-A public Session workflow does not require an identically named core, backend,
-RPC and FFI operation. Layers should mirror semantics only where the semantics
+A public Session workflow does not require an identically named core, backend
+and RPC operation. Layers should mirror semantics only where the semantics
 are actually shared.
 
 ### Growth rules
@@ -251,7 +249,8 @@ are actually shared.
   must be substituted in tests.
 - Keep streaming pull-based and preserve partial results followed by a terminal
   error unless a feature explicitly requires different semantics.
-- Avoid adding FFI and UI surface area until a concrete consumer needs it.
+- Avoid adding UI surface area until a concrete consumer needs it.
+- Prefer a `test-support` fixture over a trait introduced only to be faked.
 
 ### Server growth
 
@@ -290,7 +289,7 @@ are actually shared.
 7. Place client-host file actions behind `FileService` only after Session has
    released its backend lock; selected-host primitives still follow the
    core/backend placement rules.
-8. Add FFI and UI adapters only for real consumers.
+8. Add UI adapters only for real consumers.
 9. Keep tests beside the layer-specific invariant they verify.
 10. Update this document when the new feature changes a responsibility boundary.
 

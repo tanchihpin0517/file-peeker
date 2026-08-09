@@ -1,58 +1,55 @@
 # File Peeker API
 
-The public application API is the Rust `file-peeker-client` crate, exported to
-Swift through UniFFI. Both APIs expose directory listings one entry at a time.
+The public application API is the Rust `file-peeker-client` crate. It exposes
+directory listings one entry at a time.
 
 ## Public interface
 
 The table is a caller-oriented inventory rather than a copy of Rust source.
 Rustdoc remains authoritative for exact signatures.
 
-| Type | Method | Availability | Result |
-| --- | --- | --- | --- |
-| `Client` | `new` | Rust and Swift | Strongly referenced `Client` |
-| `Client` | `start_session` | Rust and Swift | Retained Session UUID |
-| `Client` | `get_session` | Rust and Swift | Retained `Session`, when found |
-| `Client` | `close_session` | Rust and Swift | Removes and closes a retained Session |
-| `Session` | `id` | Rust and Swift | Immutable Session UUID |
-| `Session` | `target` | Rust and Swift | Immutable `SessionTarget` |
-| `Session` | `op_resolve_path` | Rust | Absolute lexical selected-host path |
-| `Session` | `op_resolve_path_uniffi` | Swift adapter | Absolute lexical selected-host path |
-| `Session` | `op_list_dir` | Rust | Native `EntryStream` |
-| `Session` | `op_list_dir_uniffi` | Swift adapter | `Listing` object |
-| `Session` | `op_walk_dir` | Rust only | Native `WalkStream` |
-| `Session` | `op_open_file` | Rust | Opens a selected-host regular file |
-| `Session` | `op_open_file_uniffi` | Swift adapter | Opens a selected-host regular file |
-| `Session` | `op_copy_file_from` | Rust only | Streams a file from another Session |
-| `Session` | `close` | Rust | Idempotent Session shutdown |
-| `Session` | `close_uniffi` | Swift adapter | Idempotent Session shutdown |
-| `Listing` | `next_entry` | Rust and Swift | Next `DirectoryEntry`, completion, or sticky error |
+| Type | Method | Result |
+| --- | --- | --- |
+| `Client` | `new` | Strongly referenced `Client` |
+| `Client` | `start_session` | Started and retained `Session` |
+| `Client` | `close_session` | Removes and closes one retained Session |
+| `Client` | `close_all` | Removes and closes every retained Session |
+| `Session` | `id` | Immutable Session UUID |
+| `Session` | `target` | Immutable `SessionTarget` |
+| `Session` | `op_resolve_path` | Absolute lexical selected-host path |
+| `Session` | `op_list_dir` | Native `EntryStream` |
+| `Session` | `op_walk_dir` | Native `WalkStream` |
+| `Session` | `op_open_file` | Opens a selected-host regular file |
+| `Session` | `op_copy_file_from` | Streams a file from another Session |
+| `Session` | `close` | Idempotent Session shutdown |
 
 The client re-exports core `EntryKind`, `DirectoryEntry`, and `WalkEntry` types.
-`EntryStream` and `WalkStream` are native boxed streams. UniFFI exposes
-`SessionTarget`, `SessionStartError`, `SessionShutdownError`,
-`ClientCloseSessionError`, `ResolvePathError`, `ListError`, and `OpenFileError`
-at the corresponding Swift boundary.
+`EntryStream` and `WalkStream` are native boxed streams. Operations report
+`std::io::Error`; only the Session lifecycle uses typed errors, namely
+`SessionStartError` and `SessionShutdownError`.
 
 `Client.start_session` is asynchronous. A local target constructs an in-process
 filesystem service without installing or starting a server. A remote target
 provisions and starts the matching server over SSH, then authenticates a gRPC
 health check. In both cases the core uses native filesystem APIs on its own
 host: the client host for a local Session and the server host for a remote
-Session. The Client strongly retains the Session, which owns either the native
-service or the remote process and SSH transport. `Client.close_session` removes
-and gracefully closes the retained Session. Direct Rust
-`Session.close()` and Swift `Session.closeUniffi()` remain idempotent but do not
-unregister it. Dropping Client releases all retained sessions; unclosed remote
+Session. The Client strongly retains the returned Session, which owns either the
+native service or the remote process and SSH transport, so a caller that drops
+its handle without closing still leaves shutdown to the Client.
+`Client.close_session` removes and gracefully closes one retained Session, and
+`Client.close_all` drains the registry. Both succeed for unknown or already
+closed IDs. Direct `Session.close()` remains idempotent but does not unregister
+the Session. Dropping Client releases all retained sessions; unclosed remote
 connections use their non-blocking fallback cleanup.
 
 The Rust client uses its private `SessionBackend` trait as the unified primitive
-interface for both targets. `Session` invokes the same `resolve_path`,
-`list_dir`, `walk_dir`, `read_file`, `write_file`, and `close` methods in either mode. Host-local
-filesystem behavior is implemented by core `FsService`; selected-host
-dispatch uses `SessionBackend`, with native execution locally and authenticated
-gRPC remotely. Public callers therefore use one `Session` API without selecting
-a transport-specific operation surface.
+interface for both targets. `Session` borrows the open backend through one
+guarded accessor and invokes the same `resolve_path`, `list_dir`, `walk_dir`,
+`read_file`, `write_file`, and `close` methods in either mode. Host-local
+filesystem behavior is implemented by core `FsService`; selected-host dispatch
+uses `SessionBackend`, with native execution locally and authenticated gRPC
+remotely. Public callers therefore use one `Session` API without selecting a
+transport-specific operation surface.
 
 The private backend `read_file` operation supports `Session.op_open_file` but is
 not exposed as a caller-facing byte stream. Both implementations return a demand-driven
@@ -63,79 +60,50 @@ core errors into `io::Error`; the remote adapter maps transport-bounded
 failures occur before a stream is returned, while later filesystem, protocol, or
 cancellation failures are one terminal stream item.
 
-`Session::op_copy_file_from` is a destination-oriented native Rust operation.
-It accepts a source Session/path, a destination directory and separate
-single-component filename, plus `CopyConflict::{FailIfExists, Replace}`. It
-returns `CopyResult` with the selected-host destination path and copied byte
-count. The source and destination backend locks are released before streaming
-starts. This API has no UniFFI or Swift surface. See
+`Session::op_copy_file_from` is a destination-oriented operation. It accepts a
+source Session/path, a destination directory and separate single-component
+filename, plus `CopyConflict::{FailIfExists, Replace}`. It returns `CopyResult`
+with the selected-host destination path and copied byte count. The source and
+destination backend locks are released before streaming starts. See
 [Copy File](operations/copy-file.md) for its routing and atomicity contract.
 
 `Session.op_open_file` validates a regular file on the selected host. Local
 files are opened at their existing resolved path. Remote files are fully and
 atomically staged on the client host before the operating system is asked to
-open them. Its UniFFI equivalent is `opOpenFileUniffi`, which reports
-`OpenFileError`. The private client `FileService` implements the client-host
+open them. The private client `FileService` implements the client-host
 preparation and operating-system phase behind this Session API; it is not
 caller-facing, does not replace `FsService`, and never accesses
-`SessionBackend`. See [Open File](operations/open-file.md) for cache location,
-failure handling and retention.
+`SessionBackend`. Failures it reports carry the operation context, such as
+``cannot open file `/path`: ...``. See [Open File](operations/open-file.md) for
+cache location, failure handling and retention.
 
 `Session.op_resolve_path` expands `~` and environment variables using the
 selected host's environment, makes the result absolute, and lexically removes
 `.` and `..`. It does not require the target to exist or resolve symbolic links.
-Resolving an already resolved path returns the same path. The UniFFI adapter
-provides the same operation through `opResolvePathUniffi`.
+Resolving an already resolved path returns the same path.
 
-`Session.op_list_dir` is the native Rust API. Its `EntryStream` yields shared-core
-`DirectoryEntry` values in order. The remote server batches entries only for
-gRPC transport, and the remote client flattens those messages back into the same
-entry stream. The client does not define a second listing model. Dropping the
-stream cancels unfinished work.
+`Session.op_list_dir` yields shared-core `DirectoryEntry` values in order. The
+remote server batches entries only for gRPC transport, and the remote client
+flattens those messages back into the same entry stream. The client does not
+define a second listing model. Dropping the stream cancels unfinished work.
 
-`Session.op_list_dir_uniffi` wraps that native stream for Swift. Its async
-`nextEntry()` method returns one entry. Completion is idempotent, and
-terminal stream errors are repeated consistently.
-
-`Session.op_walk_dir` is a native Rust-only recursive traversal API. It returns
-a pull-based `WalkStream` in pre-order depth-first order without collecting or
-sorting the tree. The requested root is excluded, direct children have depth
-1, and each `WalkEntry` includes an opaque selected-host relative path plus its
+`Session.op_walk_dir` is a recursive traversal API. It returns a pull-based
+`WalkStream` in pre-order depth-first order without collecting or sorting the
+tree. The requested root is excluded, direct children have depth 1, and each
+`WalkEntry` includes an opaque selected-host relative path plus its
 final-component `DirectoryEntry`. Symlinks are emitted but never followed.
 Earlier entries remain valid when a descendant, cancellation, transport, or
 protocol error terminates the stream. Local walks execute in client core;
 remote walks execute once in server core through the streaming Walk RPC.
-`list_dir` remains the separate one-level operation. Walk has no UniFFI, Swift,
-or TUI surface.
+`list_dir` remains the separate one-level operation. Walk has no TUI surface.
 
-## Swift usage
+## Testing against a Session
 
-UniFFI exports `start_session` as `startSession` and the targets as `.local`
-and `.remote`:
-
-```swift
-let client = Client()
-let sessionID = try await client.startSession(
-    target: .remote(destination: "example.test")
-)
-guard let session = await client.getSession(id: sessionID) else {
-    fatalError("started session was not retained")
-}
-
-let localSessionID = try await client.startSession(target: .local)
-guard let localSession = await client.getSession(id: localSessionID) else {
-    fatalError("started session was not retained")
-}
-
-let listing = try await localSession.opListDirUniffi(path: "/tmp")
-while let entry = try await listing.nextEntry() {
-    print(entry.name)
-}
-
-try await client.closeSession(id: localSessionID)
-```
-
-The SwiftUI application starts a local Session when its browser appears,
-resolves `"~"` through `opResolvePathUniffi()` as Home, and consumes listing
-entries incrementally. Rows are display-only. The retained Session stays alive
-after listing completes and closes when the browser disappears.
+The `test-support` feature exposes fixtures for driving Session workflows
+without a real filesystem, remote host, or operating-system opener:
+`test_support::FakeBackend` replays scripted listings and records requests,
+`test_support::RecordingOpener` records open requests and replays scripted
+failures, and `Session::for_test` and `Session::closed_for_test` assemble a
+Session from them. Depend on the feature from `[dev-dependencies]` only. The
+workspace uses Cargo's v2 resolver, so it reaches test builds without being
+unified into release builds.

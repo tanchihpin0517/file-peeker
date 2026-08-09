@@ -40,9 +40,10 @@ Context, and activates it before terminal initialization. Without a path, App
 starts sessionless and opens Session Manager over the normal empty shell.
 
 Interactive Session startup first inserts a `Starting` row and spawns a tracked
-task. After `Client::start_session` succeeds, the task immediately sends a
-`SessionAllocated` event before awaiting `Client::get_session`; App adds that
-ID to its cleanup ledger. The row then becomes `Ready` or retains a visible
+task. `Client::start_session` returns the retained Session itself, which the
+task forwards in one `SessionReady` event; the Client owns the Session either
+way, so an aborted task cannot leak one and App keeps no separate cleanup
+ledger. The row then becomes `Ready` or retains a visible
 `Failed` error. The available states are deliberately `Starting`, `Ready`,
 `Failed`, and `Closing`; there is no heartbeat from which to claim connected
 or disconnected state.

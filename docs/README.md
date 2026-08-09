@@ -39,7 +39,7 @@ and link to that owner rather than duplicate implementation details.
 | [Code structure](code-structure.md) | Current module placement, growth rules and implemented placement examples |
 | [Session lifecycle](session-lifecycle.md) | Startup, reconnection, cancellation and shutdown |
 | [Remote protocol](protocol.md) | RPCs, protobuf shapes, wire limits and gRPC status mapping |
-| [Client API](api.md) | Caller-visible Rust and UniFFI surface |
+| [Client API](api.md) | Caller-visible Rust surface |
 | [Open file](operations/open-file.md) | Open-file workflow, staging, cache location, failure handling and retention |
 | [Copy file](operations/copy-file.md) | Session-to-Session routes, streaming, conflicts, atomic publication and cancellation |
 | [TUI implementation](tui.md) | TUI state, tasks, events, input and rendering behavior |

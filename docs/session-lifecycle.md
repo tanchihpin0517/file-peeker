@@ -42,8 +42,9 @@ are never automatically replayed or resumed.
 
 ## Shutdown
 
-`Client.close_session` removes the retained Session; native `Session.close` and
-UniFFI `Session.close_uniffi` are idempotent without unregistering it. Closing a
+`Client.close_session` removes the retained Session, and `Client.close_all`
+drains the registry; both succeed for unknown or already closed IDs.
+`Session.close` is idempotent without unregistering it. Closing a
 local Session cancels its core service and active listing, walk, file-read, and
 file-write streams. Closing a remote Session drops the channel and stdin lease.
 Server EOF cancels active listing, walk, read, and write operations and drives
@@ -58,8 +59,8 @@ dismisses a related overwrite prompt, and aborts and joins any transfer using
 the Session before running `Client.close_session` in a tracked task.
 The row is removed when close finishes. A close failure is shown as a persistent
 UI error rather than a retryable Session because the Client registry entry has
-already been consumed. Application shutdown drains allocated IDs and attempts
-all remaining closes even when one fails.
+already been consumed. Application shutdown calls `Client.close_all`, which
+attempts every remaining close even when one fails and reports the first error.
 
 The protobuf API has no custom Hello, Heartbeat, or Shutdown RPC. Authentication
 is sensitive `authorization: Bearer TOKEN` metadata on both FilePeeker and
