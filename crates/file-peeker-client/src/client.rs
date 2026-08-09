@@ -10,13 +10,13 @@ use uuid::Uuid;
 use crate::{Session, SessionShutdownError, SessionStartError, SessionTarget};
 
 /// Entry point and owner for independent File Peeker sessions.
-#[derive(Debug, Default, uniffi::Object)]
+#[derive(Debug, Default)]
 pub struct Client {
     sessions: RwLock<HashMap<String, Arc<Session>>>,
 }
 
 /// Failure to close a Client-owned Session.
-#[derive(Clone, Debug, Eq, Error, PartialEq, uniffi::Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ClientCloseSessionError {
     #[error("session not found: {id}")]
     NotFound { id: String },
@@ -36,9 +36,7 @@ fn new_session_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-#[uniffi::export(async_runtime = "tokio")]
 impl Client {
-    #[uniffi::constructor]
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())

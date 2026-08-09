@@ -5,9 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[lib]
-crate-type = ["rlib", "cdylib", "staticlib"]
-
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
@@ -27,7 +24,6 @@ tonic-health.workspace = true
 tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-uniffi = { workspace = true, features = ["tokio"] }
 uuid.workspace = true
 
 [dev-dependencies]

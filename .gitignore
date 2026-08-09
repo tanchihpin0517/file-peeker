@@ -1,9 +1,4 @@
 /target/
 /artifacts/
-/swift/Generated/
-/swift/Resources/
-/swift/*.xcodeproj/
-/swift/DerivedData/
-*.xcresult
 .DS_Store
 .plans/

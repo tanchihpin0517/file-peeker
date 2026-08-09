@@ -11,35 +11,34 @@ use self::{
 
 pub mod backend;
 pub(crate) mod directory;
-pub(crate) mod ffi;
 mod file;
 mod path;
 
 pub use file::copy::{CopyConflict, CopyResult};
 
 /// Backend target retained by a session.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionTarget {
     Local,
     Remote { destination: String },
 }
 
 /// Failure to start a session backend.
-#[derive(Clone, Debug, Eq, Error, PartialEq, uniffi::Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum SessionStartError {
     #[error("failed to start session backend: {message}")]
     Backend { message: String },
 }
 
 /// Failure to shut down a session backend.
-#[derive(Clone, Debug, Eq, Error, PartialEq, uniffi::Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum SessionShutdownError {
     #[error("failed to shut down session backend: {message}")]
     Backend { message: String },
 }
 
 /// An independent File Peeker session.
-#[derive(Debug, uniffi::Object)]
+#[derive(Debug)]
 pub struct Session {
     id: String,
     target: SessionTarget,
@@ -48,6 +47,18 @@ pub struct Session {
 }
 
 impl Session {
+    /// Returns this session's immutable UUID.
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    /// Returns the immutable target associated with this session.
+    #[must_use]
+    pub fn target(&self) -> SessionTarget {
+        self.target.clone()
+    }
+
     pub(crate) async fn start(
         id: String,
         target: SessionTarget,
@@ -170,14 +181,6 @@ mod tests {
 
         session.close().await.unwrap();
         session.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn close_uniffi_is_idempotent() {
-        let session = open_local_session("close-uniffi-id").await;
-
-        session.close_uniffi().await.unwrap();
-        session.close_uniffi().await.unwrap();
     }
 
     #[tokio::test]

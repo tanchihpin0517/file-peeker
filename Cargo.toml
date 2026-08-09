@@ -4,7 +4,6 @@ members = [
     "crates/file-peeker-core",
     "crates/file-peeker-server",
     "crates/file-peeker-tui",
-    "tools/uniffi-bindgen",
 ]
 resolver = "2"
 
@@ -52,7 +51,6 @@ tonic-prost = "0.14.6"
 tokio-stream = { version = "0.1.17", features = ["net"] }
 tokio-util = { version = "0.7.16", features = ["io"] }
 tower = "0.5.2"
-uniffi = "=0.31.2"
 uuid = { version = "1.24.0", features = ["v4"] }
 
 [workspace.lints.rust]
