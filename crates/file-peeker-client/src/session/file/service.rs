@@ -56,9 +56,9 @@ impl Default for FileService {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl FileService {
-    pub(super) fn for_test(cache_root: PathBuf, opener: Arc<dyn FileOpener>) -> Self {
+    pub(crate) fn for_test(cache_root: PathBuf, opener: Arc<dyn FileOpener>) -> Self {
         Self {
             stager: FileStager::new(cache_root),
             opener,
@@ -74,10 +74,9 @@ mod tests {
     use futures::{StreamExt as _, stream};
 
     use super::FileService;
-    use crate::session::{
-        SessionTarget,
-        backend::ReadStream,
-        file::opener::{FailingOpener, RecordingOpener},
+    use crate::{
+        session::{SessionTarget, backend::ReadStream},
+        test_support::RecordingOpener,
     };
 
     fn chunks(items: Vec<io::Result<&'static [u8]>>) -> ReadStream {
@@ -87,7 +86,7 @@ mod tests {
     #[tokio::test]
     async fn local_files_are_opened_without_copying() {
         let cache = tempfile::tempdir().unwrap();
-        let opener = Arc::new(RecordingOpener::default());
+        let opener = Arc::new(RecordingOpener::new());
         let service = FileService::for_test(cache.path().to_path_buf(), opener.clone());
 
         service
@@ -107,7 +106,7 @@ mod tests {
     #[tokio::test]
     async fn completed_remote_files_survive_file_service_destruction() {
         let cache = tempfile::tempdir().unwrap();
-        let opener = Arc::new(RecordingOpener::default());
+        let opener = Arc::new(RecordingOpener::new());
         let service = FileService::for_test(cache.path().to_path_buf(), opener.clone());
 
         service
@@ -131,7 +130,7 @@ mod tests {
     #[tokio::test]
     async fn stream_failures_do_not_invoke_the_opener() {
         let cache = tempfile::tempdir().unwrap();
-        let opener = Arc::new(RecordingOpener::default());
+        let opener = Arc::new(RecordingOpener::new());
         let service = FileService::for_test(cache.path().to_path_buf(), opener.clone());
 
         let error = service
@@ -159,7 +158,11 @@ mod tests {
     #[tokio::test]
     async fn opener_failures_leave_completed_remote_files_staged() {
         let cache = tempfile::tempdir().unwrap();
-        let service = FileService::for_test(cache.path().to_path_buf(), Arc::new(FailingOpener));
+        let opener = Arc::new(RecordingOpener::with_results([Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "fixture opener denied the request",
+        ))]));
+        let service = FileService::for_test(cache.path().to_path_buf(), opener);
 
         let error = service
             .open(

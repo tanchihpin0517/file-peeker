@@ -11,7 +11,7 @@ use self::{
 
 pub mod backend;
 pub(crate) mod directory;
-mod file;
+pub(crate) mod file;
 mod path;
 
 pub use file::copy::{CopyConflict, CopyResult};
@@ -115,14 +115,48 @@ fn session_closed() -> io::Error {
     io::Error::new(io::ErrorKind::NotConnected, "session is closed")
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Session {
-    pub(crate) fn closed_for_test(id: impl Into<String>, target: SessionTarget) -> Arc<Self> {
+    /// Builds a Session over scripted fixtures instead of a real filesystem,
+    /// remote host, or operating-system opener.
+    ///
+    /// `cache_root` only matters for a `SessionTarget::Remote` open, which
+    /// stages the file before invoking the opener.
+    #[must_use]
+    pub fn for_test(
+        id: impl Into<String>,
+        target: SessionTarget,
+        backend: crate::test_support::FakeBackend,
+        cache_root: std::path::PathBuf,
+        opener: crate::test_support::RecordingOpener,
+    ) -> Arc<Self> {
+        Self::with_backend_for_test(id, target, Some(Box::new(backend)), cache_root, opener)
+    }
+
+    /// Builds a Session whose backend slot is already empty, as it is after a
+    /// completed close.
+    #[must_use]
+    pub fn closed_for_test(id: impl Into<String>, target: SessionTarget) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
             target,
             backend: RwLock::new(None),
             file_service: FileService::default(),
+        })
+    }
+
+    pub(crate) fn with_backend_for_test(
+        id: impl Into<String>,
+        target: SessionTarget,
+        backend: Option<Box<dyn SessionBackend>>,
+        cache_root: std::path::PathBuf,
+        opener: impl file::opener::FileOpener + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            id: id.into(),
+            target,
+            backend: RwLock::new(backend),
+            file_service: FileService::for_test(cache_root, Arc::new(opener)),
         })
     }
 }

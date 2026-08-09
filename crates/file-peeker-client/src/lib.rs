@@ -1,5 +1,7 @@
 mod client;
 pub mod session;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use client::Client;
 pub use session::directory::{DirectoryEntry, EntryKind, EntryStream};

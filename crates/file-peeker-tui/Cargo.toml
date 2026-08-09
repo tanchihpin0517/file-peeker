@@ -15,6 +15,7 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+file-peeker-client = { path = "../file-peeker-client", features = ["test-support"] }
 tempfile.workspace = true
 
 [[bin]]

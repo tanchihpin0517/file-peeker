@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fmt, io, path::Path, sync::Arc};
+use std::{collections::HashMap, fmt, path::Path, sync::Arc};
 
-use file_peeker_client::{DirectoryEntry, EntryKind, EntryStream, Session};
-use futures::{FutureExt as _, TryStreamExt as _, future::BoxFuture};
+use file_peeker_client::{DirectoryEntry, EntryKind, Session};
+use futures::TryStreamExt as _;
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
@@ -102,7 +102,7 @@ pub(crate) struct BrowserContext {
     active_open_request: Option<u64>,
     open_status: OpenStatus,
     open_task: Option<JoinHandle<()>>,
-    source: Arc<dyn BrowserSource>,
+    session: Arc<Session>,
     events: mpsc::Sender<BrowserContextEvent>,
 }
 
@@ -130,14 +130,6 @@ impl BrowserContext {
         root_path: String,
         events: mpsc::Sender<BrowserContextEvent>,
     ) -> Self {
-        Self::from_source(session, root_path, events)
-    }
-
-    fn from_source(
-        source: Arc<dyn BrowserSource>,
-        root_path: String,
-        events: mpsc::Sender<BrowserContextEvent>,
-    ) -> Self {
         let mut context = Self {
             id: BrowserContextId::new(),
             root_path,
@@ -154,7 +146,7 @@ impl BrowserContext {
             active_open_request: None,
             open_status: OpenStatus::Idle,
             open_task: None,
-            source,
+            session,
             events,
         };
         context.start_root_listing();
@@ -328,11 +320,11 @@ impl BrowserContext {
         let request_id = self.next_request_id();
         self.active_open_request = Some(request_id);
         self.open_status = OpenStatus::Opening(path.clone());
-        let source = Arc::clone(&self.source);
+        let session = Arc::clone(&self.session);
         let context_id = self.id;
         let events = self.events.clone();
         self.open_task = Some(tokio::spawn(run_open_file(
-            source, path, context_id, request_id, events,
+            session, path, context_id, request_id, events,
         )));
     }
 
@@ -386,13 +378,13 @@ impl BrowserContext {
         self.generation = self.generation.wrapping_add(1);
         self.rows.clear();
         self.status = ListingStatus::Loading;
-        let source = Arc::clone(&self.source);
+        let session = Arc::clone(&self.session);
         let root_path = self.root_path.clone();
         let context_id = self.id;
         let generation = self.generation;
         let events = self.events.clone();
         self.root_listing_task = Some(tokio::spawn(run_listing(
-            source,
+            session,
             root_path,
             context_id,
             generation,
@@ -412,7 +404,7 @@ impl BrowserContext {
         let request_id = self.next_request_id();
         let path = self.rows[index].path.clone();
         self.rows[index].expansion = ExpansionStatus::Loading { request_id };
-        let source = Arc::clone(&self.source);
+        let session = Arc::clone(&self.session);
         let context_id = self.id;
         let generation = self.generation;
         let target = ListingTarget::Directory {
@@ -421,7 +413,7 @@ impl BrowserContext {
         };
         let events = self.events.clone();
         let task = tokio::spawn(run_listing(
-            source, path, context_id, generation, target, events,
+            session, path, context_id, generation, target, events,
         ));
         self.directory_listing_tasks.insert(request_id, task);
     }
@@ -557,21 +549,6 @@ impl Drop for BrowserContext {
     }
 }
 
-trait BrowserSource: fmt::Debug + Send + Sync {
-    fn list_dir(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<EntryStream>>;
-    fn open_file(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<()>>;
-}
-
-impl BrowserSource for Session {
-    fn list_dir(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<EntryStream>> {
-        async move { self.op_list_dir(&path).await }.boxed()
-    }
-
-    fn open_file(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<()>> {
-        async move { self.op_open_file(&path).await }.boxed()
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct BrowserContextEvent {
     context_id: BrowserContextId,
@@ -615,14 +592,14 @@ enum ListingResult {
 }
 
 async fn run_listing(
-    source: Arc<dyn BrowserSource>,
+    session: Arc<Session>,
     path: String,
     context_id: BrowserContextId,
     generation: u64,
     target: ListingTarget,
     events: mpsc::Sender<BrowserContextEvent>,
 ) {
-    let result = match source.list_dir(path).await {
+    let result = match session.op_list_dir(&path).await {
         Ok(mut listing) => loop {
             match listing.try_next().await {
                 Ok(Some(entry)) => {
@@ -674,13 +651,13 @@ enum OpenResult {
 }
 
 async fn run_open_file(
-    source: Arc<dyn BrowserSource>,
+    session: Arc<Session>,
     path: String,
     context_id: BrowserContextId,
     request_id: u64,
     events: mpsc::Sender<BrowserContextEvent>,
 ) {
-    let result = match source.open_file(path.clone()).await {
+    let result = match session.op_open_file(&path).await {
         Ok(()) => OpenResult::Finished,
         Err(error) => OpenResult::Failed(error.to_string()),
     };
@@ -701,91 +678,64 @@ fn child_path(parent: &str, name: &str) -> String {
 }
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        io,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::{io, sync::Arc, time::Duration};
 
-    use file_peeker_client::{DirectoryEntry, EntryKind, EntryStream};
-    use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream};
+    use file_peeker_client::{
+        DirectoryEntry, EntryKind, EntryStream, Session, SessionTarget,
+        test_support::{FakeBackend, RecordingOpener},
+    };
+    use futures::{StreamExt as _, stream};
     use tokio::sync::mpsc;
 
-    use super::{
-        BrowserContext, BrowserContextEvent, BrowserSource, ExpansionStatus, ListingStatus,
-        OpenStatus,
-    };
+    use super::{BrowserContext, BrowserContextEvent, ExpansionStatus, ListingStatus, OpenStatus};
 
-    struct ScriptedBrowserSource {
-        listings: Mutex<VecDeque<io::Result<EntryStream>>>,
-        requested_paths: Mutex<Vec<String>>,
-        open_results: Mutex<VecDeque<io::Result<()>>>,
-        opened_paths: Mutex<Vec<String>>,
+    /// A local Session backed by scripted listings and a recording opener.
+    ///
+    /// Requests travel the real `Session` path, so a scripted opener failure
+    /// surfaces with the context `FileService` attaches in production.
+    struct ScriptedSession {
+        session: Arc<Session>,
+        backend: FakeBackend,
+        opener: RecordingOpener,
     }
 
-    impl std::fmt::Debug for ScriptedBrowserSource {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter
-                .debug_struct("ScriptedBrowserSource")
-                .finish_non_exhaustive()
-        }
-    }
-
-    impl ScriptedBrowserSource {
+    impl ScriptedSession {
         fn new(listings: impl IntoIterator<Item = io::Result<EntryStream>>) -> Arc<Self> {
-            Arc::new(Self {
-                listings: Mutex::new(listings.into_iter().collect()),
-                requested_paths: Mutex::new(Vec::new()),
-                open_results: Mutex::new(VecDeque::new()),
-                opened_paths: Mutex::new(Vec::new()),
-            })
+            Self::with_open_results(listings, [])
         }
 
         fn with_open_results(
             listings: impl IntoIterator<Item = io::Result<EntryStream>>,
             open_results: impl IntoIterator<Item = io::Result<()>>,
         ) -> Arc<Self> {
+            let backend = FakeBackend::builder().listings(listings).build();
+            let opener = RecordingOpener::with_results(open_results);
+            let session = Session::for_test(
+                "scripted",
+                // A local target opens the resolved path directly, so the
+                // staging cache root is never touched.
+                SessionTarget::Local,
+                backend.clone(),
+                std::env::temp_dir(),
+                opener.clone(),
+            );
             Arc::new(Self {
-                listings: Mutex::new(listings.into_iter().collect()),
-                requested_paths: Mutex::new(Vec::new()),
-                open_results: Mutex::new(open_results.into_iter().collect()),
-                opened_paths: Mutex::new(Vec::new()),
+                session,
+                backend,
+                opener,
             })
         }
 
         fn requested_paths(&self) -> Vec<String> {
-            self.requested_paths.lock().unwrap().clone()
+            self.backend.listed_paths()
         }
 
         fn opened_paths(&self) -> Vec<String> {
-            self.opened_paths.lock().unwrap().clone()
-        }
-    }
-
-    impl BrowserSource for ScriptedBrowserSource {
-        fn list_dir(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<EntryStream>> {
-            async move {
-                self.requested_paths.lock().unwrap().push(path);
-                self.listings
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or_else(|| Err(io::Error::other("no scripted listing")))
-            }
-            .boxed()
-        }
-
-        fn open_file(self: Arc<Self>, path: String) -> BoxFuture<'static, io::Result<()>> {
-            async move {
-                self.opened_paths.lock().unwrap().push(path);
-                self.open_results
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or(Ok(()))
-            }
-            .boxed()
+            self.opener
+                .paths()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect()
         }
     }
 
@@ -822,12 +772,12 @@ mod tests {
     }
 
     fn context(
-        source: Arc<ScriptedBrowserSource>,
+        source: &Arc<ScriptedSession>,
         capacity: usize,
     ) -> (BrowserContext, mpsc::Receiver<BrowserContextEvent>) {
         let (events, receiver) = mpsc::channel(capacity);
         (
-            BrowserContext::from_source(source, "/home".into(), events),
+            BrowserContext::new(Arc::clone(&source.session), "/home".into(), events),
             receiver,
         )
     }
@@ -842,8 +792,8 @@ mod tests {
 
     #[tokio::test]
     async fn creation_starts_and_completes_a_listing() {
-        let source = ScriptedBrowserSource::new([Ok(listing([Ok(entry("one"))]))]);
-        let (mut context, mut receiver) = context(source, 4);
+        let source = ScriptedSession::new([Ok(listing([Ok(entry("one"))]))]);
+        let (mut context, mut receiver) = context(&source, 4);
 
         assert_eq!(context.status(), &ListingStatus::Loading);
         apply_next(&mut context, &mut receiver).await;
@@ -856,10 +806,10 @@ mod tests {
 
     #[tokio::test]
     async fn half_page_scroll_moves_selection_and_viewport_and_clamps_at_boundaries() {
-        let source = ScriptedBrowserSource::new([Ok(listing(
+        let source = ScriptedSession::new([Ok(listing(
             (0..12).map(|index| Ok(entry(&format!("item-{index}")))),
         ))]);
-        let (mut context, mut receiver) = context(source, 16);
+        let (mut context, mut receiver) = context(&source, 16);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -891,11 +841,11 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_failure_preserves_partial_entries() {
-        let source = ScriptedBrowserSource::new([Ok(listing([
+        let source = ScriptedSession::new([Ok(listing([
             Ok(entry("kept")),
             Err(io::Error::other("failed")),
         ]))]);
-        let (mut context, mut receiver) = context(source, 4);
+        let (mut context, mut receiver) = context(&source, 4);
 
         apply_next(&mut context, &mut receiver).await;
         apply_next(&mut context, &mut receiver).await;
@@ -906,11 +856,11 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_clears_entries_and_rejects_queued_stale_results() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(entry("stale"))])),
             Ok(listing([Ok(entry("current"))])),
         ]);
-        let (mut context, mut receiver) = context(source, 8);
+        let (mut context, mut receiver) = context(&source, 8);
         let stale = receiver.recv().await.expect("stale batch");
 
         context.refresh();
@@ -930,11 +880,11 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_preserves_then_clamps_selection() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(entry("a")), Ok(entry("b")), Ok(entry("c"))])),
             Ok(listing([Ok(entry("new-a")), Ok(entry("new-b"))])),
         ]);
-        let (mut context, mut receiver) = context(source, 8);
+        let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -954,11 +904,11 @@ mod tests {
 
     #[tokio::test]
     async fn entering_selected_directory_changes_path_and_rejects_stale_results() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(directory("reports"))])),
             Ok(listing([Ok(entry("current"))])),
         ]);
-        let (mut context, mut receiver) = context(Arc::clone(&source), 8);
+        let (mut context, mut receiver) = context(&source, 8);
         apply_next(&mut context, &mut receiver).await;
         let stale_completion = receiver.recv().await.expect("stale completion");
 
@@ -980,8 +930,8 @@ mod tests {
 
     #[tokio::test]
     async fn entering_non_navigable_entry_does_nothing() {
-        let source = ScriptedBrowserSource::new([Ok(listing([Ok(entry("report.txt"))]))]);
-        let (mut context, mut receiver) = context(Arc::clone(&source), 4);
+        let source = ScriptedSession::new([Ok(listing([Ok(entry("report.txt"))]))]);
+        let (mut context, mut receiver) = context(&source, 4);
         apply_next(&mut context, &mut receiver).await;
 
         context.enter_selected();
@@ -993,11 +943,11 @@ mod tests {
 
     #[tokio::test]
     async fn leaving_changes_to_parent_and_does_nothing_at_root() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(entry("initial"))])),
             Ok(listing([Ok(entry("parent"))])),
         ]);
-        let (mut context, mut receiver) = context(Arc::clone(&source), 8);
+        let (mut context, mut receiver) = context(&source, 8);
         apply_next(&mut context, &mut receiver).await;
         let stale_completion = receiver.recv().await.expect("stale completion");
 
@@ -1017,11 +967,11 @@ mod tests {
 
     #[tokio::test]
     async fn failed_navigation_keeps_attempted_path() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(directory("missing"))])),
             Err(io::Error::new(io::ErrorKind::NotFound, "missing directory")),
         ]);
-        let (mut context, mut receiver) = context(source, 8);
+        let (mut context, mut receiver) = context(&source, 8);
         apply_next(&mut context, &mut receiver).await;
         let stale_completion = receiver.recv().await.expect("stale completion");
 
@@ -1040,9 +990,8 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_events_backpressure_the_listing() {
-        let source =
-            ScriptedBrowserSource::new([Ok(listing([Ok(entry("one")), Ok(entry("two"))]))]);
-        let (mut context, mut receiver) = context(source, 1);
+        let source = ScriptedSession::new([Ok(listing([Ok(entry("one")), Ok(entry("two"))]))]);
+        let (mut context, mut receiver) = context(&source, 1);
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while receiver.len() != 1 {
@@ -1062,12 +1011,12 @@ mod tests {
 
     #[tokio::test]
     async fn toggling_directory_expands_inline_without_changing_root_and_reloads_after_collapse() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(directory("reports"))])),
             Ok(listing([Ok(entry("first.txt"))])),
             Ok(listing([Ok(entry("second.txt"))])),
         ]);
-        let (mut context, mut receiver) = context(Arc::clone(&source), 8);
+        let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -1108,12 +1057,12 @@ mod tests {
 
     #[tokio::test]
     async fn nested_expansion_inserts_children_before_the_next_sibling() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(directory("reports")), Ok(entry("root.txt"))])),
             Ok(listing([Ok(directory("year")), Ok(entry("summary.txt"))])),
             Ok(listing([Ok(entry("january.txt"))])),
         ]);
-        let (mut context, mut receiver) = context(source, 16);
+        let (mut context, mut receiver) = context(&source, 16);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -1144,11 +1093,11 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_children_do_not_move_selection_off_an_existing_row() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(directory("reports")), Ok(entry("root.txt"))])),
             Ok(listing([Ok(entry("child.txt"))])),
         ]);
-        let (mut context, mut receiver) = context(source, 8);
+        let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -1170,12 +1119,12 @@ mod tests {
 
     #[tokio::test]
     async fn collapsing_rejects_already_queued_child_events() {
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([Ok(directory("reports"))])),
             Ok(listing([Ok(entry("stale.txt"))])),
             Ok(listing([Ok(entry("current.txt"))])),
         ]);
-        let (mut context, mut receiver) = context(source, 8);
+        let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -1195,7 +1144,7 @@ mod tests {
 
     #[tokio::test]
     async fn files_and_non_directory_symlinks_require_confirmation_before_opening() {
-        let source = ScriptedBrowserSource::with_open_results(
+        let source = ScriptedSession::with_open_results(
             [Ok(listing([
                 Ok(entry("report.txt")),
                 Ok(symlink("latest", false)),
@@ -1208,7 +1157,7 @@ mod tests {
                 )),
             ],
         );
-        let (mut context, mut receiver) = context(Arc::clone(&source), 8);
+        let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -1236,7 +1185,7 @@ mod tests {
             context.open_status(),
             &OpenStatus::Failed {
                 path: "/home/latest".into(),
-                error: "opener denied request".into(),
+                error: "cannot open file `/home/latest`: opener denied request".into(),
             }
         );
         assert_eq!(source.opened_paths(), ["/home/report.txt", "/home/latest"]);
@@ -1249,14 +1198,14 @@ mod tests {
             kind: EntryKind::Other,
             navigable: false,
         };
-        let source = ScriptedBrowserSource::new([
+        let source = ScriptedSession::new([
             Ok(listing([
                 Ok(symlink("linked-directory", true)),
                 Ok(special),
             ])),
             Ok(listing([Ok(entry("child.txt"))])),
         ]);
-        let (mut context, mut receiver) = context(Arc::clone(&source), 8);
+        let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -1277,8 +1226,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_confirmation_does_not_open_the_file() {
-        let source = ScriptedBrowserSource::new([Ok(listing([Ok(entry("report.txt"))]))]);
-        let (mut context, mut receiver) = context(Arc::clone(&source), 4);
+        let source = ScriptedSession::new([Ok(listing([Ok(entry("report.txt"))]))]);
+        let (mut context, mut receiver) = context(&source, 4);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -1292,8 +1241,8 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_a_context_cancels_its_listing() {
-        let source = ScriptedBrowserSource::new([Ok(stream::pending().boxed())]);
-        let (context, _receiver) = context(source, 1);
+        let source = ScriptedSession::new([Ok(stream::pending().boxed())]);
+        let (context, _receiver) = context(&source, 1);
         let task = context.root_listing_task.as_ref().unwrap().abort_handle();
 
         drop(context);

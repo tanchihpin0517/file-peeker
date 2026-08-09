@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Fixtures for testing Session workflows from other crates. Depend on this from
+# [dev-dependencies] only; it is not meant for release builds.
+test-support = []
+
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true

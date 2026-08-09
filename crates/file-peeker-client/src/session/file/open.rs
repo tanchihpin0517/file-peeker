@@ -34,24 +34,6 @@ impl Session {
 }
 
 #[cfg(test)]
-impl Session {
-    fn with_file_service_for_test(
-        id: impl Into<String>,
-        target: crate::session::SessionTarget,
-        backend: Option<Box<dyn crate::session::backend::SessionBackend>>,
-        cache_root: std::path::PathBuf,
-        file_opener: std::sync::Arc<dyn super::opener::FileOpener>,
-    ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
-            id: id.into(),
-            target,
-            backend: tokio::sync::RwLock::new(backend),
-            file_service: super::FileService::for_test(cache_root, file_opener),
-        })
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::{io, sync::Arc, time::Duration};
 
@@ -63,10 +45,8 @@ mod tests {
     use super::Session;
     use crate::{
         EntryStream, SessionTarget,
-        session::{
-            backend::{ReadStream, SessionBackend},
-            file::opener::RecordingOpener,
-        },
+        session::backend::{ReadStream, SessionBackend},
+        test_support::RecordingOpener,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -114,8 +94,8 @@ mod tests {
             (StartFailureBackend::Read, io::ErrorKind::PermissionDenied),
         ] {
             let cache = tempfile::tempdir().unwrap();
-            let opener = Arc::new(RecordingOpener::default());
-            let session = Session::with_file_service_for_test(
+            let opener = RecordingOpener::new();
+            let session = Session::with_backend_for_test(
                 "remote-start-error",
                 SessionTarget::Remote {
                     destination: "fixture".into(),
@@ -173,8 +153,8 @@ mod tests {
     async fn close_is_not_blocked_while_a_remote_stream_is_pending() {
         let cache = tempfile::tempdir().unwrap();
         let polled = Arc::new(Notify::new());
-        let opener = Arc::new(RecordingOpener::default());
-        let session = Session::with_file_service_for_test(
+        let opener = RecordingOpener::new();
+        let session = Session::with_backend_for_test(
             "remote-close",
             SessionTarget::Remote {
                 destination: "fixture".into(),
@@ -205,8 +185,8 @@ mod tests {
     #[tokio::test]
     async fn closed_sessions_do_not_reach_the_file_service() {
         let cache = tempfile::tempdir().unwrap();
-        let opener = Arc::new(RecordingOpener::default());
-        let session = Session::with_file_service_for_test(
+        let opener = RecordingOpener::new();
+        let session = Session::with_backend_for_test(
             "closed",
             SessionTarget::Local,
             None,

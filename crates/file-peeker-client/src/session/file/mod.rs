@@ -1,6 +1,6 @@
 pub(crate) mod copy;
 mod open;
-mod opener;
+pub(crate) mod opener;
 mod service;
 mod stage;
 
