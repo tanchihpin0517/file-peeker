@@ -18,16 +18,13 @@ pub async fn run(path: &str, remote: Option<&str>) -> io::Result<()> {
         None => SessionTarget::Local,
     };
     let client = Client::new();
-    let session_id = client
+    let session = client
         .start_session(target)
         .await
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let result = match client.get_session(session_id.clone()).await {
-        Some(session) => run_with_session(&session, path).await,
-        None => Err(io::Error::other("started Session was not retained")),
-    };
+    let result = run_with_session(&session, path).await;
     let shutdown = client
-        .close_session(session_id)
+        .close_all()
         .await
         .map_err(|error| io::Error::other(error.to_string()));
     result?;

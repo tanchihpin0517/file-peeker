@@ -28,7 +28,6 @@ pub(crate) struct SessionRecord {
     pub(crate) target: SessionTarget,
     pub(crate) label: String,
     pub(crate) status: SessionStatus,
-    pub(crate) client_id: Option<String>,
     pub(crate) session: Option<Arc<Session>>,
     pub(crate) last_active_context_id: Option<BrowserContextId>,
 }

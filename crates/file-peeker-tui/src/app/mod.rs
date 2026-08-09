@@ -1,15 +1,10 @@
 mod session;
 mod view;
 
-use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
-    io,
-    sync::Arc,
-};
+use std::{collections::HashMap, error::Error, io, sync::Arc};
 
 use file_peeker_client::{
-    Client, ClientCloseSessionError, CopyConflict, CopyResult, EntryKind, Session, SessionTarget,
+    Client, CopyConflict, CopyResult, EntryKind, Session, SessionShutdownError, SessionTarget,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
@@ -90,14 +85,9 @@ struct TransferTask {
 
 #[derive(Debug)]
 enum LifecycleEvent {
-    SessionAllocated {
-        record_id: SessionRecordId,
-        client_id: String,
-    },
     SessionReady {
         record_id: SessionRecordId,
-        client_id: String,
-        result: Result<Arc<Session>, String>,
+        session: Arc<Session>,
     },
     SessionFailed {
         record_id: SessionRecordId,
@@ -110,8 +100,7 @@ enum LifecycleEvent {
     },
     SessionClosed {
         record_id: SessionRecordId,
-        client_id: String,
-        result: Result<(), ClientCloseSessionError>,
+        result: Result<(), SessionShutdownError>,
     },
     TransferCompleted {
         transfer_id: Uuid,
@@ -136,7 +125,6 @@ pub(crate) struct App {
     event_receiver: mpsc::Receiver<BrowserContextEvent>,
     lifecycle_sender: mpsc::UnboundedSender<LifecycleEvent>,
     lifecycle_receiver: mpsc::UnboundedReceiver<LifecycleEvent>,
-    allocated_session_ids: HashSet<String>,
     start_tasks: HashMap<SessionRecordId, JoinHandle<()>>,
     path_tasks: HashMap<Uuid, JoinHandle<()>>,
     close_tasks: HashMap<SessionRecordId, JoinHandle<()>>,
@@ -164,7 +152,6 @@ impl App {
             event_receiver,
             lifecycle_sender,
             lifecycle_receiver,
-            allocated_session_ids: HashSet::new(),
             start_tasks: HashMap::new(),
             path_tasks: HashMap::new(),
             close_tasks: HashMap::new(),
@@ -181,15 +168,8 @@ impl App {
             return Ok(());
         };
         let record_id = self.insert_session_record(SessionTarget::Local, SessionStatus::Starting);
-        let client_id = self.client.start_session(SessionTarget::Local).await?;
-        self.allocated_session_ids.insert(client_id.clone());
-        let session = self
-            .client
-            .get_session(client_id.clone())
-            .await
-            .ok_or_else(|| io::Error::other("started Session was not retained"))?;
+        let session = self.client.start_session(SessionTarget::Local).await?;
         if let Some(record) = self.sessions.get_mut(&record_id) {
-            record.client_id = Some(client_id);
             record.session = Some(Arc::clone(&session));
             record.status = SessionStatus::Ready;
         }
@@ -224,7 +204,6 @@ impl App {
                 target,
                 label,
                 status,
-                client_id: None,
                 session: None,
                 last_active_context_id: None,
             },
@@ -281,38 +260,16 @@ impl App {
 
     fn apply_lifecycle_event(&mut self, event: LifecycleEvent) {
         match event {
-            LifecycleEvent::SessionAllocated {
-                record_id,
-                client_id,
-            } => {
-                self.allocated_session_ids.insert(client_id.clone());
-                if let Some(record) = self.sessions.get_mut(&record_id)
-                    && matches!(record.status, SessionStatus::Starting)
-                {
-                    record.client_id = Some(client_id);
-                }
-            }
-            LifecycleEvent::SessionReady {
-                record_id,
-                client_id,
-                result,
-            } => {
+            LifecycleEvent::SessionReady { record_id, session } => {
                 self.start_tasks.remove(&record_id);
                 let Some(record) = self.sessions.get_mut(&record_id) else {
                     return;
                 };
-                if record.client_id.as_deref() != Some(&client_id)
-                    || !matches!(record.status, SessionStatus::Starting)
-                {
+                if !matches!(record.status, SessionStatus::Starting) {
                     return;
                 }
-                match result {
-                    Ok(session) => {
-                        record.session = Some(session);
-                        record.status = SessionStatus::Ready;
-                    }
-                    Err(error) => record.status = SessionStatus::Failed(error),
-                }
+                record.session = Some(session);
+                record.status = SessionStatus::Ready;
             }
             LifecycleEvent::SessionFailed { record_id, error } => {
                 self.start_tasks.remove(&record_id);
@@ -357,13 +314,8 @@ impl App {
                     }
                 }
             }
-            LifecycleEvent::SessionClosed {
-                record_id,
-                client_id,
-                result,
-            } => {
+            LifecycleEvent::SessionClosed { record_id, result } => {
                 self.close_tasks.remove(&record_id);
-                self.allocated_session_ids.remove(&client_id);
                 self.remove_session_record(record_id);
                 if let Err(error) = result {
                     self.status_error = Some(format!("Error closing Session: {error}"));
@@ -481,26 +433,16 @@ impl App {
             record_id,
             tokio::spawn(async move {
                 match client.start_session(target).await {
-                    Ok(client_id) => {
+                    Ok(session) => {
                         if sender
-                            .send(LifecycleEvent::SessionAllocated {
+                            .send(LifecycleEvent::SessionReady {
                                 record_id,
-                                client_id: client_id.clone(),
+                                session: Arc::clone(&session),
                             })
                             .is_err()
                         {
-                            let _ = client.close_session(client_id).await;
-                            return;
+                            let _ = client.close_session(&session.id()).await;
                         }
-                        let result = client
-                            .get_session(client_id.clone())
-                            .await
-                            .ok_or_else(|| "started Session was not retained".into());
-                        let _ = sender.send(LifecycleEvent::SessionReady {
-                            record_id,
-                            client_id,
-                            result,
-                        });
                     }
                     Err(error) => {
                         let _ = sender.send(LifecycleEvent::SessionFailed {
@@ -704,7 +646,7 @@ impl App {
             return;
         };
         match record.status {
-            SessionStatus::Failed(_) if record.client_id.is_none() => {
+            SessionStatus::Failed(_) if record.session.is_none() => {
                 self.remove_session_record(session_id);
             }
             SessionStatus::Ready => {
@@ -718,19 +660,18 @@ impl App {
         let Overlay::CloseConfirmation { session_id } = self.overlay else {
             return;
         };
-        let client_id = {
+        let session = {
             let Some(record) = self.sessions.get_mut(&session_id) else {
                 self.overlay = Overlay::SessionManager;
                 return;
             };
             record.status = SessionStatus::Closing;
-            record.session = None;
-            record.client_id.clone()
+            record.session.take()
         };
         self.remove_contexts_for_session(session_id);
         self.clear_transfer_state_for_session(session_id);
         self.overlay = Overlay::SessionManager;
-        let Some(client_id) = client_id else {
+        let Some(session) = session else {
             self.remove_session_record(session_id);
             return;
         };
@@ -744,10 +685,9 @@ impl App {
                     task.handle.abort();
                     let _ = task.handle.await;
                 }
-                let result = client.close_session(client_id.clone()).await;
+                let result = client.close_session(&session.id()).await;
                 let _ = sender.send(LifecycleEvent::SessionClosed {
                     record_id: session_id,
-                    client_id,
                     result,
                 });
             }),
@@ -1075,7 +1015,7 @@ impl App {
             .map(|tab| &mut tab.context)
     }
 
-    pub(crate) async fn shutdown(&mut self) -> Result<(), ClientCloseSessionError> {
+    pub(crate) async fn shutdown(&mut self) -> Result<(), SessionShutdownError> {
         if let Some(task) = self.transfer_task.take() {
             task.handle.abort();
             let _ = task.handle.await;
@@ -1107,16 +1047,7 @@ impl App {
             self.apply_lifecycle_event(event);
         }
 
-        let session_ids: Vec<_> = self.allocated_session_ids.drain().collect();
-        let mut first_error = None;
-        for session_id in session_ids {
-            if let Err(error) = self.client.close_session(session_id).await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-        first_error.map_or(Ok(()), Err)
+        self.client.close_all().await
     }
 }
 

@@ -3,7 +3,6 @@ use std::{
     sync::Arc,
 };
 
-use thiserror::Error;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -13,23 +12,6 @@ use crate::{Session, SessionShutdownError, SessionStartError, SessionTarget};
 #[derive(Debug, Default)]
 pub struct Client {
     sessions: RwLock<HashMap<String, Arc<Session>>>,
-}
-
-/// Failure to close a Client-owned Session.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum ClientCloseSessionError {
-    #[error("session not found: {id}")]
-    NotFound { id: String },
-    #[error("failed to shut down session backend: {message}")]
-    Backend { message: String },
-}
-
-impl From<SessionShutdownError> for ClientCloseSessionError {
-    fn from(error: SessionShutdownError) -> Self {
-        match error {
-            SessionShutdownError::Backend { message } => Self::Backend { message },
-        }
-    }
 }
 
 fn new_session_id() -> String {
@@ -42,19 +24,26 @@ impl Client {
         Arc::new(Self::default())
     }
 
-    /// Starts and retains a backend-backed Session, returning its UUID.
+    /// Starts and retains a backend-backed Session.
+    ///
+    /// The Client keeps a strong reference, so a caller that drops the returned
+    /// Session without closing it still leaves shutdown to `close_session` or
+    /// `close_all`.
     ///
     /// # Errors
     ///
     /// Returns a backend-start error when the selected target cannot be started.
-    pub async fn start_session(&self, target: SessionTarget) -> Result<String, SessionStartError> {
+    pub async fn start_session(
+        &self,
+        target: SessionTarget,
+    ) -> Result<Arc<Session>, SessionStartError> {
         let id = new_session_id();
         let session = Session::start(id.clone(), target).await?;
         let mut sessions = self.sessions.write().await;
-        match sessions.entry(id.clone()) {
+        match sessions.entry(id) {
             Entry::Vacant(entry) => {
-                entry.insert(session);
-                Ok(id)
+                entry.insert(Arc::clone(&session));
+                Ok(session)
             }
             Entry::Occupied(_) => {
                 drop(sessions);
@@ -66,25 +55,42 @@ impl Client {
         }
     }
 
-    /// Returns the retained Session with the requested UUID.
-    pub async fn get_session(&self, id: String) -> Option<Arc<Session>> {
-        self.sessions.read().await.get(&id).cloned()
-    }
-
-    /// Removes and gracefully closes the retained Session with the requested UUID.
+    /// Removes and gracefully closes the retained Session with the requested
+    /// UUID. Unknown and repeated IDs succeed.
     ///
     /// # Errors
     ///
-    /// Returns `ClientCloseSessionError::NotFound` for an unknown UUID or a shutdown
-    /// error when the selected backend does not shut down cleanly.
-    pub async fn close_session(&self, id: String) -> Result<(), ClientCloseSessionError> {
-        let session = self
+    /// Returns a shutdown error when the selected backend does not exit cleanly.
+    pub async fn close_session(&self, id: &str) -> Result<(), SessionShutdownError> {
+        let Some(session) = self.sessions.write().await.remove(id) else {
+            return Ok(());
+        };
+        session.close().await
+    }
+
+    /// Removes and gracefully closes every retained Session. Repeated calls
+    /// succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first shutdown error after attempting every Session.
+    pub async fn close_all(&self) -> Result<(), SessionShutdownError> {
+        let sessions: Vec<_> = self
             .sessions
             .write()
             .await
-            .remove(&id)
-            .ok_or(ClientCloseSessionError::NotFound { id })?;
-        session.close().await.map_err(ClientCloseSessionError::from)
+            .drain()
+            .map(|(_, s)| s)
+            .collect();
+        let mut first_error = None;
+        for session in sessions {
+            if let Err(error) = session.close().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -95,8 +101,8 @@ mod tests {
     use futures::TryStreamExt as _;
     use uuid::Uuid;
 
-    use super::{Client, ClientCloseSessionError, new_session_id};
-    use crate::{Session, SessionStartError, SessionTarget};
+    use super::{Client, new_session_id};
+    use crate::{SessionStartError, SessionTarget};
 
     #[tokio::test]
     async fn starts_and_retains_local_session() {
@@ -105,16 +111,11 @@ mod tests {
             .await
             .unwrap();
         let client = Client::new();
-        let id = client
+        let session = client
             .start_session(SessionTarget::Local)
             .await
             .expect("local startup should succeed");
-        let session = client
-            .get_session(id.clone())
-            .await
-            .expect("started Session should be retained");
 
-        assert_eq!(session.id(), id);
         assert_eq!(session.target(), SessionTarget::Local);
         assert!(std::path::Path::new(&session.op_resolve_path("~").await.unwrap()).is_absolute());
         let entries = session
@@ -127,7 +128,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "entry.txt");
         client
-            .close_session(id)
+            .close_session(&session.id())
             .await
             .expect("local shutdown should succeed");
     }
@@ -148,34 +149,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retains_retrieves_and_removes_sessions_by_id() {
+    async fn retains_and_removes_sessions_by_id() {
         let client = Client::new();
-        let id = Uuid::new_v4().to_string();
-        let session = Session::closed_for_test(id.clone(), SessionTarget::Local);
-        client
-            .sessions
-            .write()
-            .await
-            .insert(id.clone(), Arc::clone(&session));
+        let session = client.start_session(SessionTarget::Local).await.unwrap();
+        let id = session.id();
 
-        let retained = client.get_session(id.clone()).await.unwrap();
-        assert!(Arc::ptr_eq(&retained, &session));
+        assert!(client.sessions.read().await.contains_key(&id));
         session.close().await.unwrap();
-        assert!(client.get_session(id.clone()).await.is_some());
-        client.close_session(id.clone()).await.unwrap();
-        assert!(client.get_session(id).await.is_none());
+        assert!(client.sessions.read().await.contains_key(&id));
+        client.close_session(&id).await.unwrap();
+        assert!(client.sessions.read().await.is_empty());
     }
 
     #[tokio::test]
-    async fn unknown_session_ids_are_reported() {
+    async fn closing_unknown_or_repeated_ids_succeeds() {
         let client = Client::new();
         let id = Uuid::new_v4().to_string();
 
-        assert!(client.get_session(id.clone()).await.is_none());
-        assert_eq!(
-            client.close_session(id.clone()).await.unwrap_err(),
-            ClientCloseSessionError::NotFound { id }
-        );
+        client.close_session(&id).await.unwrap();
+        let session = client.start_session(SessionTarget::Local).await.unwrap();
+        client.close_session(&session.id()).await.unwrap();
+        client.close_session(&session.id()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_all_drains_every_retained_session() {
+        let client = Client::new();
+        let first = client.start_session(SessionTarget::Local).await.unwrap();
+        let second = client.start_session(SessionTarget::Local).await.unwrap();
+        assert_ne!(first.id(), second.id());
+
+        client.close_all().await.unwrap();
+
+        assert!(client.sessions.read().await.is_empty());
+        client.close_all().await.unwrap();
+        assert_eq!(Arc::strong_count(&first), 1);
     }
 
     #[test]

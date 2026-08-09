@@ -1,7 +1,7 @@
 mod client;
 pub mod session;
 
-pub use client::{Client, ClientCloseSessionError};
+pub use client::Client;
 pub use session::directory::{DirectoryEntry, EntryKind, EntryStream};
 pub use session::directory::{WalkEntry, WalkStream};
 pub use session::{
