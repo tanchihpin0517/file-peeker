@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::session::backend::connection::{ConnectionInfo, ServerConnection, ServerLocation};
+use crate::session::connection::{ConnectionInfo, ServerConnection, ServerLocation};
 
 pub(crate) async fn run(destination: &str, force_install: bool) -> io::Result<()> {
     tracing::debug!("---------------- connect ----------------");

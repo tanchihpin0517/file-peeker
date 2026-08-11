@@ -3,12 +3,13 @@ use std::{io, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
-use self::backend::connection::{ServerConnection, ServerLocation};
+use self::connection::{ServerConnection, ServerLocation};
 
-pub(crate) mod backend;
+pub(crate) mod connection;
 pub(crate) mod directory;
 pub(crate) mod file;
 mod path;
+pub(crate) mod rpc;
 
 pub(crate) use file::copy::{CopyConflict, CopyResult};
 

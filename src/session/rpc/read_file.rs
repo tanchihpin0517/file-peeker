@@ -5,7 +5,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt as _, stream};
 
 use super::error::read_status_error;
-use crate::session::backend::{ReadStream, connection::ServerConnection};
+use crate::session::{connection::ServerConnection, rpc::ReadStream};
 
 pub(crate) async fn read_file(connection: &ServerConnection, path: &str) -> io::Result<ReadStream> {
     let channel = connection.channel();

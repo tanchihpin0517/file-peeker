@@ -1,6 +1,6 @@
 use std::io;
 
-use super::{Session, backend::rpc};
+use super::{Session, rpc};
 
 impl Session {
     /// Resolves a path into an absolute lexical path on the selected host.

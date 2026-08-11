@@ -1,6 +1,6 @@
 use std::{io, path::Path, process::Stdio};
 
-use crate::session::backend::connection::ssh;
+use crate::session::connection::ssh;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, copy},
     process::{Child, Command},

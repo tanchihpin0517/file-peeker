@@ -3,7 +3,7 @@ use std::io;
 use super::with_context;
 use crate::session::{
     Session,
-    backend::{BackendWriteConflict, BackendWriteResult, rpc},
+    rpc::{self, WriteConflict, WriteResult},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,14 +61,14 @@ impl Session {
                 destination_directory.to_owned(),
                 destination_name.to_owned(),
                 match conflict {
-                    CopyConflict::FailIfExists => BackendWriteConflict::FailIfExists,
-                    CopyConflict::Replace => BackendWriteConflict::Replace,
+                    CopyConflict::FailIfExists => WriteConflict::FailIfExists,
+                    CopyConflict::Replace => WriteConflict::Replace,
                 },
                 stream,
             )
         };
 
-        let BackendWriteResult {
+        let WriteResult {
             path,
             bytes_written,
         } = write.await.map_err(|error| {

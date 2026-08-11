@@ -11,7 +11,7 @@ use crate::protocol::v1::{
 use futures::{Stream, StreamExt as _, stream};
 
 use super::{entry::convert_entry, error::operation_status_error};
-use crate::{WalkEntry, WalkStream, session::backend::connection::ServerConnection};
+use crate::{WalkEntry, WalkStream, session::connection::ServerConnection};
 
 pub(crate) async fn walk_dir(connection: &ServerConnection, path: &str) -> io::Result<WalkStream> {
     let channel = connection.channel();

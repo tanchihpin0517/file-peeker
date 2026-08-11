@@ -2,7 +2,7 @@ use std::io;
 
 use futures::stream::BoxStream;
 
-use crate::session::{Session, backend::rpc};
+use crate::session::{Session, rpc};
 
 pub(crate) type WalkEntry = crate::fs::WalkEntry;
 pub(crate) type WalkStream = BoxStream<'static, io::Result<WalkEntry>>;

@@ -3,7 +3,7 @@ use std::{io, path::Path};
 use crate::protocol::v1::{ResolvePathRequest, file_peeker_client::FilePeekerClient};
 
 use super::error::operation_status_error;
-use crate::session::backend::connection::ServerConnection;
+use crate::session::connection::ServerConnection;
 
 pub(crate) async fn resolve_path(connection: &ServerConnection, path: &str) -> io::Result<String> {
     let channel = connection.channel();

@@ -3,7 +3,7 @@ use std::io;
 use futures::stream::BoxStream;
 
 use super::DirectoryEntry;
-use crate::session::{Session, backend::rpc};
+use crate::session::{Session, rpc};
 
 pub(crate) type EntryStream = BoxStream<'static, io::Result<DirectoryEntry>>;
 

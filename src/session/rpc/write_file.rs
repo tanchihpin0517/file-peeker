@@ -10,16 +10,17 @@ use std::{
 use crate::protocol::{
     FILE_DATA_CHUNK_MAX_BYTES,
     v1::{
-        WriteCommit, WriteConflict, WriteFrame, WriteHeader, file_peeker_client::FilePeekerClient,
-        write_frame,
+        WriteCommit, WriteConflict as ProtocolWriteConflict, WriteFrame, WriteHeader,
+        file_peeker_client::FilePeekerClient, write_frame,
     },
 };
 use bytes::Bytes;
 use futures::{FutureExt as _, StreamExt as _, stream};
 
 use super::error::operation_status_error;
-use crate::session::backend::{
-    BackendWriteConflict, BackendWriteResult, ReadStream, WriteFuture, connection::ServerConnection,
+use crate::session::{
+    connection::ServerConnection,
+    rpc::{ReadStream, WriteConflict, WriteFuture, WriteResult},
 };
 
 enum RequestState {
@@ -38,7 +39,7 @@ pub(crate) fn write_file(
     connection: &ServerConnection,
     directory: String,
     name: String,
-    conflict: BackendWriteConflict,
+    conflict: WriteConflict,
     source: ReadStream,
 ) -> WriteFuture {
     let channel = connection.channel();
@@ -46,8 +47,8 @@ pub(crate) fn write_file(
         directory,
         name,
         conflict: match conflict {
-            BackendWriteConflict::FailIfExists => WriteConflict::FailIfExists as i32,
-            BackendWriteConflict::Replace => WriteConflict::Replace as i32,
+            WriteConflict::FailIfExists => ProtocolWriteConflict::FailIfExists as i32,
+            WriteConflict::Replace => ProtocolWriteConflict::Replace as i32,
         },
     };
     let source_error = Arc::new(Mutex::new(None));
@@ -87,7 +88,7 @@ pub(crate) fn write_file(
                 ),
             ));
         }
-        Ok(BackendWriteResult {
+        Ok(WriteResult {
             path: response.path,
             bytes_written: response.bytes_written,
         })

@@ -1,8 +1,6 @@
 use std::{io, path::Path};
 
-use crate::session::backend::connection::ssh::{
-    create_ssh_connection, get_server_executable, start_server,
-};
+use crate::session::connection::ssh::{create_ssh_connection, get_server_executable, start_server};
 use tokio::io::AsyncWriteExt as _;
 
 pub(crate) async fn run(destination: &str) -> io::Result<()> {
