@@ -18,11 +18,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::Session;
-    use crate::SessionTarget;
 
     #[tokio::test]
     async fn op_resolve_path_rejects_a_closed_session() {
-        let session = Session::closed_for_test("resolve-path-id", SessionTarget::Local);
+        let session = Session::closed_for_test("resolve-path-id");
 
         let error = session.op_resolve_path(".").await.unwrap_err();
 

@@ -17,7 +17,6 @@ only the state needed to display its requested listing.
 | Selection | No | `selected_index` stored per `BrowserContext` |
 | Session/tab selection | No | Ordered Session and Browser Context IDs, selected Session, active Context, and per-Session last-active Context |
 | Navigation | No UI state | `h`/`l` replace the root listing; `o` expands/collapses a subtree without changing it |
-| File opening | Stages remote files when needed and invokes the system opener | Browser Context owns confirmation, async opener task, and result feedback |
 | File transfer | `Session::op_copy_file_from` streams between two backends | `App` owns the lazy clipboard, transfer task, overwrite modal, stale-result checks, and status; Browser Context exposes only an owned selection snapshot |
 
 ## Listing Data Flow
@@ -27,7 +26,6 @@ TUI: no path -> Session Manager -> add local/SSH Session -> resolve browser path
      optional path -> local Session -> resolve_path(path) -> BrowserContext root_path
                                                        -> op_list_dir(root_path) -> append entries
                                                        -> op_list_dir(child path) -> insert subtree rows
-                                                       -> op_open_file(file path) -> system opener
 ```
 
 The TUI preserves selected-host stream arrival order and retains partial entries
@@ -35,7 +33,7 @@ if a stream fails. It can run listings for multiple Browser Contexts and
 multiple expanded directories concurrently. Bounded events are routed by context
 UUID; each context rejects stale root generations and collapsed-directory
 request IDs before applying transitions. Pressing `o` toggles a navigable row
-inline or confirms an openable row through a modal. Pressing `h` or `l` changes
+inline and does nothing on any other row. Pressing `h` or `l` changes
 the active context path and starts a replacement tree with reset selection;
 pressing `R` replaces the tree at the same path. Completing a stream releases its
 stream handle but leaves the shared Session alive until it is explicitly closed

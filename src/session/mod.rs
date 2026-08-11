@@ -4,10 +4,7 @@ use crate::fs::FsService;
 use thiserror::Error;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
-use self::{
-    backend::{RemoteBackend, SessionBackend},
-    file::FileService,
-};
+use self::backend::{RemoteBackend, SessionBackend};
 
 pub(crate) mod backend;
 pub(crate) mod directory;
@@ -41,9 +38,7 @@ pub(crate) enum SessionShutdownError {
 #[derive(Debug)]
 pub(crate) struct Session {
     id: String,
-    target: SessionTarget,
     backend: RwLock<Option<Box<dyn SessionBackend>>>,
-    file_service: FileService,
 }
 
 impl Session {
@@ -53,16 +48,10 @@ impl Session {
         self.id.clone()
     }
 
-    /// Returns the immutable target associated with this session.
+    /// Starts a Session against `target`.
     ///
-    /// Only tests read this today; the TUI tracks the target alongside its own
-    /// Session record.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn target(&self) -> SessionTarget {
-        self.target.clone()
-    }
-
+    /// The target selects the backend and is not retained: the TUI records its
+    /// own copy before startup, which is the only place it is displayed.
     pub(crate) async fn start(
         id: String,
         target: SessionTarget,
@@ -80,9 +69,7 @@ impl Session {
 
         Ok(Arc::new(Self {
             id,
-            target,
             backend: RwLock::new(Some(backend)),
-            file_service: FileService::default(),
         }))
     }
 
@@ -121,46 +108,30 @@ fn session_closed() -> io::Error {
 
 #[cfg(test)]
 impl Session {
-    /// Builds a Session over scripted fixtures instead of a real filesystem,
-    /// remote host, or operating-system opener.
-    ///
-    /// `cache_root` only matters for a `SessionTarget::Remote` open, which
-    /// stages the file before invoking the opener.
+    /// Builds a Session over a scripted backend instead of a real filesystem or
+    /// remote host.
     #[must_use]
     pub(crate) fn for_test(
         id: impl Into<String>,
-        target: SessionTarget,
         backend: crate::test_support::FakeBackend,
-        cache_root: std::path::PathBuf,
-        opener: crate::test_support::RecordingOpener,
     ) -> Arc<Self> {
-        Self::with_backend_for_test(id, target, Some(Box::new(backend)), cache_root, opener)
+        Self::with_backend_for_test(id, Some(Box::new(backend)))
     }
 
     /// Builds a Session whose backend slot is already empty, as it is after a
     /// completed close.
     #[must_use]
-    pub(crate) fn closed_for_test(id: impl Into<String>, target: SessionTarget) -> Arc<Self> {
-        Arc::new(Self {
-            id: id.into(),
-            target,
-            backend: RwLock::new(None),
-            file_service: FileService::default(),
-        })
+    pub(crate) fn closed_for_test(id: impl Into<String>) -> Arc<Self> {
+        Self::with_backend_for_test(id, None)
     }
 
     pub(crate) fn with_backend_for_test(
         id: impl Into<String>,
-        target: SessionTarget,
         backend: Option<Box<dyn SessionBackend>>,
-        cache_root: std::path::PathBuf,
-        opener: impl file::opener::FileOpener + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
-            target,
             backend: RwLock::new(backend),
-            file_service: FileService::for_test(cache_root, Arc::new(opener)),
         })
     }
 }
@@ -169,7 +140,7 @@ impl Session {
 mod tests {
     use async_trait::async_trait;
 
-    use super::{FileService, Session, SessionBackend, SessionTarget, backend::ReadStream};
+    use super::{Session, SessionBackend, SessionTarget, backend::ReadStream};
     use crate::EntryStream;
 
     #[derive(Debug)]
@@ -205,22 +176,8 @@ mod tests {
     }
 
     #[test]
-    fn local_target_is_retained() {
-        let target = SessionTarget::Local;
-        let session = Session::closed_for_test("local-id", target.clone());
-
-        assert_eq!(session.id(), "local-id");
-        assert_eq!(session.target(), target);
-    }
-
-    #[test]
-    fn remote_target_is_retained() {
-        let target = SessionTarget::Remote {
-            destination: "example.test".into(),
-        };
-        let session = Session::closed_for_test("remote-id", target.clone());
-
-        assert_eq!(session.target(), target);
+    fn id_is_retained() {
+        assert_eq!(Session::closed_for_test("local-id").id(), "local-id");
     }
 
     #[tokio::test]
@@ -243,12 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_close_is_terminal() {
-        let session = std::sync::Arc::new(Session {
-            id: "failed-close-id".into(),
-            target: SessionTarget::Local,
-            backend: tokio::sync::RwLock::new(Some(Box::new(FailingCloseBackend))),
-            file_service: FileService::default(),
-        });
+        let session =
+            Session::with_backend_for_test("failed-close-id", Some(Box::new(FailingCloseBackend)));
 
         assert!(session.close().await.is_err());
         assert_eq!(

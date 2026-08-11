@@ -18,7 +18,6 @@ documentation.
 1. [Code structure](code-structure.md) records the current module layout and
    placement rules.
 2. Read the relevant operation document, such as
-   [Open file](operations/open-file.md) or
    [Copy file](operations/copy-file.md).
 3. Use [Client API](api.md) to verify the caller-facing surface.
 
@@ -40,7 +39,6 @@ and link to that owner rather than duplicate implementation details.
 | [Session lifecycle](session-lifecycle.md) | Startup, reconnection, cancellation and shutdown |
 | [Remote protocol](protocol.md) | RPCs, protobuf shapes, wire limits and gRPC status mapping |
 | [Client API](api.md) | Caller-visible Rust surface |
-| [Open file](operations/open-file.md) | Open-file workflow, staging, cache location, failure handling and retention |
 | [Copy file](operations/copy-file.md) | Session-to-Session routes, streaming, conflicts, atomic publication and cancellation |
 | [TUI implementation](tui.md) | TUI state, tasks, events, input and rendering behavior |
 | [State ownership](state-ownership.md) | Cross-client and cross-UI ownership comparison |

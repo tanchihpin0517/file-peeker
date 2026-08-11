@@ -29,7 +29,7 @@ The source Session resolves and opens the source at copy time, then releases
 its backend lock before consuming bytes. The destination backend similarly
 returns an owned write future, so neither Session close is blocked by a long
 transfer. Data remains streaming and bounded; remote frames contain at most
-64 KiB, and the workflow never uses the open-file staging cache.
+64 KiB.
 
 The destination core writes a unique hidden partial file beside the final
 path, flushes and closes it, then publishes it atomically. `FailIfExists` uses

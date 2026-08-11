@@ -116,7 +116,6 @@ mod tests {
             .await
             .expect("local startup should succeed");
 
-        assert_eq!(session.target(), SessionTarget::Local);
         assert!(std::path::Path::new(&session.op_resolve_path("~").await.unwrap()).is_absolute());
         let entries = session
             .op_list_dir(fixture.path().to_str().unwrap())

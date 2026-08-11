@@ -77,20 +77,6 @@ cargo run --bin file-peeker-client -- test list /tmp/report-drafts
 cargo run --bin file-peeker-client -- test list . --remote example.test
 ```
 
-### `test open PATH [--remote SERVER]`
-
-Resolves `PATH` on the selected host and opens the regular file with the
-client operating system's default application. Local files are opened at their
-resolved path. With `--remote SERVER`, the file is completely and atomically
-downloaded into the client cache before it is opened. The system opener is
-currently supported only on macOS. Successful commands produce no standard
-output.
-
-```text
-cargo run --bin file-peeker-client -- test open ./report.pdf
-cargo run --bin file-peeker-client -- test open '~/reports/final.pdf' --remote example.test
-```
-
 ### `test walk PATH [--remote SERVER]`
 
 Recursively walks `PATH` on the selected host and writes each descendant path

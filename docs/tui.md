@@ -53,7 +53,7 @@ open matching dialog accepts the result. Success appends and activates a new
 Browser Context; failure preserves both input and error for correction. Cancel
 aborts the task and late events are ignored.
 
-Browser listing and file-open events remain on a bounded channel to preserve
+Browser listing events remain on a bounded channel to preserve
 filesystem/network backpressure. Session lifecycle events use a separate
 unbounded channel because they are low-volume and must not strand an allocated
 Client Session while waiting to report its ID. App pumps a bounded number of
@@ -63,8 +63,8 @@ iteration.
 ## Browser Contexts and tabs
 
 Each Browser Context independently owns its resolved root, visible tree rows,
-selection, viewport, expansion state, loading/error state, open confirmation,
-and listing/open tasks. Inactive contexts keep their state and continue
+selection, viewport, expansion state, loading/error state, and listing tasks.
+Inactive contexts keep their state and continue
 loading. Browser events carry Context UUID and generation/request identity;
 removed contexts and stale listing generations are ignored.
 
@@ -80,10 +80,9 @@ The Files list occupies the full body; there is no placeholder Locations
 sidebar. With no tabs, the shell explains `S: sessions` and `q/Esc: quit`.
 
 Within a browser, `j`/`k` or arrows move selection, `Ctrl-D`/`Ctrl-U` scroll,
-`h`/`l` navigate, `o` expands a navigable row or opens a file confirmation, and
-`R` refreshes. Expansion, navigation, streaming, stale-event rejection, and
-file-open behavior are owned by `browser_context.rs`. File confirmation
-captures input: `o` confirms, `q`/`Esc` cancels, and all other keys are ignored.
+`h`/`l` navigate, `o` expands or collapses a navigable row, and `R` refreshes.
+Activating a non-navigable row does nothing. Expansion, navigation, streaming,
+and stale-event rejection are owned by `browser_context.rs`.
 
 `y` copies the selected regular file into an App-owned lazy clipboard containing
 only source Session identity, full path, and original name. Closing the source

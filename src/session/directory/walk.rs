@@ -34,11 +34,8 @@ mod tests {
 
     use super::{Session, WalkEntry, WalkStream};
     use crate::{
-        EntryStream, SessionTarget,
-        session::{
-            backend::{ReadStream, SessionBackend},
-            file::FileService,
-        },
+        EntryStream,
+        session::backend::{ReadStream, SessionBackend},
     };
 
     #[derive(Debug)]
@@ -81,9 +78,7 @@ mod tests {
     fn session(backend: Option<Box<dyn SessionBackend>>) -> Arc<Session> {
         Arc::new(Session {
             id: "walk-test".into(),
-            target: SessionTarget::Local,
             backend: tokio::sync::RwLock::new(backend),
-            file_service: FileService::default(),
         })
     }
 

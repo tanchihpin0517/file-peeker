@@ -20,11 +20,9 @@ Rustdoc remains authoritative for exact signatures.
 | `Client` | `close_session` | Removes and closes one retained Session |
 | `Client` | `close_all` | Removes and closes every retained Session |
 | `Session` | `id` | Immutable Session UUID |
-| `Session` | `target` | Immutable `SessionTarget` |
 | `Session` | `op_resolve_path` | Absolute lexical selected-host path |
 | `Session` | `op_list_dir` | Native `EntryStream` |
 | `Session` | `op_walk_dir` | Native `WalkStream` |
-| `Session` | `op_open_file` | Opens a selected-host regular file |
 | `Session` | `op_copy_file_from` | Streams a file from another Session |
 | `Session` | `close` | Idempotent Session shutdown |
 
@@ -56,14 +54,13 @@ uses `SessionBackend`, with native execution locally and authenticated gRPC
 remotely. Public callers therefore use one `Session` API without selecting a
 transport-specific operation surface.
 
-The private backend `read_file` operation supports `Session.op_open_file` but is
-not exposed as a caller-facing byte stream. Both implementations return a demand-driven
+The private backend `read_file` operation supports `Session.op_copy_file_from`
+but is not exposed as a caller-facing byte stream. It returns a demand-driven
 `BoxStream<io::Result<Bytes>>`: successful items are ordered and non-empty, but
-their sizes and boundaries are not part of the interface. The local adapter maps
-core errors into `io::Error`; the remote adapter maps transport-bounded
-`ReadChunk` messages directly into `Bytes`. Open and regular-file validation
-failures occur before a stream is returned, while later filesystem, protocol, or
-cancellation failures are one terminal stream item.
+their sizes and boundaries are not part of the interface. The adapter maps
+transport-bounded `ReadChunk` messages directly into `Bytes`. Open and
+regular-file validation failures occur before a stream is returned, while later
+filesystem, protocol, or cancellation failures are one terminal stream item.
 
 `Session::op_copy_file_from` is a destination-oriented operation. It accepts a
 source Session/path, a destination directory and separate single-component
@@ -71,16 +68,6 @@ filename, plus `CopyConflict::{FailIfExists, Replace}`. It returns `CopyResult`
 with the selected-host destination path and copied byte count. The source and
 destination backend locks are released before streaming starts. See
 [Copy File](operations/copy-file.md) for its routing and atomicity contract.
-
-`Session.op_open_file` validates a regular file on the selected host. Local
-files are opened at their existing resolved path. Remote files are fully and
-atomically staged on the client host before the operating system is asked to
-open them. The private client `FileService` implements the client-host
-preparation and operating-system phase behind this Session API; it is not
-caller-facing, does not replace `FsService`, and never accesses
-`SessionBackend`. Failures it reports carry the operation context, such as
-``cannot open file `/path`: ...``. See [Open File](operations/open-file.md) for
-cache location, failure handling and retention.
 
 `Session.op_resolve_path` expands `~` and environment variables using the
 selected host's environment, makes the result absolute, and lexically removes
@@ -106,10 +93,9 @@ RPC.
 ## Testing against a Session
 
 `test_support` provides fixtures for driving Session workflows without a real
-filesystem, remote host, or operating-system opener: `FakeBackend` replays
-scripted listings and records requests, `RecordingOpener` records open requests
-and replays scripted failures, and `Session::for_test` and
-`Session::closed_for_test` assemble a Session from them.
+filesystem or remote host: `FakeBackend` replays scripted listings and records
+requests, and `Session::for_test` and `Session::closed_for_test` assemble a
+Session from it.
 
 The module is compiled under `#[cfg(test)]`, so it cannot reach a release build
 and every test module in the crate — including the TUI's — gets the fixtures

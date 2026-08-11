@@ -64,34 +64,11 @@ consumed backend is closing or closed. Backend shutdown consumes the selected
 adapter, so no separate lifecycle state is required.
 
 Native Session workflows are grouped by filesystem domain: path operations live
-under `session/path`, while directory operations and transport-neutral directory
-result types live under `session/directory`. File opening lives under
-`session/file`: Session resolves and starts a selected-host read, then releases
-the backend read lock before passing the owned path and stream to the private
-client `FileService`. `FileService` never accesses a backend. It uses the
-resolved path directly for local Sessions or atomically stages the owned stream
-for remote Sessions, then invokes the client operating-system opener. Releasing
-the lock before entering `FileService` lets Session shutdown cancel an active
-remote stream without waiting for the whole copy.
-
-```text
-Session::op_open_file
-    -> SessionBackend::resolve_path
-    -> SessionBackend::read_file
-    -> release backend read lock
-    -> FileService
-         |-- local: use resolved path
-         `-- remote: FileStager::stage_download
-         -> FileOpener
-```
-
-`FileService` is a client-host workflow facade, not another filesystem
-backend and not a replacement for core `FsService`. It owns client-host staging
-and operating-system integration only after Session has completed the
-selected-host phase.
-
-See [Open File](operations/open-file.md) for the detailed local-validation,
-remote-staging, cache-location, failure and retention contract.
+under `session/path`, directory operations and transport-neutral directory
+result types live under `session/directory`, and Session-to-Session file
+transfer lives under `session/file`. See
+[Copy File](operations/copy-file.md) for that workflow's routing and atomicity
+contract.
 
 `SessionBackend` is a private capability seam, not a required one-to-one model
 of public Session workflows. The remote adapter's operation modules are private

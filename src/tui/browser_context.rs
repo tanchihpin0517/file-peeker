@@ -78,14 +78,6 @@ impl BrowserRow {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum OpenStatus {
-    Idle,
-    Opening(String),
-    Opened(String),
-    Failed { path: String, error: String },
-}
-
 pub(crate) struct BrowserContext {
     id: BrowserContextId,
     root_path: String,
@@ -98,10 +90,6 @@ pub(crate) struct BrowserContext {
     directory_listing_tasks: HashMap<u64, JoinHandle<()>>,
     generation: u64,
     next_request_id: u64,
-    pending_open_path: Option<String>,
-    active_open_request: Option<u64>,
-    open_status: OpenStatus,
-    open_task: Option<JoinHandle<()>>,
     session: Arc<Session>,
     events: mpsc::Sender<BrowserContextEvent>,
 }
@@ -118,8 +106,6 @@ impl fmt::Debug for BrowserContext {
             .field("viewport_height", &self.viewport_height)
             .field("status", &self.status)
             .field("generation", &self.generation)
-            .field("pending_open_path", &self.pending_open_path)
-            .field("open_status", &self.open_status)
             .finish_non_exhaustive()
     }
 }
@@ -142,10 +128,6 @@ impl BrowserContext {
             directory_listing_tasks: HashMap::new(),
             generation: 0,
             next_request_id: 0,
-            pending_open_path: None,
-            active_open_request: None,
-            open_status: OpenStatus::Idle,
-            open_task: None,
             session,
             events,
         };
@@ -172,14 +154,6 @@ impl BrowserContext {
 
     pub(crate) fn status(&self) -> &ListingStatus {
         &self.status
-    }
-
-    pub(crate) fn pending_open_path(&self) -> Option<&str> {
-        self.pending_open_path.as_deref()
-    }
-
-    pub(crate) fn open_status(&self) -> &OpenStatus {
-        &self.open_status
     }
 
     pub(crate) fn selected_expansion_error(&self) -> Option<(&str, &str)> {
@@ -217,7 +191,6 @@ impl BrowserContext {
     }
 
     pub(crate) fn move_selection(&mut self, down: bool) {
-        self.clear_settled_open_status();
         if self.rows.is_empty() {
             self.selected_index = None;
             return;
@@ -232,7 +205,6 @@ impl BrowserContext {
     }
 
     pub(crate) fn scroll_half_page(&mut self, down: bool) {
-        self.clear_settled_open_status();
         let Some(current) = self.effective_selection() else {
             return;
         };
@@ -256,13 +228,10 @@ impl BrowserContext {
     }
 
     pub(crate) fn refresh(&mut self) {
-        self.pending_open_path = None;
-        self.clear_settled_open_status();
         self.start_root_listing();
     }
 
     pub(crate) fn enter_selected(&mut self) {
-        self.clear_settled_open_status();
         let Some(path) = self
             .effective_selection()
             .and_then(|index| self.rows.get(index))
@@ -275,7 +244,6 @@ impl BrowserContext {
     }
 
     pub(crate) fn leave(&mut self) {
-        self.clear_settled_open_status();
         let Some(parent) = Path::new(&self.root_path).parent() else {
             return;
         };
@@ -288,44 +256,15 @@ impl BrowserContext {
         self.change_root_path(&parent);
     }
 
+    /// Expands or collapses the selected directory. Files have no activation
+    /// behavior.
     pub(crate) fn activate_selected(&mut self) {
-        self.clear_settled_open_status();
         let Some(index) = self.effective_selection() else {
             return;
         };
         if self.rows[index].entry.navigable {
             self.toggle_directory(index);
-            return;
         }
-        if matches!(
-            self.rows[index].entry.kind,
-            EntryKind::File | EntryKind::Symlink
-        ) && !matches!(self.open_status, OpenStatus::Opening(_))
-        {
-            self.pending_open_path = Some(self.rows[index].path.clone());
-        }
-    }
-
-    pub(crate) fn cancel_open_confirmation(&mut self) {
-        self.pending_open_path = None;
-    }
-
-    pub(crate) fn confirm_open(&mut self) {
-        let Some(path) = self.pending_open_path.take() else {
-            return;
-        };
-        if matches!(self.open_status, OpenStatus::Opening(_)) {
-            return;
-        }
-        let request_id = self.next_request_id();
-        self.active_open_request = Some(request_id);
-        self.open_status = OpenStatus::Opening(path.clone());
-        let session = Arc::clone(&self.session);
-        let context_id = self.id;
-        let events = self.events.clone();
-        self.open_task = Some(tokio::spawn(run_open_file(
-            session, path, context_id, request_id, events,
-        )));
     }
 
     pub(crate) fn apply(&mut self, event: BrowserContextEvent) {
@@ -338,38 +277,19 @@ impl BrowserContext {
                 target,
                 result,
             } if generation == self.generation => self.apply_listing(target, result),
-            BrowserEvent::Open {
-                request_id,
-                path,
-                result,
-            } if self.active_open_request == Some(request_id) => {
-                self.active_open_request = None;
-                self.open_task = None;
-                self.open_status = match result {
-                    OpenResult::Finished => OpenStatus::Opened(path),
-                    OpenResult::Failed(error) => OpenStatus::Failed { path, error },
-                };
-            }
-            _ => {}
+            BrowserEvent::Listing { .. } => {}
         }
     }
 
     pub(crate) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.abort_tree_listings();
-        if let Some(task) = self.open_task.take() {
-            task.abort();
-        }
-        self.active_open_request = None;
-        self.pending_open_path = None;
-        self.open_status = OpenStatus::Idle;
     }
 
     fn change_root_path(&mut self, root_path: &Path) {
         self.root_path = root_path.to_string_lossy().into_owned();
         self.selected_index = None;
         self.viewport_offset = 0;
-        self.pending_open_path = None;
         self.start_root_listing();
     }
 
@@ -525,12 +445,6 @@ impl BrowserContext {
         self.next_request_id
     }
 
-    fn clear_settled_open_status(&mut self) {
-        if !matches!(self.open_status, OpenStatus::Opening(_)) {
-            self.open_status = OpenStatus::Idle;
-        }
-    }
-
     fn clamp_selection(&mut self) {
         self.selected_index = match (self.selected_index, self.rows.len()) {
             (_, 0) => None,
@@ -543,9 +457,6 @@ impl BrowserContext {
 impl Drop for BrowserContext {
     fn drop(&mut self) {
         self.abort_tree_listings();
-        if let Some(task) = self.open_task.take() {
-            task.abort();
-        }
     }
 }
 
@@ -567,11 +478,6 @@ enum BrowserEvent {
         generation: u64,
         target: ListingTarget,
         result: ListingResult,
-    },
-    Open {
-        request_id: u64,
-        path: String,
-        result: OpenResult,
     },
 }
 
@@ -644,35 +550,6 @@ async fn send_listing_result(
         .await
 }
 
-#[derive(Debug)]
-enum OpenResult {
-    Finished,
-    Failed(String),
-}
-
-async fn run_open_file(
-    session: Arc<Session>,
-    path: String,
-    context_id: BrowserContextId,
-    request_id: u64,
-    events: mpsc::Sender<BrowserContextEvent>,
-) {
-    let result = match session.op_open_file(&path).await {
-        Ok(()) => OpenResult::Finished,
-        Err(error) => OpenResult::Failed(error.to_string()),
-    };
-    let _ = events
-        .send(BrowserContextEvent {
-            context_id,
-            kind: BrowserEvent::Open {
-                request_id,
-                path,
-                result,
-            },
-        })
-        .await;
-}
-
 fn child_path(parent: &str, name: &str) -> String {
     Path::new(parent).join(name).to_string_lossy().into_owned()
 }
@@ -680,62 +557,30 @@ fn child_path(parent: &str, name: &str) -> String {
 mod tests {
     use std::{io, sync::Arc, time::Duration};
 
-    use crate::{
-        DirectoryEntry, EntryKind, EntryStream, Session, SessionTarget,
-        test_support::{FakeBackend, RecordingOpener},
-    };
+    use crate::{DirectoryEntry, EntryKind, EntryStream, Session, test_support::FakeBackend};
     use futures::{StreamExt as _, stream};
     use tokio::sync::mpsc;
 
-    use super::{BrowserContext, BrowserContextEvent, ExpansionStatus, ListingStatus, OpenStatus};
+    use super::{BrowserContext, BrowserContextEvent, ExpansionStatus, ListingStatus};
 
-    /// A local Session backed by scripted listings and a recording opener.
+    /// A local Session backed by scripted listings.
     ///
-    /// Requests travel the real `Session` path, so a scripted opener failure
-    /// surfaces with the context `FileService` attaches in production.
+    /// Requests travel the real `Session` path, so a scripted listing failure
+    /// surfaces exactly as it does in production.
     struct ScriptedSession {
         session: Arc<Session>,
         backend: FakeBackend,
-        opener: RecordingOpener,
     }
 
     impl ScriptedSession {
         fn new(listings: impl IntoIterator<Item = io::Result<EntryStream>>) -> Arc<Self> {
-            Self::with_open_results(listings, [])
-        }
-
-        fn with_open_results(
-            listings: impl IntoIterator<Item = io::Result<EntryStream>>,
-            open_results: impl IntoIterator<Item = io::Result<()>>,
-        ) -> Arc<Self> {
             let backend = FakeBackend::builder().listings(listings).build();
-            let opener = RecordingOpener::with_results(open_results);
-            let session = Session::for_test(
-                "scripted",
-                // A local target opens the resolved path directly, so the
-                // staging cache root is never touched.
-                SessionTarget::Local,
-                backend.clone(),
-                std::env::temp_dir(),
-                opener.clone(),
-            );
-            Arc::new(Self {
-                session,
-                backend,
-                opener,
-            })
+            let session = Session::for_test("scripted", backend.clone());
+            Arc::new(Self { session, backend })
         }
 
         fn requested_paths(&self) -> Vec<String> {
             self.backend.listed_paths()
-        }
-
-        fn opened_paths(&self) -> Vec<String> {
-            self.opener
-                .paths()
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect()
         }
     }
 
@@ -1143,52 +988,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn files_and_non_directory_symlinks_require_confirmation_before_opening() {
-        let source = ScriptedSession::with_open_results(
-            [Ok(listing([
-                Ok(entry("report.txt")),
-                Ok(symlink("latest", false)),
-            ]))],
-            [
-                Ok(()),
-                Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "opener denied request",
-                )),
-            ],
-        );
+    async fn activating_files_and_non_directory_symlinks_does_nothing() {
+        let source = ScriptedSession::new([Ok(listing([
+            Ok(entry("report.txt")),
+            Ok(symlink("latest", false)),
+        ]))]);
         let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
 
         context.activate_selected();
-        assert_eq!(context.pending_open_path(), Some("/home/report.txt"));
-        assert!(source.opened_paths().is_empty());
-        context.confirm_open();
-        assert_eq!(
-            context.open_status(),
-            &OpenStatus::Opening("/home/report.txt".into())
-        );
-        apply_next(&mut context, &mut receiver).await;
-        assert_eq!(
-            context.open_status(),
-            &OpenStatus::Opened("/home/report.txt".into())
-        );
-
         context.move_selection(true);
         context.activate_selected();
-        assert_eq!(context.pending_open_path(), Some("/home/latest"));
-        context.confirm_open();
-        apply_next(&mut context, &mut receiver).await;
-        assert_eq!(
-            context.open_status(),
-            &OpenStatus::Failed {
-                path: "/home/latest".into(),
-                error: "cannot open file `/home/latest`: opener denied request".into(),
-            }
-        );
-        assert_eq!(source.opened_paths(), ["/home/report.txt", "/home/latest"]);
+
+        assert_eq!(context.rows.len(), 2);
+        assert_eq!(source.requested_paths(), ["/home"]);
     }
 
     #[tokio::test]
@@ -1211,7 +1026,6 @@ mod tests {
         }
 
         context.activate_selected();
-        assert_eq!(context.pending_open_path(), None);
         while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
             apply_next(&mut context, &mut receiver).await;
         }
@@ -1220,23 +1034,7 @@ mod tests {
         context.move_selection(true);
         context.move_selection(true);
         context.activate_selected();
-        assert_eq!(context.pending_open_path(), None);
-        assert!(source.opened_paths().is_empty());
-    }
-
-    #[tokio::test]
-    async fn cancelling_confirmation_does_not_open_the_file() {
-        let source = ScriptedSession::new([Ok(listing([Ok(entry("report.txt"))]))]);
-        let (mut context, mut receiver) = context(&source, 4);
-        while context.status() != &ListingStatus::Complete {
-            apply_next(&mut context, &mut receiver).await;
-        }
-
-        context.activate_selected();
-        context.cancel_open_confirmation();
-
-        assert_eq!(context.pending_open_path(), None);
-        assert!(source.opened_paths().is_empty());
+        assert_eq!(context.rows.len(), 3);
     }
 
     #[tokio::test]

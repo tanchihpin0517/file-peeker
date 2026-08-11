@@ -8,9 +8,7 @@ use ratatui::{
 };
 
 use super::{App, BrowserTab, NewBrowserDialog, Overlay, SessionRecordId, session::SessionStatus};
-use crate::tui::browser_context::{
-    BrowserContext, BrowserRow, ExpansionStatus, ListingStatus, OpenStatus,
-};
+use crate::tui::browser_context::{BrowserRow, ExpansionStatus, ListingStatus};
 
 impl App {
     pub(crate) fn render(&mut self, frame: &mut Frame<'_>) {
@@ -60,12 +58,6 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.footer_text()), footer);
         self.render_overlay(frame);
-        if let Some(path) = self
-            .active_context()
-            .and_then(BrowserContext::pending_open_path)
-        {
-            render_open_confirmation(frame, path);
-        }
     }
 
     fn render_tabs(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -141,28 +133,18 @@ impl App {
                 "Enter: submit  Backspace: edit  Esc: cancel"
             }
             super::InputMode::SessionCloseConfirmation => "Enter/y: close Session  q/Esc: cancel",
-            super::InputMode::FileOpenConfirmation => "o: confirm  q/Esc: cancel",
             super::InputMode::TransferOverwriteConfirmation => "Enter/y: overwrite  q/Esc: cancel",
         };
         let browser_status = self.active_context().map_or_else(
             || "Ready".into(),
-            |context| match context.open_status() {
-                OpenStatus::Opening(path) => format!("Opening {path}…"),
-                OpenStatus::Opened(path) => format!("Opened {path}"),
-                OpenStatus::Failed { path, error } => {
-                    format!("Error opening {path}: {error}")
-                }
-                OpenStatus::Idle => {
-                    if let Some((path, error)) = context.selected_expansion_error() {
-                        format!("Error expanding {path}: {error}")
-                    } else {
-                        match context.status() {
-                            ListingStatus::Loading => "Loading…".into(),
-                            ListingStatus::Complete => {
-                                format!("{} items", context.rows().len())
-                            }
-                            ListingStatus::Failed(error) => format!("Error: {error}"),
-                        }
+            |context| {
+                if let Some((path, error)) = context.selected_expansion_error() {
+                    format!("Error expanding {path}: {error}")
+                } else {
+                    match context.status() {
+                        ListingStatus::Loading => "Loading…".into(),
+                        ListingStatus::Complete => format!("{} items", context.rows().len()),
+                        ListingStatus::Failed(error) => format!("Error: {error}"),
                     }
                 }
             },
@@ -437,20 +419,6 @@ fn render_text_dialog(frame: &mut Frame<'_>, title: &str, lines: &[Line<'_>]) {
     frame.render_widget(
         Paragraph::new(Text::from(lines.to_vec())).wrap(Wrap { trim: false }),
         inner,
-    );
-}
-
-fn render_open_confirmation(frame: &mut Frame<'_>, path: &str) {
-    render_text_dialog(
-        frame,
-        " Confirm open ",
-        &[
-            Line::from("Open this file?"),
-            Line::from(""),
-            Line::styled(path.to_owned(), Style::default().fg(Color::Cyan)),
-            Line::from(""),
-            Line::from("Press o again to open · Esc/q to cancel"),
-        ],
     );
 }
 

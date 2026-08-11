@@ -3,7 +3,7 @@ use std::{io, path::Path};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use super::{connect, install, list, open, ssh_connection, start_server, walk};
+use super::{connect, install, list, ssh_connection, start_server, walk};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "File Peeker client test CLI")]
@@ -35,11 +35,6 @@ enum TestCommand {
         server: String,
     },
     List {
-        path: String,
-        #[arg(long)]
-        remote: Option<String>,
-    },
-    Open {
         path: String,
         #[arg(long)]
         remote: Option<String>,
@@ -94,9 +89,6 @@ async fn dispatch(cli: &Cli) -> io::Result<()> {
             }
             TestCommand::List { path, remote } => {
                 list::run(path, remote.as_deref()).await?;
-            }
-            TestCommand::Open { path, remote } => {
-                open::run(path, remote.as_deref()).await?;
             }
             TestCommand::SshConnection { server } => ssh_connection::run(server).await?,
             TestCommand::StartServer { server } => start_server::run(server).await?,
@@ -162,50 +154,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_test_open() {
-        let cli = Cli::try_parse_from(["file-peeker-client", "test", "open", "/tmp/report.pdf"])
-            .expect("test open command should parse");
+    fn test_open_is_rejected() {
+        let error = Cli::try_parse_from(["file-peeker-client", "test", "open", "/tmp/report.pdf"])
+            .expect_err("test open should not be a supported command");
 
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                command: TestCommand::Open {
-                    path: "/tmp/report.pdf".into(),
-                    remote: None
-                }
-            }
-        );
-    }
-
-    #[test]
-    fn parses_remote_test_open() {
-        let cli = Cli::try_parse_from([
-            "file-peeker-client",
-            "test",
-            "open",
-            "~/report.pdf",
-            "--remote",
-            "example.test",
-        ])
-        .expect("remote test open command should parse");
-
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                command: TestCommand::Open {
-                    path: "~/report.pdf".into(),
-                    remote: Some("example.test".into())
-                }
-            }
-        );
-    }
-
-    #[test]
-    fn test_open_requires_path() {
-        let error = Cli::try_parse_from(["file-peeker-client", "test", "open"])
-            .expect_err("test open should require a path");
-
-        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]

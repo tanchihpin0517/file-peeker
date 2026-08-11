@@ -147,11 +147,7 @@ src/session/
 │   └── walk.rs
 ├── file/
 │   ├── mod.rs
-│   ├── copy.rs
-│   ├── open.rs
-│   ├── opener.rs
-│   ├── service.rs
-│   └── stage.rs
+│   └── copy.rs
 ├── backend/
 │   ├── mod.rs
 │   ├── local.rs
@@ -200,9 +196,8 @@ src/session/
   structurally unreachable from any release build.
 
 `read_file` remains a private backend primitive rather than a caller-facing
-native read operation. The Session open-file workflow consumes it directly:
-local Sessions use it to validate and open the regular file before dropping the
-stream, while remote Sessions consume the owned stream into a client-host cache.
+native read operation. The Session copy workflow consumes it directly, streaming
+the source Session's bytes into the destination Session's write.
 
 ### Server
 
@@ -452,39 +447,3 @@ different traversal semantics visible without duplicating shared mechanics.
 
 Caller-visible behavior is documented in [Client API](api.md); remote batching
 and validation are owned by [Remote Protocol](protocol.md).
-
-### Opening a selected-host file
-
-Opening a selected-host file demonstrates a public Session workflow composed
-from backend primitives and a client-host service:
-
-```text
-Session::op_open_file(path)
-    -> SessionBackend::resolve_path
-    -> SessionBackend::read_file
-    -> release the backend read lock
-    -> FileService
-         |-- local: drop the validation stream and use the resolved path
-         `-- remote: FileStager::stage_download
-         -> FileOpener
-```
-
-The backend seam supplies selected-host primitives. Session owns backend
-lifecycle and phase ordering. `FileService` owns client-host preparation and
-operating-system integration but cannot access a backend. It is a workflow
-facade, not a replacement for `fs::FsService` or `SessionBackend`.
-
-The file domain is:
-
-```text
-src/session/
-├── file/
-│   ├── mod.rs
-│   ├── open.rs
-│   ├── opener.rs
-│   ├── service.rs
-│   └── stage.rs
-```
-
-The detailed validation, staging, cache, cancellation and retention contract is
-owned by [Open File](operations/open-file.md).

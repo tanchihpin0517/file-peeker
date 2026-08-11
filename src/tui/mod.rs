@@ -75,8 +75,6 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 KeyAction::LeaveDirectory => app.leave_active_directory(),
                 KeyAction::EnterSelection => app.enter_active_selection(),
                 KeyAction::ActivateSelection => app.activate_active_selection(),
-                KeyAction::ConfirmOpen => app.confirm_active_open(),
-                KeyAction::CancelOpen => app.cancel_active_open_confirmation(),
                 KeyAction::PreviousContext => app.switch_context(false),
                 KeyAction::NextContext => app.switch_context(true),
                 KeyAction::NewBrowser => app.open_new_browser_for_active(),
@@ -119,8 +117,6 @@ enum KeyAction {
     LeaveDirectory,
     EnterSelection,
     ActivateSelection,
-    ConfirmOpen,
-    CancelOpen,
     PreviousContext,
     NextContext,
     NewBrowser,
@@ -149,13 +145,6 @@ enum KeyAction {
 
 fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAction {
     match mode {
-        InputMode::FileOpenConfirmation => {
-            return match code {
-                KeyCode::Char('q') | KeyCode::Esc => KeyAction::CancelOpen,
-                KeyCode::Char('o') => KeyAction::ConfirmOpen,
-                _ => KeyAction::Ignore,
-            };
-        }
         InputMode::SessionCloseConfirmation => {
             return match code {
                 KeyCode::Enter | KeyCode::Char('y') => KeyAction::ConfirmSessionClose,
@@ -273,31 +262,31 @@ mod tests {
             key_action(
                 KeyCode::Esc,
                 KeyModifiers::NONE,
-                InputMode::FileOpenConfirmation
+                InputMode::SessionCloseConfirmation
             ),
-            KeyAction::CancelOpen
+            KeyAction::CancelDialog
         );
         assert_eq!(
             key_action(
                 KeyCode::Char('q'),
                 KeyModifiers::NONE,
-                InputMode::FileOpenConfirmation
+                InputMode::SessionCloseConfirmation
             ),
-            KeyAction::CancelOpen
+            KeyAction::CancelDialog
         );
         assert_eq!(
             key_action(
-                KeyCode::Char('o'),
+                KeyCode::Char('y'),
                 KeyModifiers::NONE,
-                InputMode::FileOpenConfirmation
+                InputMode::SessionCloseConfirmation
             ),
-            KeyAction::ConfirmOpen
+            KeyAction::ConfirmSessionClose
         );
         assert_eq!(
             key_action(
                 KeyCode::Char('j'),
                 KeyModifiers::NONE,
-                InputMode::FileOpenConfirmation
+                InputMode::SessionCloseConfirmation
             ),
             KeyAction::Ignore
         );
@@ -305,7 +294,7 @@ mod tests {
             key_action(
                 KeyCode::Char('d'),
                 KeyModifiers::CONTROL,
-                InputMode::FileOpenConfirmation
+                InputMode::SessionCloseConfirmation
             ),
             KeyAction::Ignore
         );

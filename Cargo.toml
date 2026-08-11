@@ -26,7 +26,6 @@ tui = ["client", "dep:crossterm", "dep:ratatui"]
 # `cli` or `tui` rather than directly.
 client = [
     "dep:async-trait",
-    "dep:dirs",
     "dep:hyper-util",
     "dep:serde",
     "dep:tower",
@@ -39,7 +38,6 @@ async-trait = { version = "0.1.91", optional = true }
 bytes = "1.12.1"
 clap = { version = "4.6.2", features = ["derive"] }
 crossterm = { version = "0.29.0", optional = true }
-dirs = { version = "6.0.0", optional = true }
 getrandom = "0.3.3"
 futures = "0.3.33"
 hyper-util = { version = "0.1.17", features = ["tokio"], optional = true }

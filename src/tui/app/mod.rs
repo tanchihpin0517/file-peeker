@@ -23,7 +23,6 @@ pub(crate) enum InputMode {
     RemoteInput,
     NewBrowser,
     SessionCloseConfirmation,
-    FileOpenConfirmation,
     TransferOverwriteConfirmation,
 }
 
@@ -373,12 +372,6 @@ impl App {
     }
 
     pub(crate) fn input_mode(&self) -> InputMode {
-        if self
-            .active_context()
-            .is_some_and(|context| context.pending_open_path().is_some())
-        {
-            return InputMode::FileOpenConfirmation;
-        }
         match self.overlay {
             Overlay::None => InputMode::Main,
             Overlay::SessionManager => InputMode::SessionManager,
@@ -976,18 +969,6 @@ impl App {
     pub(crate) fn activate_active_selection(&mut self) {
         if let Some(context) = self.active_context_mut() {
             context.activate_selected();
-        }
-    }
-
-    pub(crate) fn confirm_active_open(&mut self) {
-        if let Some(context) = self.active_context_mut() {
-            context.confirm_open();
-        }
-    }
-
-    pub(crate) fn cancel_active_open_confirmation(&mut self) {
-        if let Some(context) = self.active_context_mut() {
-            context.cancel_open_confirmation();
         }
     }
 

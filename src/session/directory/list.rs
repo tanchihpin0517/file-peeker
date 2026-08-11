@@ -22,11 +22,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::Session;
-    use crate::SessionTarget;
 
     #[tokio::test]
     async fn op_list_rejects_a_closed_session() {
-        let session = Session::closed_for_test("closed-list-id", SessionTarget::Local);
+        let session = Session::closed_for_test("closed-list-id");
         session.close().await.unwrap();
 
         let error = session
@@ -41,7 +40,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_list_requires_an_open_connection() {
-        let session = Session::closed_for_test("missing-list-id", SessionTarget::Local);
+        let session = Session::closed_for_test("missing-list-id");
 
         let error = session
             .op_list_dir("/fixture")

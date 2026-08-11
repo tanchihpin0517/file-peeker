@@ -1,5 +1,5 @@
 //! Fixtures for exercising `Session` workflows without touching a real
-//! filesystem, a remote host, or the client operating system.
+//! filesystem or a remote host.
 //!
 //! Compiled under `cfg(test)` only, so these fixtures cannot reach a release
 //! build.
@@ -7,7 +7,6 @@
 use std::{
     collections::VecDeque,
     fmt, io,
-    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -16,10 +15,7 @@ use futures::{StreamExt as _, stream};
 
 use crate::{
     EntryStream, WalkStream,
-    session::{
-        backend::{ReadStream, SessionBackend},
-        file::opener::FileOpener,
-    },
+    session::backend::{ReadStream, SessionBackend},
 };
 
 /// A `SessionBackend` that replays scripted results and records its requests.
@@ -85,8 +81,7 @@ impl fmt::Debug for FakeBackendBuilder {
 ///
 /// Each queue is consumed in order, and an exhausted queue yields an error.
 /// `resolve_path` is the identity and `read_file` always yields an empty byte
-/// stream, which is what a local open needs: `FileService` discards the stream
-/// and opens the resolved path directly.
+/// stream.
 #[derive(Default)]
 pub(crate) struct FakeBackendBuilder {
     inner: FakeBackendInner,
@@ -144,58 +139,5 @@ impl SessionBackend for FakeBackend {
 
     async fn close(self: Box<Self>) -> io::Result<()> {
         Ok(())
-    }
-}
-
-/// A `FileOpener` that records requests instead of invoking the operating
-/// system, and can replay scripted failures.
-///
-/// Cloning shares one recording.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RecordingOpener {
-    inner: Arc<RecordingOpenerInner>,
-}
-
-#[derive(Debug, Default)]
-struct RecordingOpenerInner {
-    results: Mutex<VecDeque<io::Result<()>>>,
-    paths: Mutex<Vec<PathBuf>>,
-}
-
-impl RecordingOpener {
-    #[must_use]
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    /// Replays `results` in order; later opens succeed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a fixture thread panicked while queueing.
-    #[must_use]
-    pub(crate) fn with_results(results: impl IntoIterator<Item = io::Result<()>>) -> Self {
-        let opener = Self::new();
-        opener.inner.results.lock().unwrap().extend(results);
-        opener
-    }
-
-    /// Paths this opener was asked to open, in call order.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a fixture thread panicked while recording.
-    #[must_use]
-    pub(crate) fn paths(&self) -> Vec<PathBuf> {
-        self.inner.paths.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl FileOpener for RecordingOpener {
-    async fn open(&self, path: &Path) -> io::Result<()> {
-        self.inner.paths.lock().unwrap().push(path.to_path_buf());
-        let result = self.inner.results.lock().unwrap().pop_front();
-        result.unwrap_or(Ok(()))
     }
 }
