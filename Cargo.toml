@@ -1,35 +1,53 @@
 [workspace]
-members = [
-    "crates/file-peeker-client",
-    "crates/file-peeker-core",
-    "crates/file-peeker-server",
-    "crates/file-peeker-tui",
-]
+# Kept explicit: an edition 2024 package outside a workspace would default to
+# resolver 3 and rewrite Cargo.lock.
 resolver = "2"
 
-[workspace.package]
+[package]
+name = "file-peeker"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
+publish = false
+autobins = false
 
-[workspace.dependencies]
-async-trait = "0.1.91"
+[features]
+default = ["cli", "server", "tui"]
+# Each binary target carries its feature as `required-features`, so a slim build
+# such as `--no-default-features --features server` skips the other two entirely.
+# That is how the remote installer provisions a server without building the
+# front ends. `protocol` and `fs` stay unconditional: both sides of the wire use
+# them, which is also why prost and tonic cannot be gated.
+cli = ["client", "dep:tracing-subscriber"]
+server = []
+tui = ["client", "dep:crossterm", "dep:ratatui"]
+# Internal: the Client/Session layer the two front ends share. Enable it through
+# `cli` or `tui` rather than directly.
+client = [
+    "dep:async-trait",
+    "dep:dirs",
+    "dep:hyper-util",
+    "dep:serde",
+    "dep:tower",
+    "dep:tracing",
+    "dep:uuid",
+]
+
+[dependencies]
+async-trait = { version = "0.1.91", optional = true }
 bytes = "1.12.1"
 clap = { version = "4.6.2", features = ["derive"] }
-crossterm = "0.29.0"
-dirs = "6.0.0"
-file-peeker-core = { version = "=0.1.0", path = "crates/file-peeker-core" }
-file-peeker-server = { version = "=0.1.0", path = "crates/file-peeker-server" }
+crossterm = { version = "0.29.0", optional = true }
+dirs = { version = "6.0.0", optional = true }
 getrandom = "0.3.3"
 futures = "0.3.33"
-hyper-util = { version = "0.1.17", features = ["tokio"] }
+hyper-util = { version = "0.1.17", features = ["tokio"], optional = true }
 prost = "0.14.4"
-ratatui = "0.30.0"
-serde = { version = "1.0.219", features = ["derive"] }
+ratatui = { version = "0.30.0", optional = true }
+serde = { version = "1.0.219", features = ["derive"], optional = true }
 serde_json = "1.0.140"
 shellexpand = { version = "3.1.2", default-features = false, features = ["full"] }
-tempfile = "3.27.0"
 thiserror = "2.0.12"
 tokio = { version = "1.52.4", features = [
     "fs",
@@ -43,19 +61,43 @@ tokio = { version = "1.52.4", features = [
     "sync",
     "time",
 ] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 tonic = { version = "0.14.6", features = ["transport"] }
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tokio-stream = { version = "0.1.17", features = ["net"] }
 tokio-util = { version = "0.7.16", features = ["io"] }
-tower = "0.5.2"
-uuid = { version = "1.24.0", features = ["v4"] }
+tower = { version = "0.5.2", optional = true }
+uuid = { version = "1.24.0", features = ["v4"], optional = true }
 
-[workspace.lints.rust]
+[build-dependencies]
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.2.0"
+tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[[bin]]
+name = "file-peeker"
+path = "src/bin/file-peeker.rs"
+required-features = ["tui"]
+
+[[bin]]
+name = "file-peeker-client"
+path = "src/bin/file-peeker-client.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "file-peeker-server"
+path = "src/bin/file-peeker-server.rs"
+required-features = ["server"]
+
+[lints.rust]
+unreachable_pub = "warn"
 unsafe_code = "forbid"
 
-[workspace.lints.clippy]
+[lints.clippy]
 all = "warn"
 pedantic = "warn"

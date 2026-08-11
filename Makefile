@@ -1,19 +1,24 @@
 SHELL := /bin/bash
 
-.PHONY: all check docs-check fmt lint test verify
+.PHONY: all check docs-check fmt lint slim-server test verify
 
 all: check
 
-check: fmt lint test
+check: fmt lint slim-server test
 
 fmt:
 	cargo fmt --all --check
 
 lint:
-	cargo clippy --workspace --all-targets
+	cargo clippy --all-targets
+
+# Targets whose `required-features` are unmet are silently skipped unless named
+# explicitly, so the slim build the remote installer uses needs its own check.
+slim-server:
+	cargo check --no-default-features --features server --bin file-peeker-server
 
 test:
-	cargo test --workspace
+	cargo test
 
 docs-check:
 	bash scripts/check-docs.sh

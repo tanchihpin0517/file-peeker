@@ -1,0 +1,510 @@
+use crate::EntryKind;
+use ratatui::{
+    Frame,
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+};
+
+use super::{App, BrowserTab, NewBrowserDialog, Overlay, SessionRecordId, session::SessionStatus};
+use crate::tui::browser_context::{
+    BrowserContext, BrowserRow, ExpansionStatus, ListingStatus, OpenStatus,
+};
+
+impl App {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>) {
+        let [header, tabs, body, footer] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .areas(frame.area());
+
+        let header_text = self.active_context_id.and_then(|id| {
+            let tab = self.contexts.get(&id)?;
+            let label = &self.sessions.get(&tab.session_id)?.label;
+            Some(format!("{label}  {}", tab.context.root_path()))
+        });
+        frame.render_widget(
+            Paragraph::new(header_text.as_deref().unwrap_or("No active browser")).block(
+                Block::default()
+                    .title(" File Peeker ")
+                    .borders(Borders::ALL),
+            ),
+            header,
+        );
+        self.render_tabs(frame, tabs);
+
+        if self.active_context().is_some() {
+            let context = self
+                .active_context_mut()
+                .expect("active context was checked before rendering");
+            let (viewport_offset, viewport_height) = render_file_list(
+                frame,
+                body,
+                context.rows().iter().map(row_list_item),
+                context.effective_selection(),
+                context.viewport_offset(),
+            );
+            context.set_viewport(viewport_offset, viewport_height);
+        } else {
+            frame.render_widget(
+                Paragraph::new("No browser contexts\n\nS: sessions  q/Esc: quit")
+                    .alignment(Alignment::Center)
+                    .block(Block::default().title(" Files ").borders(Borders::ALL)),
+                body,
+            );
+        }
+
+        frame.render_widget(Paragraph::new(self.footer_text()), footer);
+        self.render_overlay(frame);
+        if let Some(path) = self
+            .active_context()
+            .and_then(BrowserContext::pending_open_path)
+        {
+            render_open_confirmation(frame, path);
+        }
+    }
+
+    fn render_tabs(&self, frame: &mut Frame<'_>, area: Rect) {
+        if area.width == 0 {
+            return;
+        }
+        let labels: Vec<_> = self
+            .context_order
+            .iter()
+            .filter_map(|id| {
+                let tab = self.contexts.get(id)?;
+                let session = self.sessions.get(&tab.session_id)?;
+                Some((*id, tab_label(&session.label, tab)))
+            })
+            .collect();
+        if labels.is_empty() {
+            frame.render_widget(Paragraph::new(" (no tabs) "), area);
+            return;
+        }
+        let active = self
+            .active_context_id
+            .and_then(|id| labels.iter().position(|(candidate, _)| *candidate == id))
+            .unwrap_or(0);
+        let width = usize::from(area.width);
+        let mut start = active;
+        let mut used = labels
+            .get(active)
+            .map_or(0, |(_, label)| label.chars().count() + 3);
+        while start > 0 {
+            let needed = labels[start - 1].1.chars().count() + 3;
+            if used + needed > width {
+                break;
+            }
+            start -= 1;
+            used += needed;
+        }
+        let mut end = active.saturating_add(1);
+        while end < labels.len() {
+            let needed = labels[end].1.chars().count() + 3;
+            if used + needed > width {
+                break;
+            }
+            used += needed;
+            end += 1;
+        }
+        let spans = labels[start..end].iter().map(|(id, label)| {
+            let style = if Some(*id) == self.active_context_id {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Span::styled(format!(" {label} "), style)
+        });
+        frame.render_widget(Paragraph::new(spans.collect::<Line>()), area);
+    }
+
+    fn footer_text(&self) -> String {
+        let controls = match self.input_mode() {
+            super::InputMode::Main if self.active_context_id.is_none() => {
+                "S: sessions  q/Esc: quit"
+            }
+            super::InputMode::Main => {
+                "y: copy  p: paste  [: previous  ]: next  n: new browser  x: close  S: sessions  q/Esc: quit"
+            }
+            super::InputMode::SessionManager => {
+                "j/k: select  Enter: activate  n: new browser  a: add  d: close  q/Esc: dismiss"
+            }
+            super::InputMode::TargetChooser => "j/k: select  Enter: choose  Esc: cancel",
+            super::InputMode::RemoteInput | super::InputMode::NewBrowser => {
+                "Enter: submit  Backspace: edit  Esc: cancel"
+            }
+            super::InputMode::SessionCloseConfirmation => "Enter/y: close Session  q/Esc: cancel",
+            super::InputMode::FileOpenConfirmation => "o: confirm  q/Esc: cancel",
+            super::InputMode::TransferOverwriteConfirmation => "Enter/y: overwrite  q/Esc: cancel",
+        };
+        let browser_status = self.active_context().map_or_else(
+            || "Ready".into(),
+            |context| match context.open_status() {
+                OpenStatus::Opening(path) => format!("Opening {path}…"),
+                OpenStatus::Opened(path) => format!("Opened {path}"),
+                OpenStatus::Failed { path, error } => {
+                    format!("Error opening {path}: {error}")
+                }
+                OpenStatus::Idle => {
+                    if let Some((path, error)) = context.selected_expansion_error() {
+                        format!("Error expanding {path}: {error}")
+                    } else {
+                        match context.status() {
+                            ListingStatus::Loading => "Loading…".into(),
+                            ListingStatus::Complete => {
+                                format!("{} items", context.rows().len())
+                            }
+                            ListingStatus::Failed(error) => format!("Error: {error}"),
+                        }
+                    }
+                }
+            },
+        );
+        let transfer_status = self.status_message.as_deref().unwrap_or(&browser_status);
+        let status = self.status_error.as_deref().map_or_else(
+            || transfer_status.to_owned(),
+            |error| format!("{error}  Current browser: {browser_status}"),
+        );
+        format!("{status}  {controls}")
+    }
+
+    fn render_overlay(&self, frame: &mut Frame<'_>) {
+        match &self.overlay {
+            Overlay::None => {}
+            Overlay::SessionManager => self.render_session_manager(frame),
+            Overlay::TargetChooser { selected_ssh } => {
+                render_choice(frame, *selected_ssh);
+            }
+            Overlay::RemoteInput { input } => render_text_dialog(
+                frame,
+                " Add SSH Session ",
+                &[
+                    Line::from("SSH destination:"),
+                    Line::styled(input, input_style()),
+                ],
+            ),
+            Overlay::NewBrowser(dialog) => self.render_new_browser(frame, dialog),
+            Overlay::CloseConfirmation { session_id } => {
+                self.render_close_confirmation(frame, *session_id);
+            }
+            Overlay::TransferOverwriteConfirmation(request) => {
+                self.render_transfer_overwrite_confirmation(frame, request);
+            }
+        }
+    }
+
+    fn render_session_manager(&self, frame: &mut Frame<'_>) {
+        let area = popup_area(frame.area(), 76, 18);
+        frame.render_widget(Clear, area);
+        let block = Block::default()
+            .title(" Session Manager ")
+            .borders(Borders::ALL);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if self.session_order.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No Sessions\n\na: add session").alignment(Alignment::Center),
+                inner,
+            );
+            return;
+        }
+        let [list_area, detail_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(inner);
+        let items = self.session_order.iter().filter_map(|id| {
+            let record = self.sessions.get(id)?;
+            debug_assert_eq!(record.id, *id);
+            let count = self
+                .contexts
+                .values()
+                .filter(|tab| tab.session_id == *id)
+                .count();
+            let status = match &record.status {
+                SessionStatus::Starting => "Starting".into(),
+                SessionStatus::Ready => "Ready".into(),
+                SessionStatus::Failed(error) => format!("Failed: {error}"),
+                SessionStatus::Closing => "Closing".into(),
+            };
+            Some(ListItem::new(format!(
+                "{}  {}  {status}  {count} browser(s)",
+                record.label,
+                record.target_summary()
+            )))
+        });
+        let selected = self.selected_session_id.and_then(|id| {
+            self.session_order
+                .iter()
+                .position(|candidate| *candidate == id)
+        });
+        let mut state = ListState::default().with_selected(selected);
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_symbol("> ")
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            list_area,
+            &mut state,
+        );
+        if let Some(error) = self
+            .selected_session_id
+            .and_then(|id| self.sessions.get(&id))
+            .and_then(|record| match &record.status {
+                SessionStatus::Failed(error) => Some(error.as_str()),
+                _ => None,
+            })
+        {
+            frame.render_widget(
+                Paragraph::new(format!("Startup error: {error}"))
+                    .style(Style::default().fg(Color::Red))
+                    .wrap(Wrap { trim: false }),
+                detail_area,
+            );
+        }
+    }
+
+    fn render_new_browser(&self, frame: &mut Frame<'_>, dialog: &NewBrowserDialog) {
+        let label = self
+            .sessions
+            .get(&dialog.session_id)
+            .map_or("Unknown", |record| record.label.as_str());
+        let mut lines = vec![
+            Line::from(format!("Session: {label}")),
+            Line::from("Path:"),
+            Line::styled(dialog.input.as_str(), input_style()),
+        ];
+        if dialog.request_id.is_some() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Resolving…"));
+        }
+        if let Some(error) = &dialog.error {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                format!("Error: {error}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        render_text_dialog(frame, " New Browser ", &lines);
+    }
+
+    fn render_close_confirmation(&self, frame: &mut Frame<'_>, id: SessionRecordId) {
+        let Some(record) = self.sessions.get(&id) else {
+            return;
+        };
+        let count = self
+            .contexts
+            .values()
+            .filter(|tab| tab.session_id == id)
+            .count();
+        render_text_dialog(
+            frame,
+            " Close Session ",
+            &[
+                Line::from(format!("Close Session \"{}\"?", record.label)),
+                Line::from(format!("{count} browser context(s) will close.")),
+                Line::from(""),
+                Line::from("Press Enter or y to confirm."),
+            ],
+        );
+    }
+
+    fn render_transfer_overwrite_confirmation(
+        &self,
+        frame: &mut Frame<'_>,
+        request: &super::TransferRequest,
+    ) {
+        let label = self
+            .sessions
+            .get(&request.destination_session_id)
+            .map_or("Unknown", |record| record.label.as_str());
+        render_text_dialog(
+            frame,
+            " Replace Existing File ",
+            &[
+                Line::from(format!(
+                    "\"{}\" already exists in Session \"{label}\".",
+                    request.source_name
+                )),
+                Line::from(format!("Destination: {}", request.destination_root)),
+                Line::from(""),
+                Line::from("Press Enter or y to overwrite it."),
+            ],
+        );
+    }
+}
+
+fn tab_label(session_label: &str, tab: &BrowserTab) -> String {
+    let path = tab.context.root_path();
+    let compact = if path == "/" {
+        "/"
+    } else {
+        path.trim_end_matches('/')
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(path)
+    };
+    format!("{session_label}:{compact}")
+}
+
+fn render_file_list<'a>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    entries: impl IntoIterator<Item = ListItem<'a>>,
+    selected: Option<usize>,
+    viewport_offset: usize,
+) -> (usize, usize) {
+    let block = Block::default().title(" Files ").borders(Borders::ALL);
+    let viewport_height = usize::from(block.inner(area).height);
+    let mut state = ListState::default()
+        .with_offset(viewport_offset)
+        .with_selected(selected);
+    frame.render_stateful_widget(
+        List::new(entries)
+            .block(block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ")
+            .scroll_padding(1),
+        area,
+        &mut state,
+    );
+    (state.offset(), viewport_height)
+}
+
+fn row_list_item(row: &BrowserRow) -> ListItem<'static> {
+    let (_, style) = entry_appearance(row.entry().kind);
+    let prefix = if row.entry().navigable {
+        match row.expansion() {
+            ExpansionStatus::Collapsed => "▸ ",
+            ExpansionStatus::Loading { .. } => "… ",
+            ExpansionStatus::Expanded { .. } => "▾ ",
+            ExpansionStatus::Failed { .. } => "! ",
+        }
+    } else {
+        entry_appearance(row.entry().kind).0
+    };
+    ListItem::new(Line::styled(
+        format!("{}{prefix}{}", "  ".repeat(row.depth()), row.entry().name),
+        style,
+    ))
+}
+
+fn entry_appearance(kind: EntryKind) -> (&'static str, Style) {
+    match kind {
+        EntryKind::File => ("  ", Style::default()),
+        EntryKind::Directory => (
+            "▸ ",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        EntryKind::Symlink => ("@ ", Style::default().fg(Color::Cyan)),
+        EntryKind::Other => ("? ", Style::default().fg(Color::Yellow)),
+    }
+}
+
+fn render_choice(frame: &mut Frame<'_>, selected_ssh: bool) {
+    let area = popup_area(frame.area(), 34, 8);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Add Session ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut state = ListState::default().with_selected(Some(usize::from(selected_ssh)));
+    frame.render_stateful_widget(
+        List::new(["Local", "SSH"])
+            .highlight_symbol("> ")
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        inner,
+        &mut state,
+    );
+}
+
+fn render_text_dialog(frame: &mut Frame<'_>, title: &str, lines: &[Line<'_>]) {
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(4)
+        .clamp(6, 18);
+    let area = popup_area(frame.area(), 72, height);
+    frame.render_widget(Clear, area);
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines.to_vec())).wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_open_confirmation(frame: &mut Frame<'_>, path: &str) {
+    render_text_dialog(
+        frame,
+        " Confirm open ",
+        &[
+            Line::from("Open this file?"),
+            Line::from(""),
+            Line::styled(path.to_owned(), Style::default().fg(Color::Cyan)),
+            Line::from(""),
+            Line::from("Press o again to open · Esc/q to cancel"),
+        ],
+    );
+}
+
+fn popup_area(area: Rect, preferred_width: u16, preferred_height: u16) -> Rect {
+    let width = preferred_width.min(area.width.saturating_sub(2).max(1));
+    let height = preferred_height.min(area.height.saturating_sub(2).max(1));
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn input_style() -> Style {
+    Style::default().fg(Color::Cyan)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::App;
+
+    fn rendered(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn sessionless_startup_has_actionable_manager_and_shell() {
+        let mut app = App::new();
+        let output = rendered(&mut app, 80, 24);
+        assert!(output.contains("Session Manager"));
+        assert!(output.contains("a: add session"));
+        assert!(output.contains("File Peeker"));
+    }
+
+    #[tokio::test]
+    async fn active_tab_header_and_path_render() {
+        let mut app = App::new();
+        app.start(Some(".")).await.unwrap();
+        let output = rendered(&mut app, 80, 24);
+        assert!(output.contains("Local:"));
+        assert!(output.contains("Local  "));
+        assert!(output.contains("Files"));
+        assert!(!output.contains("Locations"));
+        app.shutdown().await.unwrap();
+    }
+}

@@ -548,57 +548,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
-name = "file-peeker-client"
+name = "file-peeker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "crossterm",
  "dirs",
- "file-peeker-core",
- "file-peeker-server",
- "futures",
- "hyper-util",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
- "tonic",
- "tonic-health",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "file-peeker-core"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "shellexpand",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "file-peeker-server"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "clap",
- "file-peeker-core",
  "futures",
  "getrandom 0.3.4",
+ "hyper-util",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "ratatui",
+ "serde",
  "serde_json",
+ "shellexpand",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -608,19 +575,9 @@ dependencies = [
  "tonic-health",
  "tonic-prost",
  "tonic-prost-build",
-]
-
-[[package]]
-name = "file-peeker-tui"
-version = "0.1.0"
-dependencies = [
- "clap",
- "crossterm",
- "file-peeker-client",
- "futures",
- "ratatui",
- "tempfile",
- "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
