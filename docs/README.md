@@ -36,7 +36,7 @@ and link to that owner rather than duplicate implementation details.
 | Document | Owns |
 | --- | --- |
 | [Architecture](architecture.md) | System vocabulary, component boundaries and high-level data flow |
-| [Code structure](code-structure.md) | Current module placement, growth rules and implemented placement examples |
+| [Code structure](code-structure.md) | Current module placement, dependency direction, binary targets and features, growth rules and implemented placement examples |
 | [Session lifecycle](session-lifecycle.md) | Startup, reconnection, cancellation and shutdown |
 | [Remote protocol](protocol.md) | RPCs, protobuf shapes, wire limits and gRPC status mapping |
 | [Client API](api.md) | Caller-visible Rust surface |

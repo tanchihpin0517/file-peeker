@@ -1,8 +1,9 @@
 # File Peeker v1 Architecture
 
-File Peeker is a read-only browser whose filesystem behavior lives in a reusable
-Rust core. A shared client exposes one typed asynchronous API to the Ratatui
-frontend and to the command-line interface.
+File Peeker is a read-only browser whose filesystem behavior lives in a
+reusable, transport-neutral module. A shared client exposes one typed
+asynchronous API to the Ratatui frontend and to the command-line interface.
+All of it is one crate producing three binaries.
 
 See [Code Structure](code-structure.md) for the current module plan, operation
 placement rules, and the expected structure for future features.
@@ -33,12 +34,13 @@ virtual filesystem.
 
 ## Core, backends, and transport
 
-`file-peeker-core` owns absolute lexical path resolution, directory enumeration,
-entry classification, backpressure, cancellable file reading, and filesystem
-errors. It has no protobuf dependency.
+`crate::fs` owns absolute lexical path resolution, directory enumeration, entry
+classification, backpressure, cancellable file reading, and filesystem errors.
+It names no protobuf types. That separation is now a placement rule rather than
+a manifest boundary; see [Code Structure](code-structure.md#dependency-direction).
 Both backends use its `DirectoryEntry` and `EntryKind` value types, which the
-client re-exports instead of defining client-owned copies. Each core instance
-calls the native filesystem APIs of its own host.
+Session layer re-exports instead of defining copies of its own. Each `FsService`
+instance calls the native filesystem APIs of its own host.
 
 `Client` strongly retains its Sessions by UUID. A local Session owns an
 in-process core service and starts no executable or network connection. A

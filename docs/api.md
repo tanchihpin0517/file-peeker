@@ -1,7 +1,12 @@
 # File Peeker API
 
-The public application API is the Rust `file-peeker-client` crate. It exposes
-directory listings one entry at a time.
+The application API is the `Client` and `Session` layer of the `file-peeker`
+crate, reached as `crate::Client` and `crate::Session`. It exposes directory
+listings one entry at a time.
+
+The layer is crate-internal: the two front ends are modules of the same crate,
+so nothing is exported beyond the three binary entry points. "Public" below
+means the surface the `tui` and `cli` modules consume, not a published API.
 
 ## Public interface
 
@@ -93,17 +98,20 @@ tree. The requested root is excluded, direct children have depth 1, and each
 `WalkEntry` includes an opaque selected-host relative path plus its
 final-component `DirectoryEntry`. Symlinks are emitted but never followed.
 Earlier entries remain valid when a descendant, cancellation, transport, or
-protocol error terminates the stream. Local walks execute in client core;
-remote walks execute once in server core through the streaming Walk RPC.
+protocol error terminates the stream. Local walks execute in the client's `fs` layer;
+remote walks execute once in the server's `fs` layer through the streaming Walk
+RPC.
 `list_dir` remains the separate one-level operation. Walk has no TUI surface.
 
 ## Testing against a Session
 
-The `test-support` feature exposes fixtures for driving Session workflows
-without a real filesystem, remote host, or operating-system opener:
-`test_support::FakeBackend` replays scripted listings and records requests,
-`test_support::RecordingOpener` records open requests and replays scripted
-failures, and `Session::for_test` and `Session::closed_for_test` assemble a
-Session from them. Depend on the feature from `[dev-dependencies]` only. The
-workspace uses Cargo's v2 resolver, so it reaches test builds without being
-unified into release builds.
+`test_support` provides fixtures for driving Session workflows without a real
+filesystem, remote host, or operating-system opener: `FakeBackend` replays
+scripted listings and records requests, `RecordingOpener` records open requests
+and replays scripted failures, and `Session::for_test` and
+`Session::closed_for_test` assemble a Session from them.
+
+The module is compiled under `#[cfg(test)]`, so it cannot reach a release build
+and every test module in the crate — including the TUI's — gets the fixtures
+without a feature flag. Nothing outside the crate can test against a scripted
+Session; the fixtures are internal scaffolding, not a supported surface.

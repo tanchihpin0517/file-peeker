@@ -1,6 +1,6 @@
 # Client CLI
 
-`file-peeker-client` is a test-only command-line tool for exercising the native
+The `file-peeker-client` binary is a test-only command-line tool for exercising the native
 local backend and remote server provisioning, startup, and gRPC connections.
 
 ## `test` subcommands
@@ -15,8 +15,8 @@ and prints the port and token as one line of JSON. `--force` reinstalls the
 remote server first. Exiting closes the server's stdin lifetime lease.
 
 ```text
-cargo run -p file-peeker-client -- test connect example.test
-cargo run -p file-peeker-client -- test connect --force example.test
+cargo run --bin file-peeker-client -- test connect example.test
+cargo run --bin file-peeker-client -- test connect --force example.test
 ```
 
 ### `test install [--force] [--from-source PATH] SERVER`
@@ -31,9 +31,9 @@ command uploads the Git-aware contents of local `PATH` to
 option does not change normal connection provisioning, which remains Git-only.
 
 ```text
-cargo run -p file-peeker-client -- test install example.test
-cargo run -p file-peeker-client -- test install --force example.test
-cargo run -p file-peeker-client -- test install --force --from-source /path/to/file-peeker example.test
+cargo run --bin file-peeker-client -- test install example.test
+cargo run --bin file-peeker-client -- test install --force example.test
+cargo run --bin file-peeker-client -- test install --force --from-source /path/to/file-peeker example.test
 ```
 
 ### `test ssh-connection SERVER`
@@ -42,7 +42,7 @@ Connects to `SERVER`, sends `echo 'connect to SERVER'` through SSH standard
 input, and writes only the last line of remote output to local standard output.
 
 ```text
-cargo run -p file-peeker-client -- test ssh-connection example.test
+cargo run --bin file-peeker-client -- test ssh-connection example.test
 ```
 
 ### `test start-server SERVER`
@@ -52,7 +52,7 @@ and prints its port and token as one line of JSON. The test closes the SSH input
 after startup, which stops the remote server before the command exits.
 
 ```text
-cargo run -p file-peeker-client -- test start-server example.test
+cargo run --bin file-peeker-client -- test start-server example.test
 ```
 
 ### `test list PATH [--remote SERVER]`
@@ -72,9 +72,9 @@ remote server's working directory, and shell expressions are expanded in the
 remote server's environment.
 
 ```text
-cargo run -p file-peeker-client -- test list .
-cargo run -p file-peeker-client -- test list /tmp/report-drafts
-cargo run -p file-peeker-client -- test list . --remote example.test
+cargo run --bin file-peeker-client -- test list .
+cargo run --bin file-peeker-client -- test list /tmp/report-drafts
+cargo run --bin file-peeker-client -- test list . --remote example.test
 ```
 
 ### `test open PATH [--remote SERVER]`
@@ -87,8 +87,8 @@ currently supported only on macOS. Successful commands produce no standard
 output.
 
 ```text
-cargo run -p file-peeker-client -- test open ./report.pdf
-cargo run -p file-peeker-client -- test open '~/reports/final.pdf' --remote example.test
+cargo run --bin file-peeker-client -- test open ./report.pdf
+cargo run --bin file-peeker-client -- test open '~/reports/final.pdf' --remote example.test
 ```
 
 ### `test walk PATH [--remote SERVER]`
@@ -105,6 +105,6 @@ elapsed milliseconds, and entries per second. With `--remote SERVER`, traversal
 runs on that host through the authenticated gRPC connection.
 
 ```text
-cargo run -p file-peeker-client -- test walk .
-cargo run -p file-peeker-client -- test walk ~/reports --remote example.test
+cargo run --bin file-peeker-client -- test walk .
+cargo run --bin file-peeker-client -- test walk ~/reports --remote example.test
 ```

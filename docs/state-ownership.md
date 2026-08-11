@@ -1,9 +1,9 @@
 # Client and TUI State Ownership
 
-The Rust client owns connection and transport state. The TUI owns only the
-state needed to display its requested listing.
+The Client and Session layer owns connection and transport state. The TUI owns
+only the state needed to display its requested listing.
 
-| Information | Rust client library | TUI |
+| Information | Client and Session layer | TUI |
 | --- | --- | --- |
 | Session UUID and registry | UUID and strong Session registry stored in `Client` | `App` keeps ordered UI Session records, each holding the started `Arc<Session>` |
 | Unified operation interface | Private `SessionBackend` trait implemented by native `FsService` and remote `RemoteBackend`, borrowed through one guarded accessor | Uses `Session` only |

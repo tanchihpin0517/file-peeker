@@ -1,7 +1,6 @@
 # TUI Implementation
 
-The `file-peeker-tui` crate is a Ratatui frontend backed by the shared
-Rust Client. It presents ordered browser tabs across local and SSH Sessions
+`crate::tui` is a Ratatui frontend backed by the shared Rust Client. It presents ordered browser tabs across local and SSH Sessions
 while rendering one active Browser Context at a time.
 
 ## Ownership

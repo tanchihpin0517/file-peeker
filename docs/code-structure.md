@@ -7,7 +7,7 @@ parts:
 2. placement and growth rules for future changes; and
 3. implemented examples showing how those rules apply.
 
-The goal is not to make every crate mirror every operation. Each layer should
+The goal is not to make every layer mirror every operation. Each layer should
 own one coherent responsibility and expose the smallest useful interface to the
 layer above it.
 
@@ -21,14 +21,16 @@ failure policy and resource lifetime.
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| `file-peeker-core` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Session selection, SSH, gRPC, UI behavior |
+| `crate::fs` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Session selection, SSH, gRPC, UI behavior |
+| `crate::protocol` | The generated wire contract and its transport limits, shared by both sides of the gRPC hop | Any filesystem or workflow behavior |
 | `SessionBackend` | Primitive capabilities against the Session's selected host | Multi-step user workflows or operating-system UI actions |
-| `Session` | Public, target-independent workflow entry points, backend lock/lifecycle, and selected-host/client-host phase ordering | Staging mechanics, system-command details, or protobuf |
+| `Session` | Target-independent workflow entry points, backend lock/lifecycle, and selected-host/client-host phase ordering | Staging mechanics, system-command details, or protobuf |
 | Client `FileService` | Client-host file preparation and operating-system workflows after selected-host data is acquired | Backend access, selected-host primitives, transport, or Session lifecycle |
 | Remote backend modules | One gRPC request/response adapter per backend capability | Public workflow policy |
-| Server `ops` | RPC validation, protobuf conversion, transport batching and delegation to core | Client workflows and UI state |
-| TUI | Application state, input routing, rendering and task ownership | Filesystem and transport semantics |
-| `test_support` | Scripted Session fixtures behind the `test-support` feature | Production behavior; it is never enabled in release builds |
+| `crate::server` | Listener and process lifecycle, plus RPC validation, protobuf conversion, transport batching and delegation to `fs` | Client workflows and UI state |
+| `crate::tui` | Application state, input routing, rendering and task ownership | Filesystem and transport semantics |
+| `crate::cli` | A test-only command surface that drives `Client` and `Session` workflows one at a time, and remote server provisioning over SSH | Behavior of its own; it composes existing workflows and prints results |
+| `test_support` | Scripted Session fixtures | Production behavior; it is compiled under `cfg(test)` only |
 
 The main boundary is:
 
@@ -50,13 +52,59 @@ can be done against the selected host?”, while a Session operation answers
 more involved workflows may compose several backend capabilities plus
 client-host behavior.
 
-### Core
+### One package, three binaries
 
 Status: implemented.
 
+Everything lives in a single package rooted at the repository. The three
+binaries under `src/bin/` are shims: each one calls the `run` entry point of its
+feature-gated module, so all logic stays in the library where `cfg(test)` reaches
+it.
+
 ```text
-crates/file-peeker-core/src/
-├── lib.rs
+Cargo.toml   build.rs   proto/file_peeker.proto
+src/
+├── lib.rs                  module declarations and the crate-internal facade
+├── fs/                     host-local filesystem behavior
+├── protocol.rs             wire contract, including the generated `v1` module
+├── client.rs  session/     the Client and Session layer
+├── test_support.rs         cfg(test) fixtures
+├── server/                 the file-peeker-server binary's logic
+├── cli/                    the file-peeker-client binary's logic
+├── tui/                    the file-peeker binary's logic
+└── bin/
+    ├── file-peeker.rs          -> tui::run()
+    ├── file-peeker-client.rs   -> cli::run()
+    └── file-peeker-server.rs   -> server::run()
+```
+
+### Dependency direction
+
+Four crates used to make the layering a compile error. One package does not, so
+the rule is now written down and only partly enforced. A module may name:
+
+| Module | May name |
+| --- | --- |
+| `fs` | nothing else in the crate |
+| `protocol` | nothing else in the crate |
+| `session`, `client` | `fs`, `protocol` |
+| `server` | `fs`, `protocol` — never `session` or `client` |
+| `tui`, `cli` | the crate-root facade (`Client`, `Session`, the entry types) |
+
+`fs` and `protocol` being unreachable from `tui` is convention only. The rest is
+enforced: `session`, `client`, and the facade are gated on the `client` feature,
+which `server` does not enable, so a `--features server` build cannot compile a
+reference to them.
+
+Visibility carries the rest. Only `tui::run`, `cli::run`, and `server::run` are
+`pub`; everything else is `pub(crate)` or private, and the `unreachable_pub`
+lint keeps it that way.
+
+### The filesystem layer
+
+```text
+src/fs/
+├── mod.rs
 ├── error.rs
 ├── fs_service.rs
 ├── resolve_path.rs
@@ -69,7 +117,10 @@ crates/file-peeker-core/src/
     └── walk.rs
 ```
 
-- `lib.rs` is a thin crate facade and re-exports public types.
+Spell paths into this module `crate::fs::…`. A bare `fs::…` would collide with
+`std::fs` at any call site that imports it.
+
+- `mod.rs` is a thin facade and re-exports the types other layers use.
 - `FsService` is the cohesive entry point for filesystem behavior and shared
   cancellation.
 - `resolve_path.rs`, `read.rs`, and `write.rs` hold focused operations that do not yet form
@@ -87,7 +138,7 @@ file-oriented operations need shared types or policy.
 Status: implemented.
 
 ```text
-crates/file-peeker-client/src/session/
+src/session/
 ├── mod.rs
 ├── path.rs
 ├── directory/
@@ -117,8 +168,9 @@ crates/file-peeker-client/src/session/
 │       ├── read_file.rs
 │       ├── write_file.rs
 │       └── walk_dir.rs
-└── test_support.rs
 ```
+
+`src/client.rs` and `src/test_support.rs` sit beside this tree at the crate root.
 
 - `session/mod.rs` owns Session construction, lifecycle and the private backend
   handle.
@@ -142,9 +194,10 @@ crates/file-peeker-client/src/session/
   client-streaming request framing and response validation.
 - `backend/connection/` owns remote connection and server-process lifecycle,
   not filesystem operations.
-- `test_support.rs` provides scripted `Session` fixtures for other crates. It is
-  compiled only under the `test-support` feature, which consumers enable from
-  `[dev-dependencies]`.
+- `test_support.rs` provides the scripted `Session` fixtures every test module
+  shares. A `#[cfg(test)] mod tests` in one file cannot see helpers declared in
+  another, so the fixtures need a module of their own; `cfg(test)` then keeps them
+  structurally unreachable from any release build.
 
 `read_file` remains a private backend primitive rather than a caller-facing
 native read operation. The Session open-file workflow consumes it directly:
@@ -156,10 +209,9 @@ stream, while remote Sessions consume the owned stream into a client-host cache.
 Status: implemented.
 
 ```text
-crates/file-peeker-server/src/
-├── lib.rs
-├── main.rs
-├── server.rs
+src/server/
+├── mod.rs
+├── serve.rs
 └── ops/
     ├── mod.rs
     ├── entry.rs
@@ -170,8 +222,9 @@ crates/file-peeker-server/src/
     └── walk.rs
 ```
 
-- `main.rs` is the thin CLI entry point.
-- `server.rs` owns listener setup, authentication, health reporting, startup,
+- `mod.rs` owns command-line parsing, version reporting, and `run`, the single
+  `pub` item the `file-peeker-server` shim calls.
+- `serve.rs` owns listener setup, authentication, health reporting, startup,
   shutdown and the `serve` lifecycle.
 - `ops/mod.rs` is the tonic service adapter and keeps trivial delegation, such
   as path resolution, inline.
@@ -189,8 +242,8 @@ without variation.
 Status: implemented.
 
 ```text
-crates/file-peeker-tui/src/
-├── main.rs
+src/tui/
+├── mod.rs
 ├── browser_context.rs
 └── app/
     ├── mod.rs
@@ -198,8 +251,8 @@ crates/file-peeker-tui/src/
     └── view.rs
 ```
 
-- `main.rs` retains CLI parsing, terminal setup/restore, the event loop and
-  direct key-to-command mapping.
+- `mod.rs` retains command-line parsing, terminal setup/restore, the event loop,
+  direct key-to-command mapping, and `run`.
 - `app/mod.rs` owns `App`, ordered Session and tab records, lifecycle event/task
   routing, explicit UI modes, and application commands.
 - `app/session.rs` narrowly owns TUI Session identity, derived labels, target
@@ -214,13 +267,69 @@ This split keeps high-level orchestration visible without fragmenting
 `BrowserContext` into state, event and task files that would need to understand
 the same invariants.
 
+### Test CLI
+
+Status: implemented.
+
+```text
+src/cli/
+├── mod.rs
+├── command.rs
+├── connect.rs
+├── install.rs
+├── list.rs
+├── open.rs
+├── ssh_connection.rs
+├── start_server.rs
+├── walk.rs
+└── install-server-from-source.sh
+```
+
+- `command.rs` owns the clap tree, tracing setup, and `run`.
+- One module per subcommand, each driving a single `Client` or `Session`
+  workflow and printing what it observed. These modules add no behavior of their
+  own; see [Client CLI](client-cli.md).
+- `install.rs` and its bundled shell script own remote provisioning from an
+  uploaded source tree. The script is `include_str!`'d, so it has to sit beside
+  the module rather than in `scripts/`.
+
+### Binary targets and features
+
+`default` enables all three binaries, so `cargo test` and
+`cargo clippy --all-targets` cover everything without extra flags.
+
+| Feature | Adds | Gated dependencies |
+| --- | --- | --- |
+| `client` | `client.rs`, `session/`, and the crate-root facade | async-trait, dirs, hyper-util, serde, tower, tracing, uuid |
+| `cli` | `crate::cli` and the `file-peeker-client` binary; implies `client` | tracing-subscriber |
+| `tui` | `crate::tui` and the `file-peeker` binary; implies `client` | crossterm, ratatui |
+| `server` | `crate::server` and the `file-peeker-server` binary | none |
+
+Each `[[bin]]` declares its feature as `required-features`. This is what lets
+remote provisioning build a server without the front ends:
+
+```sh
+cargo install --no-default-features --features server --bin file-peeker-server …
+```
+
+`fs`, `protocol`, and the proto codegen in `build.rs` stay unconditional. Both
+sides of the wire use `protocol::v1`, and the generated code names prost and
+tonic, so those cannot be gated behind `server`.
+
+One hazard comes with `required-features`: `build`, `check`, `test`, and
+`clippy --all-targets` **silently skip** a target whose features are unmet unless
+it is named explicitly. `cargo clippy --all-targets --no-default-features` lints
+zero binaries and still reports success. `make check` therefore runs a
+`slim-server` step that names the binary, so a feature mistake fails the build
+instead of vanishing.
+
 ## Part II: Placement and growth rules
 
 ### Placement rule for a new operation
 
 Before adding a file, identify the operation's semantic owner:
 
-1. Put host-local filesystem mechanics in core.
+1. Put host-local filesystem mechanics in `crate::fs`.
 2. Put a primitive selected-host capability in `SessionBackend`.
 3. Implement local and remote adapters only when that capability must work on
    both targets.
@@ -250,22 +359,26 @@ are actually shared.
 - Keep streaming pull-based and preserve partial results followed by a terminal
   error unless a feature explicitly requires different semantics.
 - Avoid adding UI surface area until a concrete consumer needs it.
-- Prefer a `test-support` fixture over a trait introduced only to be faked.
+- Prefer a `cfg(test)` fixture in `test_support` over a trait introduced only
+  to be faked.
+- Keep a new binary's logic in a feature-gated module with a single `run` entry
+  point. Do not put logic in `src/bin/`: a binary target cannot see the
+  library's `cfg(test)` items.
 
 ### Server growth
 
 - Keep small validation/delegation methods in `ops/mod.rs`.
 - Give each behavior-heavy streaming RPC its own `ops/<operation>.rs` module.
-- Keep transport limits and protobuf conversion on the server side; core
+- Keep transport limits and protobuf conversion on the server side; `fs`
   streams should not inherit gRPC message-size policy.
 - Introduce shared operation infrastructure only after at least two operations
   need the same invariant.
-- Do not add a server repository/backend abstraction while `FsService` remains
+- Do not add a server repository/backend abstraction while `fs::FsService` remains
   the sole implementation.
 
 ### TUI growth
 
-- Keep the current pure mode-aware key mapping in `main.rs`; add
+- Keep the current pure mode-aware key mapping in `tui/mod.rs`; add
   `app/input.rs` only if configurable bindings or a command palette justify it.
 - Add a `locations/` or sidebar domain only when it owns state and actions, not
   merely because a second panel is rendered.
@@ -280,7 +393,7 @@ are actually shared.
    cancellation and error behavior.
 2. Place the behavior at its semantic owner rather than copying the operation
    across all layers.
-3. Add core types and facade re-exports only when the behavior is
+3. Add `fs` types and facade re-exports only when the behavior is
    transport-neutral.
 4. Extend `SessionBackend` only for a selected-host primitive.
 5. Add local and remote implementations, plus protocol and server work, only
@@ -304,13 +417,13 @@ ordering, cancellation and error semantics.
 Implemented structure:
 
 ```text
-crates/file-peeker-core/src/directory/
+src/fs/directory/
 ├── mod.rs
 ├── entry.rs
 ├── list.rs
 └── walk.rs
 
-crates/file-peeker-client/src/session/
+src/session/
 ├── directory/
 │   ├── mod.rs
 │   ├── list.rs
@@ -324,14 +437,14 @@ crates/file-peeker-client/src/session/
         ├── list_dir.rs
         └── walk_dir.rs
 
-crates/file-peeker-server/src/ops/
+src/server/ops/
 ├── mod.rs
 ├── entry.rs
 ├── list.rs
 └── walk.rs
 ```
 
-Core list and walk share entry inspection because classification is a
+`fs` list and walk share entry inspection because classification is a
 host-local filesystem concern. The client exposes separate directory workflows
 and backend capabilities. The server shares entry conversion and transport
 limits while retaining distinct List and Walk protobuf adapters. This keeps
@@ -359,12 +472,12 @@ Session::op_open_file(path)
 The backend seam supplies selected-host primitives. Session owns backend
 lifecycle and phase ordering. `FileService` owns client-host preparation and
 operating-system integration but cannot access a backend. It is a workflow
-facade, not a replacement for core `FsService` or `SessionBackend`.
+facade, not a replacement for `fs::FsService` or `SessionBackend`.
 
 The file domain is:
 
 ```text
-crates/file-peeker-client/src/session/
+src/session/
 ├── file/
 │   ├── mod.rs
 │   ├── open.rs

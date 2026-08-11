@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="1130" viewBox="0 0 900 1130" role="img" aria-labelledby="title description">
   <title id="title">Unified SessionBackend operation flow</title>
-  <desc id="description">From top to bottom, callers use one Session API and Session delegates through SessionBackend. The local FsService and the remote File Peeker server both connect to the same shared file-peeker-core implementation, which accesses the filesystem on the host where it executes.</desc>
+  <desc id="description">From top to bottom, callers use one Session API and Session delegates through SessionBackend. The local FsService and the remote File Peeker server both connect to the same shared fs implementation, which accesses the filesystem on the host where it executes.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-head"/>
@@ -83,7 +83,7 @@
   <path class="edge remote-edge" d="M 675 740 V 750 C 675 775 500 760 500 780"/>
 
   <rect class="backend" x="310" y="780" width="280" height="100" rx="12"/>
-  <text x="450" y="819">file-peeker-core</text>
+  <text x="450" y="819">crate::fs</text>
   <text class="secondary" x="450" y="846">shared filesystem implementation</text>
 
   <path class="edge local-edge" d="M 400 880 V 910 C 400 935 225 925 225 965"/>
