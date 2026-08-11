@@ -1,6 +1,6 @@
 use std::{io, path::Path};
 
-use crate::session::backend::connection::remote::{
+use crate::session::backend::connection::ssh::{
     create_ssh_connection, get_server_executable, start_server,
 };
 use tokio::io::AsyncWriteExt as _;

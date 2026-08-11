@@ -1,13 +1,9 @@
-use std::{io::Write as _, sync::Arc};
+use std::sync::Arc;
 
 use crate::fs::FsService;
 use crate::protocol::v1::file_peeker_server::FilePeekerServer;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncReadExt as _, stdin},
-    net::TcpListener,
-    sync::oneshot,
-};
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Status, service::Interceptor, transport::Server};
@@ -15,7 +11,7 @@ use tonic::{Request, Status, service::Interceptor, transport::Server};
 use super::ops;
 
 const MAX_CONCURRENT_STREAMS: u32 = 128;
-const SERVER_STARTUP_PREFIX: &str = "FILE_PEEKER_SERVER_STARTUP=";
+const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub(crate) enum ServerError {
@@ -27,11 +23,35 @@ pub(crate) enum ServerError {
     Grpc(#[from] tonic::transport::Error),
 }
 
-pub(crate) async fn serve() -> Result<(), ServerError> {
+/// One running File Peeker server and the credentials a client needs to reach
+/// it.
+///
+/// The server runs on its own task, so the same code serves the standalone
+/// `file-peeker-server` process and a client that embeds its own server for a
+/// local Session. Both learn where to connect the same way: an ephemeral
+/// loopback port plus a bearer token.
+#[derive(Debug)]
+pub(crate) struct ServerHandle {
+    port: u16,
+    token: Arc<str>,
+    fs: FsService,
+    shutdown: CancellationToken,
+    task: JoinHandle<Result<(), ServerError>>,
+}
+
+/// Binds an ephemeral IPv4 loopback port, mints a token, and starts serving.
+///
+/// Returns once the listener is bound and the serving task is spawned, so a
+/// caller can connect to the reported port immediately.
+///
+/// # Errors
+///
+/// Returns an error when the loopback listener cannot be bound or the
+/// authentication token cannot be generated.
+pub(crate) async fn start() -> Result<ServerHandle, ServerError> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     let token = Arc::<str>::from(generate_token()?);
-    let cancellation_token = CancellationToken::new();
     let fs = FsService::new();
     let service = ops::FilePeekerService::new(fs.clone());
     let file_peeker = tonic::service::interceptor::InterceptedService::new(
@@ -49,34 +69,72 @@ pub(crate) async fn serve() -> Result<(), ServerError> {
         AuthInterceptor::new(Arc::clone(&token)),
     );
 
-    println!(
-        "{SERVER_STARTUP_PREFIX}{}",
-        serde_json::json!({ "port": port, "token": token.as_ref() })
-    );
-    std::io::stdout().flush()?;
+    let shutdown = CancellationToken::new();
+    let serving_shutdown = shutdown.clone();
+    let task = tokio::spawn(async move {
+        Server::builder()
+            .max_concurrent_streams(Some(MAX_CONCURRENT_STREAMS))
+            .add_service(health)
+            .add_service(file_peeker)
+            .serve_with_incoming_shutdown(
+                TcpListenerStream::new(listener),
+                serving_shutdown.cancelled_owned(),
+            )
+            .await?;
+        Ok(())
+    });
 
-    let (shutdown_result_sender, shutdown_result_receiver) = oneshot::channel();
-    let server_cancellation_token = cancellation_token.clone();
-    let fs_to_cancel = fs.clone();
-    let shutdown = async move {
-        let result = wait_for_shutdown().await;
-        fs_to_cancel.cancel();
-        server_cancellation_token.cancel();
-        let _ = shutdown_result_sender.send(result);
-    };
+    Ok(ServerHandle {
+        port,
+        token,
+        fs,
+        shutdown,
+        task,
+    })
+}
 
-    Server::builder()
-        .max_concurrent_streams(Some(MAX_CONCURRENT_STREAMS))
-        .add_service(health)
-        .add_service(file_peeker)
-        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
-        .await?;
+impl ServerHandle {
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
 
-    shutdown_result_receiver
-        .await
-        .map_err(|_| ServerError::Protocol {
-            message: "shutdown monitor stopped without a result".into(),
-        })?
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Stops the server and waits for its task to finish.
+    ///
+    /// The filesystem service is cancelled before the listener stops, so an
+    /// in-flight listing, walk, or read fails with a `Cancelled` status rather
+    /// than racing the transport into an ambiguous connection error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the serving task failed, panicked, or missed the
+    /// bounded shutdown deadline.
+    pub(crate) async fn shutdown(self) -> Result<(), ServerError> {
+        self.fs.cancel();
+        self.shutdown.cancel();
+        match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(ServerError::Protocol {
+                message: format!("serving task did not finish cleanly: {error}"),
+            }),
+            Err(_) => Err(ServerError::Protocol {
+                message: "server did not stop within 5 seconds".into(),
+            }),
+        }
+    }
+
+    /// Stops the server without waiting, for a drop path that cannot await.
+    ///
+    /// Only an embedded server needs this: the binary always shuts down from an
+    /// async context.
+    #[cfg(feature = "client")]
+    pub(crate) fn abort(self) {
+        self.fs.cancel();
+        self.shutdown.cancel();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -132,58 +190,27 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
-async fn wait_for_shutdown() -> Result<(), ServerError> {
-    let mut stdin = stdin();
-    let mut probe = [0_u8; 1];
-    tokio::select! {
-        result = stdin.read(&mut probe) => match result? {
-            0 => Ok(()),
-            _ => Err(ServerError::Protocol {
-                message: "server stdin is a lifetime lease and does not accept data".into(),
-            }),
-        },
-        result = termination_signal() => result,
-    }
-}
-
-#[cfg(unix)]
-async fn termination_signal() -> Result<(), ServerError> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut terminate = signal(SignalKind::terminate())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    tokio::select! {
-        _ = terminate.recv() => Ok(()),
-        _ = interrupt.recv() => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{path::Path, sync::Arc};
 
-    use crate::fs::FsService;
     use crate::protocol::{
         FILE_PEEKER_SERVICE_NAME,
         v1::{
             ListRequest, ReadRequest, ResolvePathRequest, WalkRequest, WriteCommit, WriteConflict,
-            WriteFrame, WriteHeader, file_peeker_client::FilePeekerClient,
-            file_peeker_server::FilePeekerServer, write_frame,
+            WriteFrame, WriteHeader, file_peeker_client::FilePeekerClient, write_frame,
         },
     };
     use futures::{TryStreamExt, stream};
-    use tokio::net::TcpListener;
-    use tokio_stream::wrappers::TcpListenerStream;
-    use tokio_util::sync::CancellationToken;
     use tonic::{
         Code, Request,
         metadata::MetadataValue,
         service::Interceptor,
-        transport::{Channel, Endpoint, Server},
+        transport::{Channel, Endpoint},
     };
     use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
-    use super::ops;
-    use super::{AuthInterceptor, constant_time_eq};
+    use super::{AuthInterceptor, ServerHandle, constant_time_eq, start};
 
     #[test]
     fn token_is_256_bits_of_hex() {
@@ -213,46 +240,27 @@ mod tests {
         assert!(!constant_time_eq(b"token", b"short"));
     }
 
-    #[tokio::test]
-    async fn authenticated_health_unary_and_streaming_rpcs_work_together() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let cancellation_token = CancellationToken::new();
-        let fs = FsService::new();
-        let service = ops::FilePeekerService::new(fs.clone());
-        let token: Arc<str> = Arc::from("expected-token");
-        let file_peeker =
-            FilePeekerServer::with_interceptor(service, AuthInterceptor::new(Arc::clone(&token)));
-        let (health_reporter, health_service) = tonic_health::server::health_reporter();
-        health_reporter
-            .set_serving::<FilePeekerServer<ops::FilePeekerService>>()
-            .await;
-        let health = tonic::service::interceptor::InterceptedService::new(
-            health_service,
-            AuthInterceptor::new(Arc::clone(&token)),
-        );
-        let server_cancellation_token = cancellation_token.clone();
-        let server = tokio::spawn(async move {
-            Server::builder()
-                .add_service(health)
-                .add_service(file_peeker)
-                .serve_with_incoming_shutdown(
-                    TcpListenerStream::new(listener),
-                    server_cancellation_token.cancelled_owned(),
-                )
-                .await
-                .unwrap();
-        });
-
-        let channel = Endpoint::from_shared(format!("http://{address}"))
+    async fn connect(handle: &ServerHandle) -> Channel {
+        Endpoint::from_shared(format!("http://127.0.0.1:{}", handle.port()))
             .unwrap()
             .connect()
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn authenticated_health_unary_and_streaming_rpcs_work_together() {
+        let handle = start().await.unwrap();
+        let token = handle.token().to_owned();
+        let channel = connect(&handle).await;
+
         let health_response = HealthClient::new(channel.clone())
-            .check(authenticated(HealthCheckRequest {
-                service: FILE_PEEKER_SERVICE_NAME.into(),
-            }))
+            .check(authenticated(
+                HealthCheckRequest {
+                    service: FILE_PEEKER_SERVICE_NAME.into(),
+                },
+                &token,
+            ))
             .await
             .unwrap()
             .into_inner();
@@ -272,7 +280,10 @@ mod tests {
         );
 
         let resolved = client
-            .resolve_path(authenticated(ResolvePathRequest { path: ".".into() }))
+            .resolve_path(authenticated(
+                ResolvePathRequest { path: ".".into() },
+                &token,
+            ))
             .await
             .unwrap()
             .into_inner();
@@ -283,9 +294,12 @@ mod tests {
             .await
             .unwrap();
         let batches = client
-            .list(authenticated(ListRequest {
-                path: fixture.path().to_string_lossy().into_owned(),
-            }))
+            .list(authenticated(
+                ListRequest {
+                    path: fixture.path().to_string_lossy().into_owned(),
+                },
+                &token,
+            ))
             .await
             .unwrap()
             .into_inner()
@@ -300,24 +314,53 @@ mod tests {
             1
         );
 
-        assert_walk_rpc(&mut client, fixture.path()).await;
-        assert_read_rpc(&mut client, fixture.path()).await;
-        assert_write_rpc(&mut client, fixture.path()).await;
+        assert_walk_rpc(&mut client, fixture.path(), &token).await;
+        assert_read_rpc(&mut client, fixture.path(), &token).await;
+        assert_write_rpc(&mut client, fixture.path(), &token).await;
 
-        cancellation_token.cancel();
-        fs.cancel();
-        server.await.unwrap();
+        handle.shutdown().await.unwrap();
     }
 
-    async fn assert_walk_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path) {
+    #[tokio::test]
+    async fn shutdown_releases_the_loopback_port() {
+        let handle = start().await.unwrap();
+        let port = handle.port();
+        connect(&handle).await;
+
+        handle.shutdown().await.unwrap();
+
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "a stopped server should not accept connections"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_server_mints_its_own_port_and_token() {
+        let first = start().await.unwrap();
+        let second = start().await.unwrap();
+
+        assert_ne!(first.port(), second.port());
+        assert_ne!(first.token(), second.token());
+
+        first.shutdown().await.unwrap();
+        second.shutdown().await.unwrap();
+    }
+
+    async fn assert_walk_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path, token: &str) {
         tokio::fs::create_dir(fixture.join("nested")).await.unwrap();
         tokio::fs::write(fixture.join("nested/child.txt"), b"")
             .await
             .unwrap();
         let batches = client
-            .walk(authenticated(WalkRequest {
-                path: fixture.to_string_lossy().into_owned(),
-            }))
+            .walk(authenticated(
+                WalkRequest {
+                    path: fixture.to_string_lossy().into_owned(),
+                },
+                token,
+            ))
             .await
             .unwrap()
             .into_inner()
@@ -332,14 +375,17 @@ mod tests {
         );
     }
 
-    async fn assert_read_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path) {
+    async fn assert_read_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path, token: &str) {
         let payload = b"streamed payload";
         let payload_path = fixture.join("payload.bin");
         tokio::fs::write(&payload_path, payload).await.unwrap();
         let chunks = client
-            .read(authenticated(ReadRequest {
-                path: payload_path.to_string_lossy().into_owned(),
-            }))
+            .read(authenticated(
+                ReadRequest {
+                    path: payload_path.to_string_lossy().into_owned(),
+                },
+                token,
+            ))
             .await
             .unwrap()
             .into_inner()
@@ -355,15 +401,18 @@ mod tests {
         );
 
         let error = client
-            .read(authenticated(ReadRequest {
-                path: fixture.to_string_lossy().into_owned(),
-            }))
+            .read(authenticated(
+                ReadRequest {
+                    path: fixture.to_string_lossy().into_owned(),
+                },
+                token,
+            ))
             .await
             .expect_err("directory read should fail before streaming");
         assert_eq!(error.code(), Code::FailedPrecondition);
     }
 
-    async fn assert_write_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path) {
+    async fn assert_write_rpc(client: &mut FilePeekerClient<Channel>, fixture: &Path, token: &str) {
         let frames = stream::iter([
             WriteFrame {
                 payload: Some(write_frame::Payload::Header(WriteHeader {
@@ -383,7 +432,7 @@ mod tests {
             },
         ]);
         let response = client
-            .write(authenticated(frames))
+            .write(authenticated(frames, token))
             .await
             .unwrap()
             .into_inner();
@@ -405,13 +454,16 @@ mod tests {
                 payload: Some(write_frame::Payload::Data(b"prefix".to_vec())),
             },
         ]);
-        let error = client.write(authenticated(incomplete)).await.unwrap_err();
+        let error = client
+            .write(authenticated(incomplete, token))
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), Code::InvalidArgument);
         assert!(!fixture.join("incomplete.bin").exists());
     }
 
-    fn authenticated<T>(message: T) -> Request<T> {
-        let mut value = MetadataValue::try_from("Bearer expected-token").unwrap();
+    fn authenticated<T>(message: T, token: &str) -> Request<T> {
+        let mut value = MetadataValue::try_from(format!("Bearer {token}")).unwrap();
         value.set_sensitive(true);
         let mut request = Request::new(message);
         request.metadata_mut().insert("authorization", value);

@@ -19,7 +19,7 @@ use futures::{FutureExt as _, StreamExt as _, stream};
 
 use super::error::operation_status_error;
 use crate::session::backend::{
-    BackendWriteConflict, BackendWriteResult, ReadStream, WriteFuture, connection::RemoteConnection,
+    BackendWriteConflict, BackendWriteResult, ReadStream, WriteFuture, connection::ServerConnection,
 };
 
 enum RequestState {
@@ -35,16 +35,13 @@ enum RequestState {
 }
 
 pub(super) fn write_file(
-    connection: &RemoteConnection,
+    connection: &ServerConnection,
     directory: String,
     name: String,
     conflict: BackendWriteConflict,
     source: ReadStream,
 ) -> WriteFuture {
-    let channel = match connection.channel() {
-        Ok(channel) => channel,
-        Err(error) => return futures::future::ready(Err(error)).boxed(),
-    };
+    let channel = connection.channel();
     let header = WriteHeader {
         directory,
         name,

@@ -12,24 +12,38 @@ use tokio::{
 };
 
 use super::{
-    ConnectionInfo, ensure_server_executable, read_server_startup, shell_quote, stop_child,
+    ConnectionInfo, Route, ServerHost, ensure_server_executable, read_server_startup, shell_quote,
+    stop_child,
 };
 
-pub(super) async fn prepare(
+/// A `file-peeker-server` process on a remote host, reached through the SSH
+/// process that launched it.
+///
+/// `stdin` is the server's lifetime lease: closing it stops the server. The
+/// same SSH process also provides the SOCKS5 proxy that operation streams use.
+#[derive(Debug)]
+pub(super) struct SshServer {
+    pub(super) child: Child,
+    pub(super) stdin: ChildStdin,
+    pub(super) stdout: BufReader<ChildStdout>,
+}
+
+/// Installs the matching server on `remote_server` if needed, starts it, and
+/// reports where to reach it.
+///
+/// # Errors
+///
+/// Returns an error when SSH cannot be started, installation fails, or the
+/// server does not report valid startup information.
+pub(super) async fn start(
     ssh_executable: &Path,
     remote_server: &str,
     force_install: bool,
-) -> io::Result<(
-    u16,
-    Child,
-    ChildStdin,
-    BufReader<ChildStdout>,
-    ConnectionInfo,
-)> {
+) -> io::Result<(ServerHost, ConnectionInfo, Route)> {
     tracing::debug!(remote_server, "creating SSH connection");
-    let (port, mut child, mut stdin, mut stdout) =
+    let (socks_port, mut child, mut stdin, mut stdout) =
         create_ssh_connection(ssh_executable, remote_server).await?;
-    tracing::debug!(socks_port = port, "SSH connection created");
+    tracing::debug!(socks_port, "SSH connection created");
     let startup = async {
         tracing::debug!("ensuring server executable");
         let mut command_output = tokio::io::sink();
@@ -42,7 +56,18 @@ pub(super) async fn prepare(
     }
     .await;
     match startup {
-        Ok(info) => Ok((port, child, stdin, stdout, info)),
+        Ok(info) => {
+            let route = Route::Socks5 {
+                socks_port,
+                server_port: info.server_port,
+            };
+            let host = ServerHost::Ssh(Box::new(SshServer {
+                child,
+                stdin,
+                stdout,
+            }));
+            Ok((host, info, route))
+        }
         Err(error) => {
             drop(stdin);
             drop(stdout);
@@ -125,6 +150,7 @@ pub(crate) async fn start_server(
     read_server_startup(server_stdout).await
 }
 
+/// Opens one operation stream to the remote server through the SSH proxy.
 pub(super) async fn open_operation_stream(
     socks_port: u16,
     server_port: u16,
@@ -132,6 +158,53 @@ pub(super) async fn open_operation_stream(
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, socks_port)).await?;
     connect_socks5(&mut stream, server_port).await?;
     Ok(stream)
+}
+
+/// Ends the server's lifetime lease and waits for the SSH process to exit.
+///
+/// # Errors
+///
+/// Returns an error when the process exits unsuccessfully or misses the bounded
+/// shutdown deadline.
+pub(super) async fn shutdown(server: Box<SshServer>) -> io::Result<()> {
+    let SshServer {
+        mut child,
+        stdin,
+        stdout,
+    } = *server;
+    drop(stdin);
+    drop(stdout);
+    match tokio::time::timeout(super::SHUTDOWN_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(io::Error::other(format!(
+            "server process exited unsuccessfully: {status}"
+        ))),
+        Ok(Err(error)) => Err(error),
+        Err(_) => {
+            stop_child(&mut child).await;
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "server did not stop within 5 seconds",
+            ))
+        }
+    }
+}
+
+/// Stops the server without waiting, for a drop path that cannot await.
+pub(super) fn abort(server: Box<SshServer>) {
+    let SshServer {
+        mut child,
+        stdin,
+        stdout,
+    } = *server;
+    drop(stdin);
+    drop(stdout);
+    let _ = child.start_kill();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let _ = child.wait().await;
+        });
+    }
 }
 
 fn available_loopback_port() -> io::Result<u16> {

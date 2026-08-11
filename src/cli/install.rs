@@ -1,6 +1,6 @@
 use std::{io, path::Path, process::Stdio};
 
-use crate::session::backend::connection::remote;
+use crate::session::backend::connection::ssh;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, copy},
     process::{Child, Command},
@@ -213,9 +213,9 @@ fn shell_quote(value: &str) -> String {
 
 async fn install_remote_server(destination: &str, force_install: bool) -> io::Result<String> {
     let (_port, mut child, mut ssh_stdin, mut ssh_stdout) =
-        remote::create_ssh_connection(Path::new("ssh"), destination).await?;
+        ssh::create_ssh_connection(Path::new("ssh"), destination).await?;
     let mut command_output = tokio::io::stdout();
-    let executable = remote::get_server_executable(
+    let executable = ssh::get_server_executable(
         &mut ssh_stdin,
         &mut ssh_stdout,
         force_install,
@@ -237,7 +237,7 @@ async fn install_remote_server_from_source(
     remote_source: &str,
 ) -> io::Result<String> {
     let (_port, mut child, mut ssh_stdin, mut ssh_stdout) =
-        remote::create_ssh_connection(Path::new("ssh"), destination).await?;
+        ssh::create_ssh_connection(Path::new("ssh"), destination).await?;
     let mut command_output = tokio::io::stdout();
     let executable = run_source_installer(
         &mut ssh_stdin,

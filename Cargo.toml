@@ -20,11 +20,13 @@ default = ["cli", "server", "tui"]
 # front ends. `protocol` and `fs` stay unconditional: both sides of the wire use
 # them, which is also why prost and tonic cannot be gated.
 cli = ["client", "dep:tracing-subscriber"]
-server = []
+server = ["server-core"]
 tui = ["client", "dep:crossterm", "dep:ratatui"]
 # Internal: the Client/Session layer the two front ends share. Enable it through
-# `cli` or `tui` rather than directly.
+# `cli` or `tui` rather than directly. It pulls in `server-core` because a local
+# Session runs its own server in-process.
 client = [
+    "server-core",
     "dep:async-trait",
     "dep:hyper-util",
     "dep:serde",
@@ -32,6 +34,9 @@ client = [
     "dep:tracing",
     "dep:uuid",
 ]
+# Internal: the gRPC service and its loopback listener. Both front ends embed it
+# and the server binary wraps it, so enable it through `client` or `server`.
+server-core = []
 
 [dependencies]
 async-trait = { version = "0.1.91", optional = true }

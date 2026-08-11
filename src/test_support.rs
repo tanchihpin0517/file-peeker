@@ -15,7 +15,7 @@ use futures::{StreamExt as _, stream};
 
 use crate::{
     EntryStream, WalkStream,
-    session::backend::{ReadStream, SessionBackend},
+    session::backend::{BackendWriteConflict, ReadStream, SessionBackend, WriteFuture},
 };
 
 /// A `SessionBackend` that replays scripted results and records its requests.
@@ -135,6 +135,17 @@ impl SessionBackend for FakeBackend {
     async fn read_file(&self, path: &str) -> io::Result<ReadStream> {
         self.inner.read_paths.lock().unwrap().push(path.to_owned());
         Ok(stream::empty().boxed())
+    }
+
+    /// No test scripts a write: transfers are covered against real servers.
+    fn write_file(
+        &self,
+        _directory: String,
+        _name: String,
+        _conflict: BackendWriteConflict,
+        _source: ReadStream,
+    ) -> WriteFuture {
+        Box::pin(async { Err(io::Error::other("no scripted write")) })
     }
 
     async fn close(self: Box<Self>) -> io::Result<()> {

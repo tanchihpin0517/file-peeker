@@ -69,6 +69,16 @@ mod tests {
             unreachable!()
         }
 
+        fn write_file(
+            &self,
+            _directory: String,
+            _name: String,
+            _conflict: crate::session::backend::BackendWriteConflict,
+            _source: ReadStream,
+        ) -> crate::session::backend::WriteFuture {
+            unreachable!("writing is not used by this test")
+        }
+
         async fn close(self: Box<Self>) -> io::Result<()> {
             self.cancellation.cancel();
             Ok(())

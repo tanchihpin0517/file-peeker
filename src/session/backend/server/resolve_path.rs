@@ -3,10 +3,10 @@ use std::{io, path::Path};
 use crate::protocol::v1::{ResolvePathRequest, file_peeker_client::FilePeekerClient};
 
 use super::error::operation_status_error;
-use crate::session::backend::connection::RemoteConnection;
+use crate::session::backend::connection::ServerConnection;
 
-pub(super) async fn resolve_path(connection: &RemoteConnection, path: &str) -> io::Result<String> {
-    let channel = connection.channel()?;
+pub(super) async fn resolve_path(connection: &ServerConnection, path: &str) -> io::Result<String> {
+    let channel = connection.channel();
     let request = connection.request(ResolvePathRequest {
         path: path.to_owned(),
     })?;

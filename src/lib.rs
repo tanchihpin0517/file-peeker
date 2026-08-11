@@ -24,7 +24,7 @@ mod test_support;
 
 #[cfg(feature = "cli")]
 pub mod cli;
-#[cfg(feature = "server")]
+#[cfg(feature = "server-core")]
 pub mod server;
 #[cfg(feature = "tui")]
 pub mod tui;

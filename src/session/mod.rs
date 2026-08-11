@@ -1,10 +1,9 @@
 use std::{io, sync::Arc};
 
-use crate::fs::FsService;
 use thiserror::Error;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
-use self::backend::{RemoteBackend, SessionBackend};
+use self::backend::{ServerBackend, SessionBackend, connection::ServerLocation};
 
 pub(crate) mod backend;
 pub(crate) mod directory;
@@ -13,11 +12,26 @@ mod path;
 
 pub(crate) use file::copy::{CopyConflict, CopyResult};
 
-/// Backend target retained by a session.
+/// The host a session browses.
+///
+/// Both variants run a File Peeker server and are reached the same way; the
+/// target only decides where that server runs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SessionTarget {
     Local,
     Remote { destination: String },
+}
+
+impl SessionTarget {
+    fn location(&self) -> ServerLocation {
+        match self {
+            Self::Local => ServerLocation::Embedded,
+            Self::Remote { destination } => ServerLocation::Ssh {
+                destination: destination.clone(),
+                force_install: false,
+            },
+        }
+    }
 }
 
 /// Failure to start a session backend.
@@ -50,26 +64,27 @@ impl Session {
 
     /// Starts a Session against `target`.
     ///
-    /// The target selects the backend and is not retained: the TUI records its
-    /// own copy before startup, which is the only place it is displayed.
+    /// The target only selects where the server runs and is not retained: the
+    /// TUI records its own copy before startup, which is the only place it is
+    /// displayed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend-start error when the server cannot be started,
+    /// reached, or authenticated.
     pub(crate) async fn start(
         id: String,
         target: SessionTarget,
     ) -> Result<Arc<Self>, SessionStartError> {
-        let backend: Box<dyn SessionBackend> = match &target {
-            SessionTarget::Local => Box::new(FsService::new()),
-            SessionTarget::Remote { destination } => Box::new(
-                RemoteBackend::connect(destination, false)
-                    .await
-                    .map_err(|error| SessionStartError::Backend {
-                        message: error.to_string(),
-                    })?,
-            ),
-        };
+        let backend = ServerBackend::open(target.location())
+            .await
+            .map_err(|error| SessionStartError::Backend {
+                message: error.to_string(),
+            })?;
 
         Ok(Arc::new(Self {
             id,
-            backend: RwLock::new(Some(backend)),
+            backend: RwLock::new(Some(Box::new(backend))),
         }))
     }
 
@@ -162,6 +177,16 @@ mod tests {
 
         async fn read_file(&self, _path: &str) -> std::io::Result<ReadStream> {
             unreachable!("reading is not used by this test")
+        }
+
+        fn write_file(
+            &self,
+            _directory: String,
+            _name: String,
+            _conflict: crate::session::backend::BackendWriteConflict,
+            _source: ReadStream,
+        ) -> crate::session::backend::WriteFuture {
+            unreachable!("writing is not used by this test")
         }
 
         async fn close(self: Box<Self>) -> std::io::Result<()> {

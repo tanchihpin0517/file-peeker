@@ -1,11 +1,19 @@
-use std::{io, path::Path, time::Duration};
+//! One authenticated route to a File Peeker server.
+//!
+//! The server runs either inside this process or on a remote host over SSH.
+//! Only [`ServerHost`] — which process runs it — and [`Route`] — how a stream
+//! reaches its loopback port — differ between the two. Channel construction,
+//! authentication, the health check, and shutdown ordering are shared.
 
-use crate::protocol::FILE_PEEKER_SERVICE_NAME;
+use std::{io, net::Ipv4Addr, path::Path, time::Duration};
+
+use crate::protocol::{FILE_PEEKER_SERVICE_NAME, SERVER_STARTUP_PREFIX};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt},
+    net::TcpStream,
+    process::Child,
 };
 use tonic::{
     Request,
@@ -15,12 +23,13 @@ use tonic::{
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 use tower::service_fn;
 
-pub(crate) mod remote;
+mod embedded;
+pub(crate) mod ssh;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
-const SERVER_STARTUP_PREFIX: &str = "FILE_PEEKER_SERVER_STARTUP=";
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVER_READY_PREFIX: &str = "FILE_PEEKER_SERVER_READY=";
 const SERVER_ERROR_PREFIX: &str = "FILE_PEEKER_SERVER_ERROR=";
 const ENSURE_SERVER_SCRIPT: &str = include_str!("ensure-server.sh");
@@ -32,90 +41,115 @@ struct ServerStartupResponse {
     token: String,
 }
 
-/// Information reported by a successfully started server process.
+/// Information reported by a successfully started server.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConnectionInfo {
     pub server_port: u16,
     pub token: String,
 }
 
-/// An initialized route to one managed File Peeker server process.
+/// Where a Session's server should run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ServerLocation {
+    /// Inside this process, for a local Session.
+    Embedded,
+    /// On a remote host, launched over SSH.
+    Ssh {
+        destination: String,
+        force_install: bool,
+    },
+}
+
+/// The started server itself, as the side that has to stop it sees it.
+///
+/// `SshServer` is boxed because it carries a whole child process's handles and
+/// dwarfs the embedded variant.
 #[derive(Debug)]
-pub(crate) struct RemoteConnection {
+enum ServerHost {
+    Embedded(crate::server::ServerHandle),
+    Ssh(Box<ssh::SshServer>),
+}
+
+/// How one operation stream reaches the server's loopback port.
+///
+/// Both variants produce a plain `TcpStream`; the remote one just takes a
+/// detour through the SSH process's SOCKS5 proxy.
+#[derive(Clone, Copy, Debug)]
+enum Route {
+    Direct { server_port: u16 },
+    Socks5 { socks_port: u16, server_port: u16 },
+}
+
+impl Route {
+    async fn open(self) -> io::Result<TcpStream> {
+        match self {
+            Self::Direct { server_port } => {
+                TcpStream::connect((Ipv4Addr::LOCALHOST, server_port)).await
+            }
+            Self::Socks5 {
+                socks_port,
+                server_port,
+            } => ssh::open_operation_stream(socks_port, server_port).await,
+        }
+    }
+}
+
+/// An initialized, authenticated route to one managed File Peeker server.
+#[derive(Debug)]
+pub(crate) struct ServerConnection {
     info: ConnectionInfo,
-    server: Option<RemoteServer>,
-}
-
-#[derive(Debug)]
-struct RemoteServer {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
     channel: Channel,
+    /// `None` once the server has been shut down.
+    host: Option<ServerHost>,
 }
 
-impl RemoteConnection {
-    /// Creates and initializes a connection for the configured target.
+impl ServerConnection {
+    /// Starts a server at `location` and connects to it.
     ///
     /// # Errors
     ///
-    /// Returns an error when installation, startup, connection, authentication,
+    /// Returns an error when startup, installation, connection, authentication,
     /// or the initial health check fails.
-    pub(crate) async fn from(destination: &str, force_install: bool) -> io::Result<Self> {
-        let (socks_port, child, stdin, stdout, info) =
-            remote::prepare(Path::new("ssh"), destination, force_install).await?;
-        Self::initialize(socks_port, child, stdin, stdout, info).await
+    pub(crate) async fn open(location: ServerLocation) -> io::Result<Self> {
+        let (host, info, route) = match location {
+            ServerLocation::Embedded => embedded::start().await?,
+            ServerLocation::Ssh {
+                destination,
+                force_install,
+            } => ssh::start(Path::new("ssh"), &destination, force_install).await?,
+        };
+
+        match Self::connect(&info, route).await {
+            Ok(channel) => Ok(Self {
+                info,
+                channel,
+                host: Some(host),
+            }),
+            Err(error) => {
+                abort_host(host);
+                Err(error)
+            }
+        }
     }
 
-    pub(super) async fn initialize(
-        socks_port: u16,
-        mut child: Child,
-        stdin: ChildStdin,
-        stdout: BufReader<ChildStdout>,
-        info: ConnectionInfo,
-    ) -> io::Result<Self> {
-        let endpoint = Endpoint::from_static("http://file-peeker")
+    /// Opens an authenticated channel and proves the server is serving.
+    ///
+    /// The dummy authority keeps every connection — including HTTP/2
+    /// reconnects — going through the route's connector.
+    async fn connect(info: &ConnectionInfo, route: Route) -> io::Result<Channel> {
+        let channel = Endpoint::from_static("http://file-peeker")
             .connect_timeout(CONNECT_TIMEOUT)
             .http2_keep_alive_interval(KEEPALIVE_INTERVAL)
             .keep_alive_timeout(KEEPALIVE_TIMEOUT)
-            .keep_alive_while_idle(true);
-        let server_port = info.server_port;
-        let channel = endpoint
+            .keep_alive_while_idle(true)
             .connect_with_connector(service_fn(move |_uri: Uri| async move {
-                remote::open_operation_stream(socks_port, server_port)
-                    .await
-                    .map(TokioIo::new)
+                route.open().await.map(TokioIo::new)
             }))
             .await
-            .map_err(io::Error::other);
+            .map_err(io::Error::other)?;
 
-        let channel = match channel {
-            Ok(channel) => channel,
-            Err(error) => {
-                drop(stdin);
-                drop(stdout);
-                stop_child(&mut child).await;
-                return Err(error);
-            }
-        };
-
-        if let Err(error) = check_health(channel.clone(), &info.token).await {
-            drop(channel);
-            drop(stdin);
-            drop(stdout);
-            stop_child(&mut child).await;
-            return Err(error);
-        }
-
-        Ok(Self {
-            info,
-            server: Some(RemoteServer {
-                child,
-                stdin,
-                stdout,
-                channel,
-            }),
-        })
+        check_health(channel.clone(), &info.token).await?;
+        Ok(channel)
     }
 
     #[must_use]
@@ -123,37 +157,49 @@ impl RemoteConnection {
         &self.info
     }
 
-    pub(crate) fn channel(&self) -> io::Result<Channel> {
-        self.server
-            .as_ref()
-            .map(|server| server.channel.clone())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))
+    /// Returns a handle to the open channel. Cheap: a `Channel` is refcounted.
+    ///
+    /// Infallible because `close` consumes the connection, so a caller cannot
+    /// hold one that has been shut down. A closed *Session* is rejected one
+    /// layer up, where the backend slot is emptied.
+    pub(crate) fn channel(&self) -> Channel {
+        self.channel.clone()
     }
 
     pub(crate) fn request<T>(&self, message: T) -> io::Result<Request<T>> {
         authenticated_request(message, &self.info.token)
     }
 
-    /// Gracefully shuts down this managed server through its stdin lease.
+    /// Gracefully shuts down this managed server.
     ///
     /// # Errors
     ///
     /// Returns an error when the server exits unsuccessfully or misses the
     /// bounded shutdown deadline.
     pub(crate) async fn close(mut self) -> io::Result<()> {
-        let server = self
-            .server
+        let host = self
+            .host
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
-        shutdown_server_process(server).await
+        match host {
+            ServerHost::Embedded(handle) => embedded::shutdown(handle).await,
+            ServerHost::Ssh(server) => ssh::shutdown(server).await,
+        }
     }
 }
 
-impl Drop for RemoteConnection {
+impl Drop for ServerConnection {
     fn drop(&mut self) {
-        if let Some(server) = self.server.take() {
-            stop_server_process(server);
+        if let Some(host) = self.host.take() {
+            abort_host(host);
         }
+    }
+}
+
+fn abort_host(host: ServerHost) {
+    match host {
+        ServerHost::Embedded(handle) => handle.abort(),
+        ServerHost::Ssh(server) => ssh::abort(server),
     }
 }
 
@@ -238,53 +284,6 @@ fn shell_quote(value: &str) -> String {
 async fn stop_child(child: &mut Child) {
     let _ = child.start_kill();
     let _ = child.wait().await;
-}
-
-async fn shutdown_server_process(server: RemoteServer) -> io::Result<()> {
-    let RemoteServer {
-        mut child,
-        stdin,
-        stdout,
-        channel,
-    } = server;
-    drop(channel);
-    drop(stdin);
-    drop(stdout);
-    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-        Ok(Ok(status)) if status.success() => {}
-        Ok(Ok(status)) => {
-            return Err(io::Error::other(format!(
-                "server process exited unsuccessfully: {status}"
-            )));
-        }
-        Ok(Err(error)) => return Err(error),
-        Err(_) => {
-            stop_child(&mut child).await;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "server did not stop within 5 seconds",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn stop_server_process(server: RemoteServer) {
-    let RemoteServer {
-        mut child,
-        stdin,
-        stdout,
-        channel,
-    } = server;
-    drop(channel);
-    drop(stdin);
-    drop(stdout);
-    let _ = child.start_kill();
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        runtime.spawn(async move {
-            let _ = child.wait().await;
-        });
-    }
 }
 
 fn authenticated_request<T>(message: T, token: &str) -> io::Result<Request<T>> {

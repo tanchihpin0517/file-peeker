@@ -4,10 +4,10 @@ use crate::protocol::v1::{ListRequest, ListingEntry, file_peeker_client::FilePee
 use futures::{StreamExt as _, stream};
 
 use super::{entry::convert_entry, error::operation_status_error};
-use crate::{DirectoryEntry, EntryStream, session::backend::connection::RemoteConnection};
+use crate::{DirectoryEntry, EntryStream, session::backend::connection::ServerConnection};
 
-pub(super) async fn list_dir(connection: &RemoteConnection, path: &str) -> io::Result<EntryStream> {
-    let channel = connection.channel()?;
+pub(super) async fn list_dir(connection: &ServerConnection, path: &str) -> io::Result<EntryStream> {
+    let channel = connection.channel();
     let request = connection.request(ListRequest {
         path: path.to_owned(),
     })?;
