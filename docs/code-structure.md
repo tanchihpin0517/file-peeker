@@ -26,7 +26,7 @@ failure policy and resource lifetime.
 | `SessionBackend` | Primitive capabilities against the Session's selected host | Multi-step user workflows or operating-system UI actions |
 | `Session` | Target-independent workflow entry points, backend lock/lifecycle, and cross-Session phase ordering | Transport details, server lifecycle, or protobuf |
 | `backend/connection` | Where a Session's server runs, how a stream reaches it, and its startup/shutdown | Filesystem operations or workflow policy |
-| `backend/server` modules | One gRPC request/response adapter per backend capability | Public workflow policy |
+| `backend/rpc` modules | One gRPC request/response adapter per backend capability | Public workflow policy |
 | `crate::server` | Listener and serving lifecycle, plus RPC validation, protobuf conversion, transport batching and delegation to `fs` | Client workflows and UI state |
 | `crate::tui` | Application state, input routing, rendering and task ownership | Filesystem and transport semantics |
 | `crate::cli` | A test-only command surface that drives `Client` and `Session` workflows one at a time, and remote server provisioning over SSH | Behavior of its own; it composes existing workflows and prints results |
@@ -44,7 +44,7 @@ Session workflow
 SessionBackend capability
    |
    v
-ServerBackend --> gRPC adapter --> ServerConnection
+RpcBackend --> gRPC adapter --> ServerConnection
                                      |-- embedded server ---> client-host filesystem
                                      `-- SSH -> remote server -> server-host filesystem
 ```
@@ -167,7 +167,7 @@ src/session/
 │   │   ├── embedded.rs
 │   │   ├── ssh.rs
 │   │   └── ensure-server.sh
-│   └── server/
+│   └── rpc/
 │       ├── mod.rs
 │       ├── entry.rs
 │       ├── error.rs
@@ -188,9 +188,10 @@ src/session/
 - `file/copy.rs` owns the destination-oriented Session-to-Session streamed copy
   workflow.
 - `backend/mod.rs` defines the private `SessionBackend` capability seam.
-- `backend/server/` is its one implementation: exact gRPC adapters for the
-  primitive capabilities. `server/write_file.rs` owns client-streaming request
-  framing and response validation.
+- `backend/rpc/` is its one implementation: the calling side of the protocol,
+  one module per capability, each building a request and validating the
+  response. `rpc/write_file.rs` owns client-streaming request framing.
+  `crate::server` is the handling side; the two never name each other.
 - `backend/connection/` owns server lifecycle and transport, not filesystem
   operations. `connection/mod.rs` holds everything both targets share —
   `ServerConnection`, channel construction, the bearer token, the health check —
@@ -340,7 +341,7 @@ Before adding a file, identify the operation's semantic owner:
 
 1. Put host-local filesystem mechanics in `crate::fs`.
 2. Put a primitive selected-host capability in `SessionBackend`.
-3. Put protobuf conversion and wire batching in `backend/server/` and server
+3. Put protobuf conversion and wire batching in `backend/rpc/` and server
    `ops`. There is no second adapter to write: both targets use this one.
 4. Put public multi-step ordering and lifecycle coordination in `Session`.
 5. Touch `backend/connection/` only for server lifecycle or transport, and put
@@ -435,7 +436,7 @@ src/session/
 │   └── walk.rs
 └── backend/
     ├── mod.rs
-    └── server/
+    └── rpc/
         ├── mod.rs
         ├── entry.rs
         ├── list_dir.rs

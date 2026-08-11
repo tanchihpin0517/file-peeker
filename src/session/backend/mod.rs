@@ -1,10 +1,10 @@
 //! The capability seam between a Session and its selected host.
 //!
-//! There is one implementation. Both targets reach a File Peeker server over
-//! gRPC; only the server's location differs.
+//! There is one implementation, [`RpcBackend`]. Both targets reach a File
+//! Peeker server over gRPC; only the server's location differs.
 
 pub(crate) mod connection;
-mod server;
+mod rpc;
 
 use std::{fmt::Debug, io};
 
@@ -14,7 +14,7 @@ use futures::{future::BoxFuture, stream::BoxStream};
 
 use crate::{EntryStream, WalkStream};
 
-pub(crate) use server::ServerBackend;
+pub(crate) use rpc::RpcBackend;
 
 pub(crate) type ReadStream = BoxStream<'static, io::Result<Bytes>>;
 pub(crate) type WriteFuture = BoxFuture<'static, io::Result<BackendWriteResult>>;

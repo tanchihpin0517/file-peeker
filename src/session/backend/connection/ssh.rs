@@ -12,8 +12,8 @@ use tokio::{
 };
 
 use super::{
-    ConnectionInfo, Route, ServerHost, ensure_server_executable, read_server_startup, shell_quote,
-    stop_child,
+    ConnectionInfo, Route, RunningServer, ensure_server_executable, read_server_startup,
+    shell_quote, stop_child,
 };
 
 /// A `file-peeker-server` process on a remote host, reached through the SSH
@@ -39,7 +39,7 @@ pub(super) async fn start(
     ssh_executable: &Path,
     remote_server: &str,
     force_install: bool,
-) -> io::Result<(ServerHost, ConnectionInfo, Route)> {
+) -> io::Result<(RunningServer, ConnectionInfo, Route)> {
     tracing::debug!(remote_server, "creating SSH connection");
     let (socks_port, mut child, mut stdin, mut stdout) =
         create_ssh_connection(ssh_executable, remote_server).await?;
@@ -61,12 +61,12 @@ pub(super) async fn start(
                 socks_port,
                 server_port: info.server_port,
             };
-            let host = ServerHost::Ssh(Box::new(SshServer {
+            let server = RunningServer::Ssh(Box::new(SshServer {
                 child,
                 stdin,
                 stdout,
             }));
-            Ok((host, info, route))
+            Ok((server, info, route))
         }
         Err(error) => {
             drop(stdin);

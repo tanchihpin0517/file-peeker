@@ -61,7 +61,7 @@
   <path class="edge" d="M 450 380 V 415"/>
 
   <rect class="backend" x="310" y="415" width="280" height="90" rx="12"/>
-  <text x="450" y="453">ServerBackend</text>
+  <text x="450" y="453">RpcBackend</text>
   <text class="secondary" x="450" y="479">the only implementation</text>
   <path class="edge" d="M 450 505 V 540"/>
 

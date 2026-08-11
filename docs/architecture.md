@@ -59,7 +59,8 @@ yields the closed-session error when the slot is empty, then delegates
 `resolve_path`, `list_dir`, `walk_dir`, `read_file`, `write_file`, and `close`
 through that trait. `read_file` is not exposed as a caller-facing native read
 operation; it supports the Session copy workflow. There is one implementation,
-`ServerBackend`, which turns each primitive into an authenticated RPC;
+`RpcBackend`, which turns each primitive into an authenticated RPC — it is the
+calling side of the protocol, while `crate::server` is the handling side;
 `ServerConnection` behind it owns the server lifecycle and the channel, and
 differs between targets only in which process it started and how a stream
 reaches that process. Session retains the backend in an
@@ -75,7 +76,7 @@ transfer lives under `session/file`. See
 contract.
 
 `SessionBackend` is a private capability seam, not a required one-to-one model
-of public Session workflows. `ServerBackend`'s operation modules are private
+of public Session workflows. `RpcBackend`'s operation modules are private
 gRPC request, response, stream, and error-conversion details. Recursive
 traversal is the distinct `walk_dir` capability with dedicated entry and stream
 types, rather than a `recursive: bool` mode on `list_dir`. An options type

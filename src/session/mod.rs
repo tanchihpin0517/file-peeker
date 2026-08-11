@@ -3,7 +3,7 @@ use std::{io, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
-use self::backend::{ServerBackend, SessionBackend, connection::ServerLocation};
+use self::backend::{RpcBackend, SessionBackend, connection::ServerLocation};
 
 pub(crate) mod backend;
 pub(crate) mod directory;
@@ -76,11 +76,11 @@ impl Session {
         id: String,
         target: SessionTarget,
     ) -> Result<Arc<Self>, SessionStartError> {
-        let backend = ServerBackend::open(target.location())
-            .await
-            .map_err(|error| SessionStartError::Backend {
+        let backend = RpcBackend::open(target.location()).await.map_err(|error| {
+            SessionStartError::Backend {
                 message: error.to_string(),
-            })?;
+            }
+        })?;
 
         Ok(Arc::new(Self {
             id,

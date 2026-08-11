@@ -1,7 +1,7 @@
 //! One authenticated route to a File Peeker server.
 //!
 //! The server runs either inside this process or on a remote host over SSH.
-//! Only [`ServerHost`] — which process runs it — and [`Route`] — how a stream
+//! Only [`RunningServer`] — which process runs it — and [`Route`] — how a stream
 //! reaches its loopback port — differ between the two. Channel construction,
 //! authentication, the health check, and shutdown ordering are shared.
 
@@ -48,7 +48,8 @@ pub(crate) struct ConnectionInfo {
     pub token: String,
 }
 
-/// Where a Session's server should run.
+/// Where a Session's server should run. The request that produces a
+/// [`RunningServer`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ServerLocation {
     /// Inside this process, for a local Session.
@@ -60,12 +61,13 @@ pub(crate) enum ServerLocation {
     },
 }
 
-/// The started server itself, as the side that has to stop it sees it.
+/// A server that is up, as the side responsible for stopping it sees it. The
+/// result of starting a [`ServerLocation`].
 ///
 /// `SshServer` is boxed because it carries a whole child process's handles and
 /// dwarfs the embedded variant.
 #[derive(Debug)]
-enum ServerHost {
+enum RunningServer {
     Embedded(crate::server::ServerHandle),
     Ssh(Box<ssh::SshServer>),
 }
@@ -100,7 +102,7 @@ pub(crate) struct ServerConnection {
     info: ConnectionInfo,
     channel: Channel,
     /// `None` once the server has been shut down.
-    host: Option<ServerHost>,
+    server: Option<RunningServer>,
 }
 
 impl ServerConnection {
@@ -111,7 +113,7 @@ impl ServerConnection {
     /// Returns an error when startup, installation, connection, authentication,
     /// or the initial health check fails.
     pub(crate) async fn open(location: ServerLocation) -> io::Result<Self> {
-        let (host, info, route) = match location {
+        let (server, info, route) = match location {
             ServerLocation::Embedded => embedded::start().await?,
             ServerLocation::Ssh {
                 destination,
@@ -123,10 +125,10 @@ impl ServerConnection {
             Ok(channel) => Ok(Self {
                 info,
                 channel,
-                host: Some(host),
+                server: Some(server),
             }),
             Err(error) => {
-                abort_host(host);
+                abort_server(server);
                 Err(error)
             }
         }
@@ -177,29 +179,29 @@ impl ServerConnection {
     /// Returns an error when the server exits unsuccessfully or misses the
     /// bounded shutdown deadline.
     pub(crate) async fn close(mut self) -> io::Result<()> {
-        let host = self
-            .host
+        let server = self
+            .server
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
-        match host {
-            ServerHost::Embedded(handle) => embedded::shutdown(handle).await,
-            ServerHost::Ssh(server) => ssh::shutdown(server).await,
+        match server {
+            RunningServer::Embedded(handle) => embedded::shutdown(handle).await,
+            RunningServer::Ssh(server) => ssh::shutdown(server).await,
         }
     }
 }
 
 impl Drop for ServerConnection {
     fn drop(&mut self) {
-        if let Some(host) = self.host.take() {
-            abort_host(host);
+        if let Some(server) = self.server.take() {
+            abort_server(server);
         }
     }
 }
 
-fn abort_host(host: ServerHost) {
-    match host {
-        ServerHost::Embedded(handle) => handle.abort(),
-        ServerHost::Ssh(server) => ssh::abort(server),
+fn abort_server(server: RunningServer) {
+    match server {
+        RunningServer::Embedded(handle) => handle.abort(),
+        RunningServer::Ssh(server) => ssh::abort(server),
     }
 }
 

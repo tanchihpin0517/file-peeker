@@ -1,3 +1,9 @@
+//! The calling side of the File Peeker protocol.
+//!
+//! Every module here turns one `SessionBackend` capability into a request,
+//! sends it, and validates the response. The handling side lives in
+//! [`crate::server`]; nothing in this module performs filesystem work.
+
 mod entry;
 mod error;
 mod list_dir;
@@ -16,16 +22,16 @@ use super::{
 };
 use crate::{EntryStream, WalkStream};
 
-/// Serves every Session primitive over one authenticated gRPC connection.
+/// Issues every Session primitive as an authenticated RPC.
 ///
 /// This is the only `SessionBackend`. A local Session gets a server embedded in
 /// this process and a remote Session gets one over SSH, but both arrive here.
 #[derive(Debug)]
-pub(crate) struct ServerBackend {
+pub(crate) struct RpcBackend {
     connection: ServerConnection,
 }
 
-impl ServerBackend {
+impl RpcBackend {
     /// Starts a server at `location` and connects to it.
     ///
     /// # Errors
@@ -40,7 +46,7 @@ impl ServerBackend {
 }
 
 #[async_trait]
-impl SessionBackend for ServerBackend {
+impl SessionBackend for RpcBackend {
     async fn resolve_path(&self, path: &str) -> io::Result<String> {
         resolve_path::resolve_path(&self.connection, path).await
     }
@@ -80,11 +86,11 @@ mod tests {
     use bytes::Bytes;
     use futures::{StreamExt as _, TryStreamExt as _, stream};
 
-    use super::{BackendWriteConflict, ServerBackend, ServerLocation, SessionBackend};
+    use super::{BackendWriteConflict, RpcBackend, ServerLocation, SessionBackend};
 
-    async fn embedded() -> Box<ServerBackend> {
+    async fn embedded() -> Box<RpcBackend> {
         Box::new(
-            ServerBackend::open(ServerLocation::Embedded)
+            RpcBackend::open(ServerLocation::Embedded)
                 .await
                 .expect("an embedded server should start"),
         )
@@ -93,7 +99,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_empty_destination_on_every_attempt() {
         for _ in 0..2 {
-            let error = ServerBackend::open(ServerLocation::Ssh {
+            let error = RpcBackend::open(ServerLocation::Ssh {
                 destination: String::new(),
                 force_install: false,
             })

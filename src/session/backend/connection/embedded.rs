@@ -9,7 +9,7 @@ use std::io;
 
 use crate::server;
 
-use super::{ConnectionInfo, Route, ServerHost};
+use super::{ConnectionInfo, Route, RunningServer};
 
 /// Starts an in-process server and reports where to reach it.
 ///
@@ -17,7 +17,7 @@ use super::{ConnectionInfo, Route, ServerHost};
 ///
 /// Returns an error when the server cannot bind its loopback listener or mint
 /// an authentication token.
-pub(super) async fn start() -> io::Result<(ServerHost, ConnectionInfo, Route)> {
+pub(super) async fn start() -> io::Result<(RunningServer, ConnectionInfo, Route)> {
     tracing::debug!("starting embedded server");
     let handle = server::start().await.map_err(io::Error::other)?;
     let info = ConnectionInfo {
@@ -28,7 +28,7 @@ pub(super) async fn start() -> io::Result<(ServerHost, ConnectionInfo, Route)> {
     let route = Route::Direct {
         server_port: info.server_port,
     };
-    Ok((ServerHost::Embedded(handle), info, route))
+    Ok((RunningServer::Embedded(handle), info, route))
 }
 
 /// Stops the embedded server and waits for its task to finish.
