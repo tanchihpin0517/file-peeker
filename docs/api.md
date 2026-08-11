@@ -31,28 +31,27 @@ The client re-exports core `EntryKind`, `DirectoryEntry`, and `WalkEntry` types.
 `std::io::Error`; only the Session lifecycle uses typed errors, namely
 `SessionStartError` and `SessionShutdownError`.
 
-`Client.start_session` is asynchronous. A local target constructs an in-process
-filesystem service without installing or starting a server. A remote target
-provisions and starts the matching server over SSH, then authenticates a gRPC
-health check. In both cases the core uses native filesystem APIs on its own
-host: the client host for a local Session and the server host for a remote
-Session. The Client strongly retains the returned Session, which owns either the
-native service or the remote process and SSH transport, so a caller that drops
-its handle without closing still leaves shutdown to the Client.
+`Client.start_session` is asynchronous and starts a server either way. A local
+target starts one inside this process on an ephemeral loopback port. A remote
+target provisions and starts the matching server over SSH. Both then authenticate
+a gRPC health check before the Session is returned. The core uses native
+filesystem APIs on the host running that server: the client host for a local
+Session and the server host for a remote Session. The Client strongly retains the
+returned Session, which owns that server and its transport, so a caller that
+drops its handle without closing still leaves shutdown to the Client.
 `Client.close_session` removes and gracefully closes one retained Session, and
 `Client.close_all` drains the registry. Both succeed for unknown or already
 closed IDs. Direct `Session.close()` remains idempotent but does not unregister
 the Session. Dropping Client releases all retained sessions; unclosed remote
 connections use their non-blocking fallback cleanup.
 
-The Rust client uses its private `SessionBackend` trait as the unified primitive
-interface for both targets. `Session` borrows the open backend through one
-guarded accessor and invokes the same `resolve_path`, `list_dir`, `walk_dir`,
-`read_file`, `write_file`, and `close` methods in either mode. Host-local
-filesystem behavior is implemented by core `FsService`; selected-host dispatch
-uses `SessionBackend`, with native execution locally and authenticated gRPC
-remotely. Public callers therefore use one `Session` API without selecting a
-transport-specific operation surface.
+The Rust client uses its private `SessionBackend` trait as the primitive
+interface. `Session` borrows the open backend through one guarded accessor and
+invokes `resolve_path`, `list_dir`, `walk_dir`, `read_file`, `write_file`, and
+`close`. There is one implementation for both targets: authenticated gRPC to a
+File Peeker server, whose `FsService` performs the host-local filesystem work.
+Public callers therefore use one `Session` API, and so does the client code
+underneath it — there is no transport-specific operation surface to select.
 
 The private backend `read_file` operation supports `Session.op_copy_file_from`
 but is not exposed as a caller-facing byte stream. It returns a demand-driven
@@ -85,9 +84,8 @@ tree. The requested root is excluded, direct children have depth 1, and each
 `WalkEntry` includes an opaque selected-host relative path plus its
 final-component `DirectoryEntry`. Symlinks are emitted but never followed.
 Earlier entries remain valid when a descendant, cancellation, transport, or
-protocol error terminates the stream. Local walks execute in the client's `fs` layer;
-remote walks execute once in the server's `fs` layer through the streaming Walk
-RPC.
+protocol error terminates the stream. A walk executes once in the selected
+host's `fs` layer through the streaming Walk RPC.
 `list_dir` remains the separate one-level operation. Walk has no TUI surface.
 
 ## Testing against a Session

@@ -1,7 +1,8 @@
 # Client CLI
 
-The `file-peeker-client` binary is a test-only command-line tool for exercising the native
-local backend and remote server provisioning, startup, and gRPC connections.
+The `file-peeker-client` binary is a test-only command-line tool for exercising
+the embedded local server and remote server provisioning, startup, and gRPC
+connections.
 
 ## `test` subcommands
 
@@ -57,7 +58,7 @@ cargo run --bin file-peeker-client -- test start-server example.test
 
 ### `test list PATH [--remote SERVER]`
 
-Uses the in-process filesystem core to list the direct children of `PATH`.
+Uses an embedded server to list the direct children of `PATH`.
 Relative paths are resolved from the client's working directory. Each
 child's path is written to standard output on its own line; output order follows
 the selected host's native filesystem iteration order. Shell expressions are

@@ -24,10 +24,10 @@ failure policy and resource lifetime.
 | `crate::fs` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Session selection, SSH, gRPC, UI behavior |
 | `crate::protocol` | The generated wire contract and its transport limits, shared by both sides of the gRPC hop | Any filesystem or workflow behavior |
 | `SessionBackend` | Primitive capabilities against the Session's selected host | Multi-step user workflows or operating-system UI actions |
-| `Session` | Target-independent workflow entry points, backend lock/lifecycle, and selected-host/client-host phase ordering | Staging mechanics, system-command details, or protobuf |
-| Client `FileService` | Client-host file preparation and operating-system workflows after selected-host data is acquired | Backend access, selected-host primitives, transport, or Session lifecycle |
-| Remote backend modules | One gRPC request/response adapter per backend capability | Public workflow policy |
-| `crate::server` | Listener and process lifecycle, plus RPC validation, protobuf conversion, transport batching and delegation to `fs` | Client workflows and UI state |
+| `Session` | Target-independent workflow entry points, backend lock/lifecycle, and cross-Session phase ordering | Transport details, server lifecycle, or protobuf |
+| `backend/connection` | Where a Session's server runs, how a stream reaches it, and its startup/shutdown | Filesystem operations or workflow policy |
+| `backend/server` modules | One gRPC request/response adapter per backend capability | Public workflow policy |
+| `crate::server` | Listener and serving lifecycle, plus RPC validation, protobuf conversion, transport batching and delegation to `fs` | Client workflows and UI state |
 | `crate::tui` | Application state, input routing, rendering and task ownership | Filesystem and transport semantics |
 | `crate::cli` | A test-only command surface that drives `Client` and `Session` workflows one at a time, and remote server provisioning over SSH | Behavior of its own; it composes existing workflows and prints results |
 | `test_support` | Scripted Session fixtures | Production behavior; it is compiled under `cfg(test)` only |
@@ -42,9 +42,16 @@ Session workflow
    |
    v
 SessionBackend capability
-   |-- local  --> FsService --------------------------> host filesystem
-   `-- remote --> gRPC adapter --> server op --> FsService --> host filesystem
+   |
+   v
+ServerBackend --> gRPC adapter --> ServerConnection
+                                     |-- embedded server ---> client-host filesystem
+                                     `-- SSH -> remote server -> server-host filesystem
 ```
+
+There is one backend. `ServerConnection` is where the two targets diverge, and
+they diverge in exactly two values: which process was started, and which
+connector reaches its loopback port.
 
 `Session` and `SessionBackend` remain separate. A backend method answers “what
 can be done against the selected host?”, while a Session operation answers
@@ -87,14 +94,19 @@ the rule is now written down and only partly enforced. A module may name:
 | --- | --- |
 | `fs` | nothing else in the crate |
 | `protocol` | nothing else in the crate |
-| `session`, `client` | `fs`, `protocol` |
+| `session`, `client` | `fs`, `protocol`, `server` |
 | `server` | `fs`, `protocol` — never `session` or `client` |
 | `tui`, `cli` | the crate-root facade (`Client`, `Session`, the entry types) |
 
-`fs` and `protocol` being unreachable from `tui` is convention only. The rest is
-enforced: `session`, `client`, and the facade are gated on the `client` feature,
-which `server` does not enable, so a `--features server` build cannot compile a
-reference to them.
+`session` naming `server` is the point: a local Session embeds one. The reverse
+stays forbidden and stays enforced. `session`, `client`, and the facade are gated
+on the `client` feature; `server-core` — which carries the gRPC service and its
+listener — is enabled by both `client` and `server`, but `server` does not enable
+`client`, so a `--features server` build still cannot compile a reference to
+them. `make slim-server` is what actually runs that build, because a target
+whose `required-features` are unmet is skipped in silence.
+
+`fs` and `protocol` being unreachable from `tui` is convention only.
 
 Visibility carries the rest. Only `tui::run`, `cli::run`, and `server::run` are
 `pub`; everything else is `pub(crate)` or private, and the `unreachable_pub`
@@ -150,12 +162,12 @@ src/session/
 │   └── copy.rs
 ├── backend/
 │   ├── mod.rs
-│   ├── local.rs
-│   ├── error.rs
 │   ├── connection/
 │   │   ├── mod.rs
-│   │   └── remote.rs
-│   └── remote/
+│   │   ├── embedded.rs
+│   │   ├── ssh.rs
+│   │   └── ensure-server.sh
+│   └── server/
 │       ├── mod.rs
 │       ├── entry.rs
 │       ├── error.rs
@@ -173,23 +185,17 @@ src/session/
 - `path.rs` contains Rust-native Session path workflows.
 - `directory/` contains transport-neutral directory result types and native
   Session directory workflows.
-- `file/open.rs` contains the Rust-native Session entry point and selected-host
-  coordination.
 - `file/copy.rs` owns the destination-oriented Session-to-Session streamed copy
   workflow.
-- `file/service.rs` defines the private client `FileService` facade for
-  client-host file preparation and operating-system workflows.
-- `file/stage.rs` owns platform cache-root selection, lazy private-directory
-  creation, safe streaming publication, and incomplete-file cleanup, while
-  `file/opener.rs` owns the substitutable operating-system/test seam. They
-  remain separate because cache policy and process launching are distinct
-  responsibilities.
 - `backend/mod.rs` defines the private `SessionBackend` capability seam.
-- `backend/local.rs` adapts `FsService`; `backend/remote/` contains exact gRPC
-  adapters for the same primitive capabilities. `remote/write_file.rs` owns
-  client-streaming request framing and response validation.
-- `backend/connection/` owns remote connection and server-process lifecycle,
-  not filesystem operations.
+- `backend/server/` is its one implementation: exact gRPC adapters for the
+  primitive capabilities. `server/write_file.rs` owns client-streaming request
+  framing and response validation.
+- `backend/connection/` owns server lifecycle and transport, not filesystem
+  operations. `connection/mod.rs` holds everything both targets share —
+  `ServerConnection`, channel construction, the bearer token, the health check —
+  while `embedded.rs` and `ssh.rs` hold only what differs: how the server is
+  started, how a stream reaches it, and how it is stopped.
 - `test_support.rs` provides the scripted `Session` fixtures every test module
   shares. A `#[cfg(test)] mod tests` in one file cannot see helpers declared in
   another, so the fixtures need a module of their own; `cfg(test)` then keeps them
@@ -206,6 +212,7 @@ Status: implemented.
 ```text
 src/server/
 ├── mod.rs
+├── command.rs
 ├── serve.rs
 └── ops/
     ├── mod.rs
@@ -217,10 +224,14 @@ src/server/
     └── walk.rs
 ```
 
-- `mod.rs` owns command-line parsing, version reporting, and `run`, the single
-  `pub` item the `file-peeker-server` shim calls.
-- `serve.rs` owns listener setup, authentication, health reporting, startup,
-  shutdown and the `serve` lifecycle.
+- `mod.rs` re-exports `run` for the `file-peeker-server` shim and `start` for a
+  client embedding its own server.
+- `serve.rs` owns listener setup, authentication, health reporting, and the
+  `ServerHandle` startup/shutdown lifecycle. It knows nothing about processes,
+  so the same code serves the binary and an embedded server.
+- `command.rs` is the binary's half: command-line parsing, version reporting,
+  the startup line on stdout, and the stdin lifetime lease. It is gated on the
+  `server` feature, so a client build compiles the service without it.
 - `ops/mod.rs` is the tonic service adapter and keeps trivial delegation, such
   as path resolution, inline.
 - `ops/list.rs`, `ops/read.rs`, `ops/write.rs`, and `ops/walk.rs` own behavior-heavy streaming
@@ -230,7 +241,10 @@ src/server/
 
 There is no server backend trait. The server has one real filesystem
 implementation, `FsService`; adding an interface there now would create a seam
-without variation.
+without variation. The same rule now applies on the client side, which is why
+`SessionBackend` has exactly one implementation: the variation that used to
+justify a second one moved into `ServerConnection`, where it is two enum
+variants rather than two adapters.
 
 ### TUI
 
@@ -326,14 +340,13 @@ Before adding a file, identify the operation's semantic owner:
 
 1. Put host-local filesystem mechanics in `crate::fs`.
 2. Put a primitive selected-host capability in `SessionBackend`.
-3. Implement local and remote adapters only when that capability must work on
-   both targets.
+3. Put protobuf conversion and wire batching in `backend/server/` and server
+   `ops`. There is no second adapter to write: both targets use this one.
 4. Put public multi-step ordering and lifecycle coordination in `Session`.
-5. Put post-backend client-host file preparation and OS actions in
-   `FileService`.
-6. Put protobuf conversion and wire batching in the remote adapter and server
-   `ops`.
-7. Add a UI adapter only when that boundary has a real consumer.
+5. Touch `backend/connection/` only for server lifecycle or transport, and put
+   anything both targets share in `connection/mod.rs` rather than in
+   `embedded.rs` and `ssh.rs` twice.
+6. Add a UI adapter only when that boundary has a real consumer.
 
 A public Session workflow does not require an identically named core, backend
 and RPC operation. Layers should mirror semantics only where the semantics
@@ -379,8 +392,8 @@ are actually shared.
   merely because a second panel is rendered.
 - Keep `BrowserContext` cohesive until recursive traversal, search or another
   task family proves a smaller reusable task abstraction.
-- UI modules may consume `walk_dir` or `open_file`, but they should not recreate
-  traversal, caching or transport policy.
+- UI modules may consume `walk_dir`, but they should not recreate traversal,
+  caching or transport policy.
 
 ### Checklist for adding a feature
 
@@ -391,15 +404,12 @@ are actually shared.
 3. Add `fs` types and facade re-exports only when the behavior is
    transport-neutral.
 4. Extend `SessionBackend` only for a selected-host primitive.
-5. Add local and remote implementations, plus protocol and server work, only
-   where remote execution requires them.
+5. Add the protocol, server, and backend-adapter work that primitive needs. It
+   is one path, so a capability that works for one target works for both.
 6. Add Session composition for caller workflows.
-7. Place client-host file actions behind `FileService` only after Session has
-   released its backend lock; selected-host primitives still follow the
-   core/backend placement rules.
-8. Add UI adapters only for real consumers.
-9. Keep tests beside the layer-specific invariant they verify.
-10. Update this document when the new feature changes a responsibility boundary.
+7. Add UI adapters only for real consumers.
+8. Keep tests beside the layer-specific invariant they verify.
+9. Update this document when the new feature changes a responsibility boundary.
 
 ## Part III: Implemented placement examples
 
@@ -425,8 +435,7 @@ src/session/
 │   └── walk.rs
 └── backend/
     ├── mod.rs
-    ├── local.rs
-    └── remote/
+    └── server/
         ├── mod.rs
         ├── entry.rs
         ├── list_dir.rs

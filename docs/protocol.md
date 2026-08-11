@@ -3,7 +3,8 @@
 The File Peeker remote client/server boundary uses protobuf over plaintext
 HTTP/2 on the server host's IPv4 loopback. Remote Sessions reach that endpoint
 through an OpenSSH SOCKS5 tunnel, so the remote hop is SSH-encrypted. Local
-Sessions bypass this protocol and call an in-process `FsService` directly. The
+Sessions speak the same protocol to a server embedded in the client process,
+reaching its loopback port directly instead of through a tunnel. The
 protobuf package is `file_peeker.v1`. The `.proto` source sits at `proto/` in the
 repository root and `build.rs` generates both halves into `crate::protocol`,
 which the client adapters and the server ops share directly.

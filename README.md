@@ -3,15 +3,16 @@
 File Peeker is a native macOS file browser with a Ratatui frontend backed by a
 shared Rust client and filesystem core.
 
-Local sessions run the filesystem core directly inside the application and read
-the client host's filesystem. Remote sessions install and start the matching
-server over SSH; that server runs the same core against the remote host's local
-filesystem and returns results over authenticated gRPC. The TUI starts with an
+Local sessions run a File Peeker server inside the application, reading the
+client host's filesystem. Remote sessions install and start the matching server
+over SSH, reading that host's filesystem. Either way the client talks to its
+server over authenticated gRPC, so the only difference is where the server
+runs. The TUI starts with an
 interactive Session Manager; passing a path still immediately opens that path in
 a local Session. Use `a` in Session Manager to add local or SSH Sessions and `n` to add
 a browser tab. Use `[`/`]` to switch tabs, `x` to close one, and `S` to return
 to Session Manager. Within a browser, `j`/`k` selects entries, `l` enters a
-navigable directory, `h` leaves it, `o` expands or opens, and `R` refreshes.
+navigable directory, `h` leaves it, `o` expands or collapses, and `R` refreshes.
 Press `y` on a regular file and `p` in any browser to stream it between
 Sessions. Remote-to-local copy/paste is the download workflow; an existing
 destination requires explicit overwrite confirmation.

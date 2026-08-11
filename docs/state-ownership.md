@@ -6,12 +6,12 @@ only the state needed to display its requested listing.
 | Information | Client and Session layer | TUI |
 | --- | --- | --- |
 | Session UUID and registry | UUID and strong Session registry stored in `Client` | `App` keeps ordered UI Session records, each holding the started `Arc<Session>` |
-| Unified operation interface | Private `SessionBackend` trait implemented by native `FsService` and remote `RemoteBackend`, borrowed through one guarded accessor | Uses `Session` only |
+| Unified operation interface | Private `SessionBackend` trait with one implementation, `ServerBackend`, borrowed through one guarded accessor | Uses `Session` only |
 | Server process and connection lifecycle | Owned by the Session backend slot until consuming close | Interactive tracked tasks start and close Sessions; `App.shutdown` joins or cancels them and calls `Client::close_all` |
 | gRPC channel and authentication | Stored in the remote Session backend | No |
 | Startup path | Resolves shell expressions to an absolute lexical path on the selected host | CLI or New Browser path is resolved on its selected Session before BrowserContext creation |
 | Active listing stream | Native `EntryStream` | Each `BrowserContext` owns one root task plus a task per loading expanded directory |
-| Backend-only read stream | One local core stream or one remote gRPC response stream per operation | Not exposed |
+| Backend-only read stream | One gRPC response stream per operation | Not exposed |
 | Received directory entries | Returned one-by-one, not retained | Stored as visible tree rows with full path, depth, and expansion state |
 | Loading and terminal error | Produced by the operation | Root `ListingStatus` plus independent expanded-directory states |
 | Selection | No | `selected_index` stored per `BrowserContext` |

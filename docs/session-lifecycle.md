@@ -5,11 +5,11 @@ cancellation and shutdown behavior. See [Architecture](architecture.md) for
 component responsibilities and [Remote Protocol](protocol.md) for the wire
 contract.
 
-Every `Session` owns either a native filesystem core or a managed remote server
-connection.
+Every `Session` owns one managed server and one authenticated channel to it.
+The two targets differ only in the middle of that line.
 
 ```text
-Local:  Session -> in-process filesystem core
+Local:  Session -> 127.0.0.1:SERVER_PORT -> embedded server
 Remote: Session -> SOCKS 127.0.0.1:PROXY -> SSH -> remote loopback server
 ```
 
@@ -18,22 +18,29 @@ The TUI can start either target interactively. It creates a stable UI row in
 then transitions the row to `Ready` or `Failed`. `Ready` means startup
 succeeded; the protocol has no heartbeat-backed connected state.
 
+Startup is one shared sequence: start a server somewhere, learn its loopback
+port and bearer token, connect a tonic channel through the matching connector,
+and run an authenticated health check. Steps 1 and 2 are the only ones that
+differ; a failure at any step stops the server that was just started.
+
 ## Local startup
 
-1. Construct an in-process `FsService`.
-2. Retain it as the Session's local backend.
-3. Return the Session without installing a server, spawning a child, opening a
-   port, or performing a health check.
+1. Bind an ephemeral `127.0.0.1` listener in this process, mint a token, and
+   serve on a task. No executable is installed and no child is spawned.
+2. The tonic custom connector opens a direct connection to
+   `127.0.0.1:SERVER_PORT`.
+
+The loopback port is reachable by any process on the client host for the
+Session's lifetime; the 256-bit bearer token is what keeps it private.
 
 ## Remote startup
 
-1. Start `ssh -T -D 127.0.0.1:PORT DESTINATION` with piped stdin/stdout.
-2. Through that shell, ensure the matching server executable exists and then
-   `exec` it with `serve`; the SSH stdin becomes the remote server's lease.
-3. Parse the remote startup record.
-4. The tonic custom connector opens a local connection to the SOCKS proxy,
-   performs SOCKS5 negotiation for remote `127.0.0.1:SERVER_PORT`, and runs the
-   authenticated health check over that HTTP/2 channel.
+1. Start `ssh -T -D 127.0.0.1:PORT DESTINATION` with piped stdin/stdout. Through
+   that shell, ensure the matching server executable exists and then `exec` it
+   with `serve`; the SSH stdin becomes the remote server's lease. Parse the
+   remote startup record.
+2. The tonic custom connector opens a local connection to the SOCKS proxy and
+   performs SOCKS5 negotiation for remote `127.0.0.1:SERVER_PORT`.
 
 Tonic multiplexes concurrent RPCs over one channel. If the transport drops,
 the interrupted RPC fails; a later RPC may cause tonic to reconnect through a
@@ -44,13 +51,17 @@ are never automatically replayed or resumed.
 
 `Client.close_session` removes the retained Session, and `Client.close_all`
 drains the registry; both succeed for unknown or already closed IDs.
-`Session.close` is idempotent without unregistering it. Closing a
-local Session cancels its core service and active listing, walk, file-read, and
-file-write streams. Closing a remote Session drops the channel and stdin lease.
-Server EOF cancels active listing, walk, read, and write operations and drives
-tonic graceful shutdown. Incomplete writes remove their sibling partial files.
-The client waits up to five seconds for a managed remote child, then kills and
-reaps it while returning a shutdown timeout. Drop uses best-effort non-blocking
+`Session.close` is idempotent without unregistering it. Closing any Session
+stops its server, which cancels that server's `FsService` and with it every
+active listing, walk, file-read, and file-write stream. Cancellation happens
+before the server stops accepting, so an interrupted stream reports cancellation
+rather than a transport failure. Incomplete writes remove their sibling partial
+files.
+
+A local Session cancels its serving task and joins it. A remote Session drops
+the channel and the stdin lease; server EOF drives tonic graceful shutdown on
+the far side. Either way the client waits up to five seconds, then kills and
+reaps while returning a shutdown timeout. Drop uses best-effort non-blocking
 cleanup.
 
 In the TUI, confirmed Session close first marks the row `Closing` and drops all
