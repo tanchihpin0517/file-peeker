@@ -2,7 +2,7 @@ use std::io;
 
 use futures::stream::BoxStream;
 
-use crate::session::Session;
+use crate::session::{Session, backend::rpc};
 
 pub(crate) type WalkEntry = crate::fs::WalkEntry;
 pub(crate) type WalkStream = BoxStream<'static, io::Result<WalkEntry>>;
@@ -18,107 +18,53 @@ impl Session {
     /// Returns an I/O error when the Session is closed or the selected-host
     /// traversal cannot be started. Later errors are terminal stream items.
     pub(crate) async fn op_walk_dir(&self, path: &str) -> io::Result<WalkStream> {
-        self.backend().await?.walk_dir(path).await
+        let connection = self.connection().await?;
+        rpc::walk_dir(&connection, path).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{io, sync::Arc, time::Duration};
+    use std::time::Duration;
 
     use crate::fs::{DirectoryEntry, EntryKind};
-    use async_trait::async_trait;
-    use futures::{StreamExt as _, stream};
-    use tokio::sync::Notify;
-    use tokio_util::sync::CancellationToken;
 
-    use super::{Session, WalkEntry, WalkStream};
-    use crate::{
-        EntryStream,
-        session::backend::{ReadStream, SessionBackend},
-    };
-
-    #[derive(Debug)]
-    struct WalkBackend {
-        cancellation: CancellationToken,
-        polled: Arc<Notify>,
-    }
-
-    #[async_trait]
-    impl SessionBackend for WalkBackend {
-        async fn resolve_path(&self, _path: &str) -> io::Result<String> {
-            unreachable!()
-        }
-
-        async fn list_dir(&self, _path: &str) -> io::Result<EntryStream> {
-            unreachable!()
-        }
-
-        async fn walk_dir(&self, _path: &str) -> io::Result<WalkStream> {
-            let cancellation = self.cancellation.clone();
-            let polled = self.polled.clone();
-            Ok(stream::once(async move {
-                polled.notify_one();
-                cancellation.cancelled().await;
-                Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-            })
-            .boxed())
-        }
-
-        async fn read_file(&self, _path: &str) -> io::Result<ReadStream> {
-            unreachable!()
-        }
-
-        fn write_file(
-            &self,
-            _directory: String,
-            _name: String,
-            _conflict: crate::session::backend::BackendWriteConflict,
-            _source: ReadStream,
-        ) -> crate::session::backend::WriteFuture {
-            unreachable!("writing is not used by this test")
-        }
-
-        async fn close(self: Box<Self>) -> io::Result<()> {
-            self.cancellation.cancel();
-            Ok(())
-        }
-    }
-
-    fn session(backend: Option<Box<dyn SessionBackend>>) -> Arc<Session> {
-        Arc::new(Session {
-            id: "walk-test".into(),
-            backend: tokio::sync::RwLock::new(backend),
-        })
-    }
+    use super::{Session, WalkEntry};
+    use crate::SessionTarget;
 
     #[tokio::test]
     async fn rejects_closed_sessions() {
-        let error = session(None)
+        let error = Session::closed_for_test("walk-test")
             .op_walk_dir("/fixture")
             .await
             .err()
             .expect("closed Session should reject walking");
-        assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+        assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
     }
 
+    /// `op_walk_dir` hands back an owned `'static` stream, so the connection
+    /// read lock is released before the caller sees it. Holding one open must
+    /// therefore never delay shutdown.
     #[tokio::test]
-    async fn returns_owned_streams_without_retaining_the_backend_lock() {
-        let cancellation = CancellationToken::new();
-        let polled = Arc::new(Notify::new());
-        let session = session(Some(Box::new(WalkBackend {
-            cancellation,
-            polled: polled.clone(),
-        })));
-        let mut walk = session.op_walk_dir("/fixture").await.unwrap();
-        let poll = tokio::spawn(async move { walk.next().await.unwrap().unwrap_err() });
-        polled.notified().await;
-
-        tokio::time::timeout(Duration::from_millis(250), session.close())
+    async fn close_is_not_blocked_by_an_outstanding_walk_stream() {
+        let fixture = tempfile::tempdir().unwrap();
+        for index in 0..64 {
+            tokio::fs::write(fixture.path().join(format!("entry-{index}")), b"")
+                .await
+                .unwrap();
+        }
+        let session = Session::start("walk-test".into(), SessionTarget::Local)
             .await
-            .expect("walk retained the backend read lock")
             .unwrap();
-        assert_eq!(poll.await.unwrap().kind(), io::ErrorKind::Interrupted);
+        let _walk = session
+            .op_walk_dir(fixture.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), session.close())
+            .await
+            .expect("close must not wait on an outstanding walk stream")
+            .unwrap();
     }
 
     #[test]

@@ -6,7 +6,7 @@ only the state needed to display its requested listing.
 | Information | Client and Session layer | TUI |
 | --- | --- | --- |
 | Session UUID and registry | UUID and strong Session registry stored in `Client` | `App` keeps ordered UI Session records, each holding the started `Arc<Session>` |
-| Unified operation interface | Private `SessionBackend` trait with one implementation, `RpcBackend`, borrowed through one guarded accessor | Uses `Session` only |
+| Unified operation interface | One `ServerConnection` per Session, borrowed through one guarded accessor | Uses `Session` only |
 | Server process and connection lifecycle | Owned by the Session backend slot until consuming close | Interactive tracked tasks start and close Sessions; `App.shutdown` joins or cancels them and calls `Client::close_all` |
 | gRPC channel and authentication | Stored in the remote Session backend | No |
 | Startup path | Resolves shell expressions to an absolute lexical path on the selected host | CLI or New Browser path is resolved on its selected Session before BrowserContext creation |

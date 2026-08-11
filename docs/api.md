@@ -45,13 +45,12 @@ closed IDs. Direct `Session.close()` remains idempotent but does not unregister
 the Session. Dropping Client releases all retained sessions; unclosed remote
 connections use their non-blocking fallback cleanup.
 
-The Rust client uses its private `SessionBackend` trait as the primitive
-interface. `Session` borrows the open backend through one guarded accessor and
-invokes `resolve_path`, `list_dir`, `walk_dir`, `read_file`, `write_file`, and
-`close`. There is one implementation for both targets: authenticated gRPC to a
-File Peeker server, whose `FsService` performs the host-local filesystem work.
-Public callers therefore use one `Session` API, and so does the client code
-underneath it — there is no transport-specific operation surface to select.
+`Session` holds one `ServerConnection` and borrows it through a guarded
+accessor that yields the closed-session error when the slot is empty. Each
+operation issues its request over that connection; the server's `FsService`
+performs the host-local filesystem work. Public callers therefore use one
+`Session` API, and so does the client code underneath it — there is no
+transport-specific operation surface, and no backend abstraction, to select.
 
 The private backend `read_file` operation supports `Session.op_copy_file_from`
 but is not exposed as a caller-facing byte stream. It returns a demand-driven

@@ -113,14 +113,39 @@ impl ServerConnection {
     /// Returns an error when startup, installation, connection, authentication,
     /// or the initial health check fails.
     pub(crate) async fn open(location: ServerLocation) -> io::Result<Self> {
-        let (server, info, route) = match location {
+        let started = match location {
             ServerLocation::Embedded => embedded::start().await?,
             ServerLocation::Ssh {
                 destination,
                 force_install,
             } => ssh::start(Path::new("ssh"), &destination, force_install).await?,
         };
+        Self::connected(started).await
+    }
 
+    /// Opens a connection to an embedded server that serves `service` instead
+    /// of the real filesystem adapter.
+    ///
+    /// Everything below the service is real — the listener, the bearer token,
+    /// the health check, the channel — so a test using this exercises the whole
+    /// client stack against scripted protocol responses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the server cannot be started or reached.
+    #[cfg(test)]
+    pub(crate) async fn open_scripted<S>(service: S) -> io::Result<Self>
+    where
+        S: crate::protocol::v1::file_peeker_server::FilePeeker,
+    {
+        Self::connected(embedded::start_with(service).await?).await
+    }
+
+    /// Connects to a server that has just been started, stopping it again if
+    /// the channel or health check fails.
+    async fn connected(
+        (server, info, route): (RunningServer, ConnectionInfo, Route),
+    ) -> io::Result<Self> {
         match Self::connect(&info, route).await {
             Ok(channel) => Ok(Self {
                 info,
@@ -161,9 +186,9 @@ impl ServerConnection {
 
     /// Returns a handle to the open channel. Cheap: a `Channel` is refcounted.
     ///
-    /// Infallible because `close` consumes the connection, so a caller cannot
-    /// hold one that has been shut down. A closed *Session* is rejected one
-    /// layer up, where the backend slot is emptied.
+    /// Infallible because `shutdown` consumes the connection, so a caller
+    /// cannot hold one that has been stopped. A closed *Session* is rejected
+    /// one layer up, where the connection slot is emptied.
     pub(crate) fn channel(&self) -> Channel {
         self.channel.clone()
     }
@@ -174,11 +199,14 @@ impl ServerConnection {
 
     /// Gracefully shuts down this managed server.
     ///
+    /// Named `shutdown` rather than `close` to keep the server's lifecycle
+    /// distinct from `Session::close`, which is what calls it.
+    ///
     /// # Errors
     ///
     /// Returns an error when the server exits unsuccessfully or misses the
     /// bounded shutdown deadline.
-    pub(crate) async fn close(mut self) -> io::Result<()> {
+    pub(crate) async fn shutdown(mut self) -> io::Result<()> {
         let server = self
             .server
             .take()

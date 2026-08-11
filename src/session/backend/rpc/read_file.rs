@@ -7,7 +7,7 @@ use futures::{Stream, StreamExt as _, stream};
 use super::error::read_status_error;
 use crate::session::backend::{ReadStream, connection::ServerConnection};
 
-pub(super) async fn read_file(connection: &ServerConnection, path: &str) -> io::Result<ReadStream> {
+pub(crate) async fn read_file(connection: &ServerConnection, path: &str) -> io::Result<ReadStream> {
     let channel = connection.channel();
     let request = connection.request(ReadRequest {
         path: path.to_owned(),

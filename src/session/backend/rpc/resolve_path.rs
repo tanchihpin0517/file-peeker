@@ -5,7 +5,7 @@ use crate::protocol::v1::{ResolvePathRequest, file_peeker_client::FilePeekerClie
 use super::error::operation_status_error;
 use crate::session::backend::connection::ServerConnection;
 
-pub(super) async fn resolve_path(connection: &ServerConnection, path: &str) -> io::Result<String> {
+pub(crate) async fn resolve_path(connection: &ServerConnection, path: &str) -> io::Result<String> {
     let channel = connection.channel();
     let request = connection.request(ResolvePathRequest {
         path: path.to_owned(),

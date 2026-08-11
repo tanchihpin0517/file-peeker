@@ -23,10 +23,10 @@ failure policy and resource lifetime.
 | --- | --- | --- |
 | `crate::fs` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Session selection, SSH, gRPC, UI behavior |
 | `crate::protocol` | The generated wire contract and its transport limits, shared by both sides of the gRPC hop | Any filesystem or workflow behavior |
-| `SessionBackend` | Primitive capabilities against the Session's selected host | Multi-step user workflows or operating-system UI actions |
+| `session/rpc` | One request/response adapter per Session operation | Multi-step user workflows or operating-system UI actions |
 | `Session` | Target-independent workflow entry points, backend lock/lifecycle, and cross-Session phase ordering | Transport details, server lifecycle, or protobuf |
-| `backend/connection` | Where a Session's server runs, how a stream reaches it, and its startup/shutdown | Filesystem operations or workflow policy |
-| `backend/rpc` modules | One gRPC request/response adapter per backend capability | Public workflow policy |
+| `session/connection` | Where a Session's server runs, how a stream reaches it, and its startup/shutdown | Filesystem operations or workflow policy |
+| `session/rpc` modules | One gRPC request/response adapter per Session operation | Public workflow policy |
 | `crate::server` | Listener and serving lifecycle, plus RPC validation, protobuf conversion, transport batching and delegation to `fs` | Client workflows and UI state |
 | `crate::tui` | Application state, input routing, rendering and task ownership | Filesystem and transport semantics |
 | `crate::cli` | A test-only command surface that drives `Client` and `Session` workflows one at a time, and remote server provisioning over SSH | Behavior of its own; it composes existing workflows and prints results |
@@ -41,23 +41,23 @@ UI
 Session workflow
    |
    v
-SessionBackend capability
+rpc adapter per operation
    |
    v
-RpcBackend --> gRPC adapter --> ServerConnection
-                                     |-- embedded server ---> client-host filesystem
-                                     `-- SSH -> remote server -> server-host filesystem
+ServerConnection
+   |-- embedded server ------> client-host filesystem
+   `-- SSH -> remote server -> server-host filesystem
 ```
 
 There is one backend. `ServerConnection` is where the two targets diverge, and
 they diverge in exactly two values: which process was started, and which
 connector reaches its loopback port.
 
-`Session` and `SessionBackend` remain separate. A backend method answers “what
-can be done against the selected host?”, while a Session operation answers
-“what workflow does the caller want?”. Simple workflows may delegate once;
-more involved workflows may compose several backend capabilities plus
-client-host behavior.
+`Session` and the `rpc` modules remain separate. An `rpc` function answers
+“what does one request against the selected host look like?”, while a Session
+operation answers “what workflow does the caller want?”. Simple workflows may
+delegate once; more involved workflows, such as a cross-Session copy, compose
+several requests and order the locks between them.
 
 ### One package, three binaries
 
@@ -160,39 +160,36 @@ src/session/
 ├── file/
 │   ├── mod.rs
 │   └── copy.rs
-├── backend/
+├── connection/
 │   ├── mod.rs
-│   ├── connection/
-│   │   ├── mod.rs
-│   │   ├── embedded.rs
-│   │   ├── ssh.rs
-│   │   └── ensure-server.sh
-│   └── rpc/
-│       ├── mod.rs
-│       ├── entry.rs
-│       ├── error.rs
-│       ├── resolve_path.rs
-│       ├── list_dir.rs
-│       ├── read_file.rs
-│       ├── write_file.rs
-│       └── walk_dir.rs
+│   ├── embedded.rs
+│   ├── ssh.rs
+│   └── ensure-server.sh
+└── rpc/
+    ├── mod.rs
+    ├── entry.rs
+    ├── error.rs
+    ├── resolve_path.rs
+    ├── list_dir.rs
+    ├── read_file.rs
+    ├── write_file.rs
+    └── walk_dir.rs
 ```
 
 `src/client.rs` and `src/test_support.rs` sit beside this tree at the crate root.
 
-- `session/mod.rs` owns Session construction, lifecycle and the private backend
-  handle.
+- `session/mod.rs` owns Session construction, lifecycle and the guarded
+  connection accessor.
 - `path.rs` contains Rust-native Session path workflows.
 - `directory/` contains transport-neutral directory result types and native
   Session directory workflows.
 - `file/copy.rs` owns the destination-oriented Session-to-Session streamed copy
   workflow.
-- `backend/mod.rs` defines the private `SessionBackend` capability seam.
-- `backend/rpc/` is its one implementation: the calling side of the protocol,
-  one module per capability, each building a request and validating the
-  response. `rpc/write_file.rs` owns client-streaming request framing.
+- `rpc/` is the calling side of the protocol: one module per operation, each
+  building a request and validating the response, plus the stream and write
+  types they share. `rpc/write_file.rs` owns client-streaming request framing.
   `crate::server` is the handling side; the two never name each other.
-- `backend/connection/` owns server lifecycle and transport, not filesystem
+- `connection/` owns server lifecycle and transport, not filesystem
   operations. `connection/mod.rs` holds everything both targets share —
   `ServerConnection`, channel construction, the bearer token, the health check —
   while `embedded.rs` and `ssh.rs` hold only what differs: how the server is
@@ -243,9 +240,10 @@ src/server/
 There is no server backend trait. The server has one real filesystem
 implementation, `FsService`; adding an interface there now would create a seam
 without variation. The same rule now applies on the client side, which is why
-`SessionBackend` has exactly one implementation: the variation that used to
-justify a second one moved into `ServerConnection`, where it is two enum
-variants rather than two adapters.
+The client no longer has one either. A backend trait would need real
+implementations to vary, and the variation that once justified two of them moved
+into `ServerConnection`, where it is two enum variants rather than two
+adapters.
 
 ### TUI
 
@@ -340,11 +338,11 @@ instead of vanishing.
 Before adding a file, identify the operation's semantic owner:
 
 1. Put host-local filesystem mechanics in `crate::fs`.
-2. Put a primitive selected-host capability in `SessionBackend`.
-3. Put protobuf conversion and wire batching in `backend/rpc/` and server
+2. Put one request against the selected host in `session/rpc`.
+3. Put protobuf conversion and wire batching in `session/rpc/` and server
    `ops`. There is no second adapter to write: both targets use this one.
 4. Put public multi-step ordering and lifecycle coordination in `Session`.
-5. Touch `backend/connection/` only for server lifecycle or transport, and put
+5. Touch `session/connection/` only for server lifecycle or transport, and put
    anything both targets share in `connection/mod.rs` rather than in
    `embedded.rs` and `ssh.rs` twice.
 6. Add a UI adapter only when that boundary has a real consumer.
@@ -404,7 +402,7 @@ are actually shared.
    across all layers.
 3. Add `fs` types and facade re-exports only when the behavior is
    transport-neutral.
-4. Extend `SessionBackend` only for a selected-host primitive.
+4. Add an `rpc` module only for a new request against the selected host.
 5. Add the protocol, server, and backend-adapter work that primitive needs. It
    is one path, so a capability that works for one target works for both.
 6. Add Session composition for caller workflows.
@@ -434,13 +432,11 @@ src/session/
 │   ├── mod.rs
 │   ├── list.rs
 │   └── walk.rs
-└── backend/
+└── rpc/
     ├── mod.rs
-    └── rpc/
-        ├── mod.rs
-        ├── entry.rs
-        ├── list_dir.rs
-        └── walk_dir.rs
+    ├── entry.rs
+    ├── list_dir.rs
+    └── walk_dir.rs
 
 src/server/ops/
 ├── mod.rs

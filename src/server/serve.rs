@@ -49,11 +49,28 @@ pub(crate) struct ServerHandle {
 /// Returns an error when the loopback listener cannot be bound or the
 /// authentication token cannot be generated.
 pub(crate) async fn start() -> Result<ServerHandle, ServerError> {
+    let fs = FsService::new();
+    let service = ops::FilePeekerService::new(fs.clone());
+    start_with(service, fs).await
+}
+
+/// Serves `service` instead of the real filesystem adapter.
+///
+/// `fs` is what [`ServerHandle::shutdown`] cancels; a service that does not use
+/// one can pass a throwaway. Tests use this to script protocol responses while
+/// keeping the real listener, interceptor, and channel.
+///
+/// # Errors
+///
+/// Returns an error when the loopback listener cannot be bound or the
+/// authentication token cannot be generated.
+pub(crate) async fn start_with<S>(service: S, fs: FsService) -> Result<ServerHandle, ServerError>
+where
+    S: crate::protocol::v1::file_peeker_server::FilePeeker,
+{
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     let token = Arc::<str>::from(generate_token()?);
-    let fs = FsService::new();
-    let service = ops::FilePeekerService::new(fs.clone());
     let file_peeker = tonic::service::interceptor::InterceptedService::new(
         FilePeekerServer::new(service)
             .max_encoding_message_size(ops::GRPC_BATCH_MAX_BYTES)
@@ -61,9 +78,7 @@ pub(crate) async fn start() -> Result<ServerHandle, ServerError> {
         AuthInterceptor::new(Arc::clone(&token)),
     );
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
-    health_reporter
-        .set_serving::<FilePeekerServer<ops::FilePeekerService>>()
-        .await;
+    health_reporter.set_serving::<FilePeekerServer<S>>().await;
     let health = tonic::service::interceptor::InterceptedService::new(
         health_service,
         AuthInterceptor::new(Arc::clone(&token)),

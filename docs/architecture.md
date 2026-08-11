@@ -53,20 +53,18 @@ protects a local server's loopback port from other processes on the host.
 
 Core `FsService` executes host-local filesystem primitives on the machine that
 owns that core instance, and only the server ever calls it. The Rust client
-obtains its selected-host interface through the private async `SessionBackend`
-trait. `Session` borrows the open backend through one guarded accessor that
-yields the closed-session error when the slot is empty, then delegates
-`resolve_path`, `list_dir`, `walk_dir`, `read_file`, `write_file`, and `close`
-through that trait. `read_file` is not exposed as a caller-facing native read
-operation; it supports the Session copy workflow. There is one implementation,
-`RpcBackend`, which turns each primitive into an authenticated RPC — it is the
-calling side of the protocol, while `crate::server` is the handling side;
-`ServerConnection` behind it owns the server lifecycle and the channel, and
-differs between targets only in which process it started and how a stream
-reaches that process. Session retains the backend in an
-`RwLock<Option<Box<dyn SessionBackend>>>`: a present backend is open, and a
-consumed backend is closing or closed. Backend shutdown consumes the adapter,
-so no separate lifecycle state is required.
+reaches its selected host through one `ServerConnection`. `Session` borrows it
+through a guarded accessor that yields the closed-session error when the slot is
+empty, then issues `resolve_path`, `list_dir`, `walk_dir`, `read_file`, or
+`write_file` over it. `read_file` is not exposed as a caller-facing native read
+operation; it supports the Session copy workflow. The `session::rpc`
+modules are the calling side of the protocol and `crate::server` is the handling
+side; `ServerConnection` between them owns the server lifecycle and the channel,
+and differs between targets only in which process it started and how a stream
+reaches that process. Session retains it in an
+`RwLock<Option<ServerConnection>>`: a present connection is open, and an empty
+slot is closed. Shutdown consumes the connection, so no separate lifecycle state
+is required.
 
 Native Session workflows are grouped by filesystem domain: path operations live
 under `session/path`, directory operations and transport-neutral directory
@@ -75,14 +73,14 @@ transfer lives under `session/file`. See
 [Copy File](operations/copy-file.md) for that workflow's routing and atomicity
 contract.
 
-`SessionBackend` is a private capability seam, not a required one-to-one model
-of public Session workflows. `RpcBackend`'s operation modules are private
+The `rpc` modules are a private request/response seam, not a required
+one-to-one model of public Session workflows. They are private
 gRPC request, response, stream, and error-conversion details. Recursive
 traversal is the distinct `walk_dir` capability with dedicated entry and stream
 types, rather than a `recursive: bool` mode on `list_dir`. An options type
 should be added only when traversal has a real policy choice to express.
 
-![SessionBackend flow chart](assets/session-backend-flow.svg)
+![Session operation flow chart](assets/session-backend-flow.svg)
 
 The caller sees the same operation and result types for either target. The
 target changes where the server runs, not the public `Session` interface and not

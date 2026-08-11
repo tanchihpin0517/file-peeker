@@ -9,6 +9,8 @@ mod ops;
 mod serve;
 
 // Only the client embeds a server; the binary drives `serve` through `command`.
+#[cfg(test)]
+pub(crate) use serve::start_with;
 #[cfg(feature = "client")]
 pub(crate) use serve::{ServerHandle, start};
 

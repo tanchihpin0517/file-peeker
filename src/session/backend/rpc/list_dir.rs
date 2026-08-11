@@ -6,7 +6,7 @@ use futures::{StreamExt as _, stream};
 use super::{entry::convert_entry, error::operation_status_error};
 use crate::{DirectoryEntry, EntryStream, session::backend::connection::ServerConnection};
 
-pub(super) async fn list_dir(connection: &ServerConnection, path: &str) -> io::Result<EntryStream> {
+pub(crate) async fn list_dir(connection: &ServerConnection, path: &str) -> io::Result<EntryStream> {
     let channel = connection.channel();
     let request = connection.request(ListRequest {
         path: path.to_owned(),

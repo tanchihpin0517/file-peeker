@@ -3,7 +3,7 @@ use std::{io, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
-use self::backend::{RpcBackend, SessionBackend, connection::ServerLocation};
+use self::backend::connection::{ServerConnection, ServerLocation};
 
 pub(crate) mod backend;
 pub(crate) mod directory;
@@ -52,7 +52,8 @@ pub(crate) enum SessionShutdownError {
 #[derive(Debug)]
 pub(crate) struct Session {
     id: String,
-    backend: RwLock<Option<Box<dyn SessionBackend>>>,
+    /// `None` once the session is closed.
+    connection: RwLock<Option<ServerConnection>>,
 }
 
 impl Session {
@@ -76,25 +77,25 @@ impl Session {
         id: String,
         target: SessionTarget,
     ) -> Result<Arc<Self>, SessionStartError> {
-        let backend = RpcBackend::open(target.location()).await.map_err(|error| {
-            SessionStartError::Backend {
+        let connection = ServerConnection::open(target.location())
+            .await
+            .map_err(|error| SessionStartError::Backend {
                 message: error.to_string(),
-            }
-        })?;
+            })?;
 
         Ok(Arc::new(Self {
             id,
-            backend: RwLock::new(Some(Box::new(backend))),
+            connection: RwLock::new(Some(connection)),
         }))
     }
 
-    /// Borrows the open backend, or fails when this session is closed.
+    /// Borrows the open connection, or fails when this session is closed.
     ///
-    /// The returned guard holds the backend read lock, so callers must drop it
-    /// before an owned stream is handed back to a caller. Session shutdown then
-    /// cancels in-flight work instead of waiting on it.
-    async fn backend(&self) -> io::Result<RwLockReadGuard<'_, dyn SessionBackend>> {
-        RwLockReadGuard::try_map(self.backend.read().await, Option::as_deref)
+    /// The returned guard holds the connection read lock, so callers must drop
+    /// it before an owned stream is handed back to a caller. Session shutdown
+    /// then cancels in-flight work instead of waiting on it.
+    async fn connection(&self) -> io::Result<RwLockReadGuard<'_, ServerConnection>> {
+        RwLockReadGuard::try_map(self.connection.read().await, Option::as_ref)
             .map_err(|_| session_closed())
     }
 
@@ -104,12 +105,11 @@ impl Session {
     ///
     /// Returns a shutdown error when the managed backend does not exit cleanly.
     pub(crate) async fn close(&self) -> Result<(), SessionShutdownError> {
-        let mut backend = self.backend.write().await;
-        let Some(backend) = backend.take() else {
+        let Some(connection) = self.connection.write().await.take() else {
             return Ok(());
         };
-        backend
-            .close()
+        connection
+            .shutdown()
             .await
             .map_err(|error| SessionShutdownError::Backend {
                 message: error.to_string(),
@@ -123,76 +123,27 @@ fn session_closed() -> io::Error {
 
 #[cfg(test)]
 impl Session {
-    /// Builds a Session over a scripted backend instead of a real filesystem or
-    /// remote host.
-    #[must_use]
-    pub(crate) fn for_test(
-        id: impl Into<String>,
-        backend: crate::test_support::FakeBackend,
-    ) -> Arc<Self> {
-        Self::with_backend_for_test(id, Some(Box::new(backend)))
-    }
-
     /// Builds a Session whose backend slot is already empty, as it is after a
     /// completed close.
     #[must_use]
     pub(crate) fn closed_for_test(id: impl Into<String>) -> Arc<Self> {
-        Self::with_backend_for_test(id, None)
+        Self::with_connection_for_test(id, None)
     }
 
-    pub(crate) fn with_backend_for_test(
+    pub(crate) fn with_connection_for_test(
         id: impl Into<String>,
-        backend: Option<Box<dyn SessionBackend>>,
+        connection: Option<ServerConnection>,
     ) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
-            backend: RwLock::new(backend),
+            connection: RwLock::new(connection),
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-
-    use super::{Session, SessionBackend, SessionTarget, backend::ReadStream};
-    use crate::EntryStream;
-
-    #[derive(Debug)]
-    struct FailingCloseBackend;
-
-    #[async_trait]
-    impl SessionBackend for FailingCloseBackend {
-        async fn resolve_path(&self, _path: &str) -> std::io::Result<String> {
-            Ok("/fixture".into())
-        }
-
-        async fn list_dir(&self, _path: &str) -> std::io::Result<EntryStream> {
-            unreachable!("listing is not used by this test")
-        }
-
-        async fn walk_dir(&self, _path: &str) -> std::io::Result<crate::WalkStream> {
-            unreachable!("walk is not used by this test")
-        }
-
-        async fn read_file(&self, _path: &str) -> std::io::Result<ReadStream> {
-            unreachable!("reading is not used by this test")
-        }
-
-        fn write_file(
-            &self,
-            _directory: String,
-            _name: String,
-            _conflict: crate::session::backend::BackendWriteConflict,
-            _source: ReadStream,
-        ) -> crate::session::backend::WriteFuture {
-            unreachable!("writing is not used by this test")
-        }
-
-        async fn close(self: Box<Self>) -> std::io::Result<()> {
-            Err(std::io::Error::other("fixture shutdown failure"))
-        }
-    }
+    use super::{Session, SessionTarget};
 
     async fn open_local_session(id: &str) -> std::sync::Arc<Session> {
         Session::start(id.into(), SessionTarget::Local)
@@ -223,12 +174,15 @@ mod tests {
         second.unwrap();
     }
 
+    /// Close empties the connection slot before shutting the server down, so a
+    /// closed Session rejects later operations rather than reaching a server
+    /// that is going away.
     #[tokio::test]
-    async fn failed_close_is_terminal() {
-        let session =
-            Session::with_backend_for_test("failed-close-id", Some(Box::new(FailingCloseBackend)));
+    async fn close_is_terminal() {
+        let session = open_local_session("terminal-id").await;
 
-        assert!(session.close().await.is_err());
+        session.close().await.unwrap();
+
         assert_eq!(
             session.op_resolve_path(".").await.unwrap_err().to_string(),
             "session is closed"

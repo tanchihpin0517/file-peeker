@@ -13,7 +13,7 @@ use futures::{Stream, StreamExt as _, stream};
 use super::{entry::convert_entry, error::operation_status_error};
 use crate::{WalkEntry, WalkStream, session::backend::connection::ServerConnection};
 
-pub(super) async fn walk_dir(connection: &ServerConnection, path: &str) -> io::Result<WalkStream> {
+pub(crate) async fn walk_dir(connection: &ServerConnection, path: &str) -> io::Result<WalkStream> {
     let channel = connection.channel();
     let request = connection.request(WalkRequest {
         path: path.to_owned(),

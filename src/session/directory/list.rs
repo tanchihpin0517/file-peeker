@@ -3,7 +3,7 @@ use std::io;
 use futures::stream::BoxStream;
 
 use super::DirectoryEntry;
-use crate::session::Session;
+use crate::session::{Session, backend::rpc};
 
 pub(crate) type EntryStream = BoxStream<'static, io::Result<DirectoryEntry>>;
 
@@ -15,7 +15,8 @@ impl Session {
     /// Returns an I/O error when the session is closed, the local operation
     /// cannot be started, or the remote list request cannot be sent.
     pub(crate) async fn op_list_dir(&self, path: &str) -> io::Result<EntryStream> {
-        self.backend().await?.list_dir(path).await
+        let connection = self.connection().await?;
+        rpc::list_dir(&connection, path).await
     }
 }
 

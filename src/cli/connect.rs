@@ -11,7 +11,7 @@ pub(crate) async fn run(destination: &str, force_install: bool) -> io::Result<()
     })
     .await?;
     print_startup(connection.info());
-    connection.close().await
+    connection.shutdown().await
 }
 
 fn print_startup(info: &ConnectionInfo) {

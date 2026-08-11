@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1250" viewBox="0 0 900 1250" role="img" aria-labelledby="title description">
-  <title id="title">Unified SessionBackend operation flow</title>
-  <desc id="description">From top to bottom, callers use one Session API, which delegates through the one SessionBackend implementation and its gRPC adapter to a ServerConnection. Only there do the two targets diverge: an embedded server in the same process, or a remote server over SSH. Both run the same shared fs implementation, which accesses the filesystem on the host where it executes.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1140" viewBox="0 0 900 1140" role="img" aria-labelledby="title description">
+  <title id="title">Unified Session operation flow</title>
+  <desc id="description">From top to bottom, callers use one Session API, which issues each operation over one ServerConnection. Only there do the two targets diverge: an embedded server in the same process, or a remote server over SSH. Both run the same shared fs implementation, which accesses the filesystem on the host where it executes.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-head"/>
@@ -55,51 +55,46 @@
   <path class="edge" d="M 450 235 V 270"/>
 
   <rect class="backend" x="310" y="270" width="280" height="110" rx="12"/>
-  <text x="450" y="308">SessionBackend</text>
-  <text class="secondary" x="450" y="332">selected-host capabilities</text>
-  <text class="secondary" x="450" y="356">dynamic dispatch</text>
+  <text x="450" y="308">session::rpc</text>
+  <text class="secondary" x="450" y="332">one request per operation</text>
+  <text class="secondary" x="450" y="356">response validation</text>
   <path class="edge" d="M 450 380 V 415"/>
 
-  <rect class="backend" x="310" y="415" width="280" height="90" rx="12"/>
-  <text x="450" y="453">RpcBackend</text>
-  <text class="secondary" x="450" y="479">the only implementation</text>
-  <path class="edge" d="M 450 505 V 540"/>
+  <rect class="backend" x="310" y="415" width="280" height="120" rx="12"/>
+  <text x="450" y="453">ServerConnection</text>
+  <text class="secondary" x="450" y="477">owns the server and the channel</text>
+  <text class="secondary" x="450" y="501">authenticated channel + health check</text>
 
-  <rect class="backend" x="310" y="540" width="280" height="110" rx="12"/>
-  <text x="450" y="578">ServerConnection</text>
-  <text class="secondary" x="450" y="602">one authenticated channel</text>
-  <text class="secondary" x="450" y="626">bearer token + health check</text>
+  <path class="edge local-edge" d="M 400 535 V 565 C 400 590 225 580 225 620"/>
+  <path class="edge remote-edge" d="M 500 535 V 565 C 500 590 675 580 675 620"/>
+  <text class="label" x="225" y="595">LOCAL TARGET</text>
+  <text class="label" x="675" y="595">REMOTE TARGET</text>
 
-  <path class="edge local-edge" d="M 400 650 V 680 C 400 705 225 695 225 735"/>
-  <path class="edge remote-edge" d="M 500 650 V 680 C 500 705 675 695 675 735"/>
-  <text class="label" x="225" y="710">LOCAL TARGET</text>
-  <text class="label" x="675" y="710">REMOTE TARGET</text>
+  <rect class="local-node" x="100" y="620" width="250" height="90" rx="12"/>
+  <text x="225" y="658">Embedded server</text>
+  <text class="secondary" x="225" y="684">loopback port, same process</text>
+  <path class="edge local-edge" d="M 225 710 V 740 C 225 765 400 755 400 775"/>
 
-  <rect class="local-node" x="100" y="735" width="250" height="90" rx="12"/>
-  <text x="225" y="773">Embedded server</text>
-  <text class="secondary" x="225" y="799">loopback port, same process</text>
-  <path class="edge local-edge" d="M 225 825 V 855 C 225 880 400 870 400 890"/>
+  <rect class="remote-node" x="550" y="620" width="250" height="90" rx="12"/>
+  <text x="675" y="658">Remote server</text>
+  <text class="secondary" x="675" y="684">loopback port, SSH SOCKS5</text>
+  <path class="edge remote-edge" d="M 675 710 V 740 C 675 765 500 755 500 775"/>
 
-  <rect class="remote-node" x="550" y="735" width="250" height="90" rx="12"/>
-  <text x="675" y="773">Remote server</text>
-  <text class="secondary" x="675" y="799">loopback port, SSH SOCKS5</text>
-  <path class="edge remote-edge" d="M 675 825 V 855 C 675 880 500 870 500 890"/>
+  <rect class="backend" x="310" y="775" width="280" height="100" rx="12"/>
+  <text x="450" y="814">crate::fs</text>
+  <text class="secondary" x="450" y="841">shared filesystem implementation</text>
 
-  <rect class="backend" x="310" y="890" width="280" height="100" rx="12"/>
-  <text x="450" y="929">crate::fs</text>
-  <text class="secondary" x="450" y="956">shared filesystem implementation</text>
+  <path class="edge local-edge" d="M 400 875 V 905 C 400 930 225 920 225 960"/>
+  <path class="edge remote-edge" d="M 500 875 V 905 C 500 930 675 920 675 960"/>
 
-  <path class="edge local-edge" d="M 400 990 V 1020 C 400 1045 225 1035 225 1075"/>
-  <path class="edge remote-edge" d="M 500 990 V 1020 C 500 1045 675 1035 675 1075"/>
+  <rect class="local-node" x="100" y="960" width="250" height="100" rx="12"/>
+  <text x="225" y="999">Client-host filesystem</text>
+  <text class="secondary" x="225" y="1026">native filesystem API</text>
 
-  <rect class="local-node" x="100" y="1075" width="250" height="100" rx="12"/>
-  <text x="225" y="1114">Client-host filesystem</text>
-  <text class="secondary" x="225" y="1141">native filesystem API</text>
+  <rect class="remote-node" x="550" y="960" width="250" height="100" rx="12"/>
+  <text x="675" y="999">Remote-host filesystem</text>
+  <text class="secondary" x="675" y="1026">native filesystem API</text>
 
-  <rect class="remote-node" x="550" y="1075" width="250" height="100" rx="12"/>
-  <text x="675" y="1114">Remote-host filesystem</text>
-  <text class="secondary" x="675" y="1141">native filesystem API</text>
-
-  <text x="450" y="1210">One client path, one protocol, one core</text>
-  <text class="secondary" x="450" y="1235">Only the server's location changes</text>
+  <text x="450" y="1095">One client path, one protocol, one core</text>
+  <text class="secondary" x="450" y="1120">Only the server's location changes</text>
 </svg>

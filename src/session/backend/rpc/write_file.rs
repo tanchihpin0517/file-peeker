@@ -34,7 +34,7 @@ enum RequestState {
     Done,
 }
 
-pub(super) fn write_file(
+pub(crate) fn write_file(
     connection: &ServerConnection,
     directory: String,
     name: String,

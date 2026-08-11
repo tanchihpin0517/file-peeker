@@ -557,31 +557,50 @@ fn child_path(parent: &str, name: &str) -> String {
 mod tests {
     use std::{io, sync::Arc, time::Duration};
 
-    use crate::{DirectoryEntry, EntryKind, EntryStream, Session, test_support::FakeBackend};
-    use futures::{StreamExt as _, stream};
+    use crate::{
+        DirectoryEntry, EntryKind, Session,
+        test_support::{Listing, ScriptedServer},
+    };
     use tokio::sync::mpsc;
 
     use super::{BrowserContext, BrowserContextEvent, ExpansionStatus, ListingStatus};
 
-    /// A local Session backed by scripted listings.
+    /// A Session whose server replays scripted listings.
     ///
-    /// Requests travel the real `Session` path, so a scripted listing failure
-    /// surfaces exactly as it does in production.
+    /// Requests travel the real `Session` path *and* the real wire path, so a
+    /// scripted listing arrives having been batched, flattened and validated
+    /// exactly as a production one is.
     struct ScriptedSession {
         session: Arc<Session>,
-        backend: FakeBackend,
+        server: ScriptedServer,
     }
 
     impl ScriptedSession {
-        fn new(listings: impl IntoIterator<Item = io::Result<EntryStream>>) -> Arc<Self> {
-            let backend = FakeBackend::builder().listings(listings).build();
-            let session = Session::for_test("scripted", backend.clone());
-            Arc::new(Self { session, backend })
+        async fn new(listings: impl IntoIterator<Item = Listing>) -> Arc<Self> {
+            let server = ScriptedServer::new(listings);
+            let connection = server.connect().await;
+            Arc::new(Self {
+                session: Session::with_connection_for_test("scripted", Some(connection)),
+                server,
+            })
         }
 
         fn requested_paths(&self) -> Vec<String> {
-            self.backend.listed_paths()
+            self.server.listed_paths()
         }
+    }
+
+    /// Collects entries into a scripted listing, stopping at the first error
+    /// and replaying it as the stream's terminal item.
+    fn listing(entries: impl IntoIterator<Item = io::Result<DirectoryEntry>>) -> Listing {
+        let mut collected = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => collected.push(entry),
+                Err(error) => return Listing::Failing(collected, error),
+            }
+        }
+        Listing::Entries(collected)
     }
 
     fn entry(name: &str) -> DirectoryEntry {
@@ -608,14 +627,6 @@ mod tests {
         }
     }
 
-    fn listing<I>(entries: I) -> EntryStream
-    where
-        I: IntoIterator<Item = io::Result<DirectoryEntry>>,
-        I::IntoIter: Send + 'static,
-    {
-        stream::iter(entries).boxed()
-    }
-
     fn context(
         source: &Arc<ScriptedSession>,
         capacity: usize,
@@ -637,7 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn creation_starts_and_completes_a_listing() {
-        let source = ScriptedSession::new([Ok(listing([Ok(entry("one"))]))]);
+        let source = ScriptedSession::new([listing([Ok(entry("one"))])]).await;
         let (mut context, mut receiver) = context(&source, 4);
 
         assert_eq!(context.status(), &ListingStatus::Loading);
@@ -651,9 +662,10 @@ mod tests {
 
     #[tokio::test]
     async fn half_page_scroll_moves_selection_and_viewport_and_clamps_at_boundaries() {
-        let source = ScriptedSession::new([Ok(listing(
+        let source = ScriptedSession::new([listing(
             (0..12).map(|index| Ok(entry(&format!("item-{index}")))),
-        ))]);
+        )])
+        .await;
         let (mut context, mut receiver) = context(&source, 16);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
@@ -686,10 +698,11 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_failure_preserves_partial_entries() {
-        let source = ScriptedSession::new([Ok(listing([
+        let source = ScriptedSession::new([listing([
             Ok(entry("kept")),
             Err(io::Error::other("failed")),
-        ]))]);
+        ])])
+        .await;
         let (mut context, mut receiver) = context(&source, 4);
 
         apply_next(&mut context, &mut receiver).await;
@@ -702,9 +715,10 @@ mod tests {
     #[tokio::test]
     async fn refresh_clears_entries_and_rejects_queued_stale_results() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(entry("stale"))])),
-            Ok(listing([Ok(entry("current"))])),
-        ]);
+            listing([Ok(entry("stale"))]),
+            listing([Ok(entry("current"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         let stale = receiver.recv().await.expect("stale batch");
 
@@ -726,9 +740,10 @@ mod tests {
     #[tokio::test]
     async fn refresh_preserves_then_clamps_selection() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(entry("a")), Ok(entry("b")), Ok(entry("c"))])),
-            Ok(listing([Ok(entry("new-a")), Ok(entry("new-b"))])),
-        ]);
+            listing([Ok(entry("a")), Ok(entry("b")), Ok(entry("c"))]),
+            listing([Ok(entry("new-a")), Ok(entry("new-b"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
@@ -750,9 +765,10 @@ mod tests {
     #[tokio::test]
     async fn entering_selected_directory_changes_path_and_rejects_stale_results() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(directory("reports"))])),
-            Ok(listing([Ok(entry("current"))])),
-        ]);
+            listing([Ok(directory("reports"))]),
+            listing([Ok(entry("current"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         apply_next(&mut context, &mut receiver).await;
         let stale_completion = receiver.recv().await.expect("stale completion");
@@ -775,7 +791,7 @@ mod tests {
 
     #[tokio::test]
     async fn entering_non_navigable_entry_does_nothing() {
-        let source = ScriptedSession::new([Ok(listing([Ok(entry("report.txt"))]))]);
+        let source = ScriptedSession::new([listing([Ok(entry("report.txt"))])]).await;
         let (mut context, mut receiver) = context(&source, 4);
         apply_next(&mut context, &mut receiver).await;
 
@@ -789,9 +805,10 @@ mod tests {
     #[tokio::test]
     async fn leaving_changes_to_parent_and_does_nothing_at_root() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(entry("initial"))])),
-            Ok(listing([Ok(entry("parent"))])),
-        ]);
+            listing([Ok(entry("initial"))]),
+            listing([Ok(entry("parent"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         apply_next(&mut context, &mut receiver).await;
         let stale_completion = receiver.recv().await.expect("stale completion");
@@ -813,9 +830,10 @@ mod tests {
     #[tokio::test]
     async fn failed_navigation_keeps_attempted_path() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(directory("missing"))])),
-            Err(io::Error::new(io::ErrorKind::NotFound, "missing directory")),
-        ]);
+            listing([Ok(directory("missing"))]),
+            Listing::Rejected(io::Error::new(io::ErrorKind::NotFound, "missing directory")),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         apply_next(&mut context, &mut receiver).await;
         let stale_completion = receiver.recv().await.expect("stale completion");
@@ -835,7 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_events_backpressure_the_listing() {
-        let source = ScriptedSession::new([Ok(listing([Ok(entry("one")), Ok(entry("two"))]))]);
+        let source = ScriptedSession::new([listing([Ok(entry("one")), Ok(entry("two"))])]).await;
         let (mut context, mut receiver) = context(&source, 1);
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -857,10 +875,11 @@ mod tests {
     #[tokio::test]
     async fn toggling_directory_expands_inline_without_changing_root_and_reloads_after_collapse() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(directory("reports"))])),
-            Ok(listing([Ok(entry("first.txt"))])),
-            Ok(listing([Ok(entry("second.txt"))])),
-        ]);
+            listing([Ok(directory("reports"))]),
+            listing([Ok(entry("first.txt"))]),
+            listing([Ok(entry("second.txt"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
@@ -903,10 +922,11 @@ mod tests {
     #[tokio::test]
     async fn nested_expansion_inserts_children_before_the_next_sibling() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(directory("reports")), Ok(entry("root.txt"))])),
-            Ok(listing([Ok(directory("year")), Ok(entry("summary.txt"))])),
-            Ok(listing([Ok(entry("january.txt"))])),
-        ]);
+            listing([Ok(directory("reports")), Ok(entry("root.txt"))]),
+            listing([Ok(directory("year")), Ok(entry("summary.txt"))]),
+            listing([Ok(entry("january.txt"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 16);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
@@ -939,9 +959,10 @@ mod tests {
     #[tokio::test]
     async fn streamed_children_do_not_move_selection_off_an_existing_row() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(directory("reports")), Ok(entry("root.txt"))])),
-            Ok(listing([Ok(entry("child.txt"))])),
-        ]);
+            listing([Ok(directory("reports")), Ok(entry("root.txt"))]),
+            listing([Ok(entry("child.txt"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
@@ -965,10 +986,11 @@ mod tests {
     #[tokio::test]
     async fn collapsing_rejects_already_queued_child_events() {
         let source = ScriptedSession::new([
-            Ok(listing([Ok(directory("reports"))])),
-            Ok(listing([Ok(entry("stale.txt"))])),
-            Ok(listing([Ok(entry("current.txt"))])),
-        ]);
+            listing([Ok(directory("reports"))]),
+            listing([Ok(entry("stale.txt"))]),
+            listing([Ok(entry("current.txt"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
@@ -989,10 +1011,11 @@ mod tests {
 
     #[tokio::test]
     async fn activating_files_and_non_directory_symlinks_does_nothing() {
-        let source = ScriptedSession::new([Ok(listing([
+        let source = ScriptedSession::new([listing([
             Ok(entry("report.txt")),
             Ok(symlink("latest", false)),
-        ]))]);
+        ])])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
@@ -1014,12 +1037,10 @@ mod tests {
             navigable: false,
         };
         let source = ScriptedSession::new([
-            Ok(listing([
-                Ok(symlink("linked-directory", true)),
-                Ok(special),
-            ])),
-            Ok(listing([Ok(entry("child.txt"))])),
-        ]);
+            listing([Ok(symlink("linked-directory", true)), Ok(special)]),
+            listing([Ok(entry("child.txt"))]),
+        ])
+        .await;
         let (mut context, mut receiver) = context(&source, 8);
         while context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
@@ -1039,7 +1060,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_a_context_cancels_its_listing() {
-        let source = ScriptedSession::new([Ok(stream::pending().boxed())]);
+        let source = ScriptedSession::new([Listing::Pending]).await;
         let (context, _receiver) = context(&source, 1);
         let task = context.root_listing_task.as_ref().unwrap().abort_handle();
 

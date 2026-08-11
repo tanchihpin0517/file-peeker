@@ -3,7 +3,7 @@ use std::io;
 use super::with_context;
 use crate::session::{
     Session,
-    backend::{BackendWriteConflict, BackendWriteResult},
+    backend::{BackendWriteConflict, BackendWriteResult, rpc},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,24 +34,30 @@ impl Session {
         conflict: CopyConflict,
     ) -> io::Result<CopyResult> {
         let stream = {
-            let backend = source.backend().await?;
-            let resolved_path = backend.resolve_path(source_path).await.map_err(|error| {
-                with_context(
-                    &error,
-                    format!("cannot resolve source file path `{source_path}`"),
-                )
-            })?;
-            backend.read_file(&resolved_path).await.map_err(|error| {
-                with_context(
-                    &error,
-                    format!("cannot start reading source file `{resolved_path}`"),
-                )
-            })?
+            let connection = source.connection().await?;
+            let resolved_path =
+                rpc::resolve_path(&connection, source_path)
+                    .await
+                    .map_err(|error| {
+                        with_context(
+                            &error,
+                            format!("cannot resolve source file path `{source_path}`"),
+                        )
+                    })?;
+            rpc::read_file(&connection, &resolved_path)
+                .await
+                .map_err(|error| {
+                    with_context(
+                        &error,
+                        format!("cannot start reading source file `{resolved_path}`"),
+                    )
+                })?
         };
 
         let write = {
-            let backend = self.backend().await?;
-            backend.write_file(
+            let connection = self.connection().await?;
+            rpc::write_file(
+                &connection,
                 destination_directory.to_owned(),
                 destination_name.to_owned(),
                 match conflict {

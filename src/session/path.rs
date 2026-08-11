@@ -1,6 +1,6 @@
 use std::io;
 
-use super::Session;
+use super::{Session, backend::rpc};
 
 impl Session {
     /// Resolves a path into an absolute lexical path on the selected host.
@@ -11,7 +11,8 @@ impl Session {
     /// working directory cannot be read, or a remote server returns an invalid
     /// response.
     pub(crate) async fn op_resolve_path(&self, path: &str) -> io::Result<String> {
-        self.backend().await?.resolve_path(path).await
+        let connection = self.connection().await?;
+        rpc::resolve_path(&connection, path).await
     }
 }
 
