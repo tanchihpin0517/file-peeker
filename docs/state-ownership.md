@@ -15,6 +15,7 @@ state needed to display its requested listing.
 | Received directory entries | Returned one-by-one, not retained | Stored as visible tree rows with full path, depth, and expansion state |
 | Loading and terminal error | Produced by the operation | Root `ListingStatus` plus independent expanded-directory states |
 | Selection | No | `selected_index` stored per `BrowserContext` |
+| Filtering | No | Query and the selection to restore stored per `BrowserContext`; the visible window is derived from the rows per keystroke rather than removing any |
 | Connection/tab selection | No | Ordered connection record and Browser Context IDs, selected connection, active Context, and per-connection last-active Context |
 | Navigation | No UI state | `h`/`l` replace the root listing; `o` expands/collapses a subtree without changing it |
 | File transfer | `Client::op_copy_file` streams between two connections | `App` owns the lazy clipboard, transfer task, overwrite modal, stale-result checks, and status; Browser Context exposes only an owned selection snapshot |

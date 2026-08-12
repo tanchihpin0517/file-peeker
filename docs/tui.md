@@ -82,7 +82,8 @@ per press makes the screen chase the backlog after the key is up.
 ## Browser Contexts and tabs
 
 Each Browser Context independently owns its resolved root, visible tree rows,
-selection, viewport, expansion state, loading/error state, and listing tasks.
+selection, viewport, active filter, expansion state, loading/error state, and
+listing tasks.
 Inactive contexts keep their state and continue
 loading. Browser events carry Context UUID and generation/request identity;
 removed contexts and stale listing generations are ignored.
@@ -109,6 +110,46 @@ given, so building them for every row made scrolling in a large directory cost
 time proportional to its size.
 Activating a non-navigable row does nothing. Expansion, navigation, streaming,
 and stale-event rejection are owned by `browser_context.rs`.
+
+## Filtering
+
+`/` opens a filter prompt over the active browser. Typing narrows the rows to
+the names that contain the query, case-insensitively, along with the ancestors of
+each match so a hit inside a directory still reads as being inside it. The
+selection follows the nearest match rather than a carried-along ancestor. `Tab`
+extends the query to the longest prefix every match agrees on, the way a shell
+completes a partial word, which can never narrow what is on screen because every
+match starts with the prefix it completes to. `Enter` closes the prompt keeping
+the row the filter led to; `Esc` closes it and puts the selection back where it
+started. The prompt takes the letters, so the arrows are what walk the matches
+without leaving it.
+
+Matching is a substring rather than a fuzzy subsequence so that completion has
+something to complete to: a subsequence match shares no prefix with what was
+typed, leaving `Tab` nothing to agree on.
+
+The query belongs to the Browser Context whose rows it narrows, not to the
+overlay stack, so `InputMode::Filter` is derived from the active Context rather
+than stored beside it. Filtering never removes rows: expansion, streaming
+insertion, and collapse all address rows by index, so a filter that dropped them
+would move every index out from under an in-flight listing. It is a window
+instead, and the only state it moves is the selection and the scroll offset,
+which are positions in that window rather than row indices. The window is
+recomputed per keystroke and per frame drawn while filtering rather than cached,
+which costs one pass over the tree -- the same order as the matching itself --
+and leaves no invalidation for row mutation elsewhere to remember. An unfiltered
+browser pays nothing.
+
+The prompt takes a line of its own directly above the Files pane, and no line at
+all while it is closed. Matches then read downwards from the query with the first
+of them against the list's top edge, which is the `fzf --layout=reverse` shape:
+the eye stays at the top where the typing is, and rows keep tree order, so an
+expanded directory still sits above the children indented under it.
+
+Stacking the matches against the bottom of the pane instead, the way `fzf` does by
+default, was tried and dropped. It anchors the eye only until the matches overflow
+the pane, and keeping the selection against the prompt past that point requires
+reversing the rows, which puts a directory below its own contents.
 
 `y` copies the selected regular file into an App-owned lazy clipboard containing
 only source connection identity, full path, and original name. Closing the

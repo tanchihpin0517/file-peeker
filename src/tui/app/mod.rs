@@ -16,6 +16,10 @@ use super::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputMode {
     Main,
+    /// The filter prompt is open over the active browser. It is not an overlay:
+    /// the query belongs to the Browser Context whose rows it narrows, and this
+    /// mode is derived from it.
+    Filter,
     ConnectionManager,
     TargetChooser,
     RemoteInput,
@@ -405,6 +409,13 @@ impl App {
 
     pub(crate) fn input_mode(&self) -> InputMode {
         match self.overlay {
+            Overlay::None
+                if self
+                    .active_context()
+                    .is_some_and(|context| context.filter().is_some()) =>
+            {
+                InputMode::Filter
+            }
             Overlay::None => InputMode::Main,
             Overlay::ConnectionManager => InputMode::ConnectionManager,
             Overlay::TargetChooser { .. } => InputMode::TargetChooser,
@@ -1007,6 +1018,42 @@ impl App {
         }
     }
 
+    pub(crate) fn open_filter(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.begin_filter();
+        }
+    }
+
+    pub(crate) fn extend_filter(&mut self, character: char) {
+        if let Some(context) = self.active_context_mut() {
+            context.extend_filter(character);
+        }
+    }
+
+    pub(crate) fn shorten_filter(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.shorten_filter();
+        }
+    }
+
+    pub(crate) fn complete_filter(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.complete_filter();
+        }
+    }
+
+    pub(crate) fn commit_filter(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.commit_filter();
+        }
+    }
+
+    pub(crate) fn abandon_filter(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.abandon_filter();
+        }
+    }
+
     pub(crate) fn activate_active_selection(&mut self) {
         if let Some(context) = self.active_context_mut() {
             context.activate_selected();
@@ -1080,7 +1127,7 @@ mod tests {
     use crate::ServerLocation;
 
     use super::{App, ConnectionStatus, InputMode};
-    use crate::tui::browser_context::ListingStatus;
+    use crate::tui::browser_context::{BrowserContext, ListingStatus};
 
     #[test]
     fn duplicate_labels_are_stable_and_ordered() {
@@ -1139,17 +1186,43 @@ mod tests {
         App::new().shutdown().await.unwrap();
     }
 
+    /// The filter prompt is not an overlay. Its query belongs to the Browser
+    /// Context whose rows it narrows -- switching tabs must not carry it across --
+    /// so the input mode is read back off the active context rather than stored
+    /// beside it.
     #[tokio::test]
-    async fn yank_paste_and_overwrite_use_the_tracked_transfer_workflow() {
-        let source_dir = tempfile::tempdir().unwrap();
-        let destination_dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(source_dir.path().join("payload.txt"), b"payload")
-            .await
-            .unwrap();
+    async fn filter_mode_is_derived_from_the_active_context() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["alpha.txt", "beta.txt"] {
+            tokio::fs::write(directory.path().join(name), b"")
+                .await
+                .unwrap();
+        }
         let mut app = App::new();
-        app.start(Some(source_dir.path().to_str().unwrap()))
+        app.start(Some(directory.path().to_str().unwrap()))
             .await
             .unwrap();
+        wait_for_listing(&mut app).await;
+
+        assert_eq!(app.input_mode(), InputMode::Main);
+        app.open_filter();
+        assert_eq!(app.input_mode(), InputMode::Filter);
+
+        app.extend_filter('b');
+        assert_eq!(
+            app.active_context()
+                .and_then(BrowserContext::selected_entry)
+                .map(|entry| entry.name),
+            Some("beta.txt".to_owned())
+        );
+
+        app.commit_filter();
+        assert_eq!(app.input_mode(), InputMode::Main);
+
+        app.shutdown().await.unwrap();
+    }
+
+    async fn wait_for_listing(app: &mut App) {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 app.pump_events();
@@ -1164,6 +1237,20 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn yank_paste_and_overwrite_use_the_tracked_transfer_workflow() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let destination_dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(source_dir.path().join("payload.txt"), b"payload")
+            .await
+            .unwrap();
+        let mut app = App::new();
+        app.start(Some(source_dir.path().to_str().unwrap()))
+            .await
+            .unwrap();
+        wait_for_listing(&mut app).await;
 
         app.yank_active_selection();
         assert_eq!(

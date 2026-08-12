@@ -12,8 +12,11 @@ still immediately opens that path in a local connection. Use `a` in Connection
 Manager to add local or SSH connections and `n` to add a browser tab. Use
 `[`/`]` to switch tabs, `x` to close one, and `S` to return to Connection
 Manager. Within a browser, `j`/`k` selects entries, `l` enters a navigable
-directory, `h` leaves it, `o` expands or collapses, and `R` refreshes. Press `y`
-on a regular file and `p` in any browser to stream it between connections.
+directory, `h` leaves it, `o` expands or collapses, and `R` refreshes. Press `/`
+to filter the visible tree by name: typing narrows it to the matches and the
+directories holding them, `Tab` completes the query as far as those matches
+agree, `Enter` keeps the row it led to, and `Esc` puts the selection back. Press
+`y` on a regular file and `p` in any browser to stream it between connections.
 Remote-to-local copy/paste is the download workflow; an existing destination
 requires explicit overwrite confirmation.
 

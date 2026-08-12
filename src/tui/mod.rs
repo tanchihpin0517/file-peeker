@@ -189,6 +189,12 @@ fn apply_key(app: &mut App, key: KeyEvent) -> Flow {
         KeyAction::ConfirmConnectionClose => app.confirm_connection_close(),
         KeyAction::Yank => app.yank_active_selection(),
         KeyAction::Paste => app.paste_into_active_context(),
+        KeyAction::OpenFilter => app.open_filter(),
+        KeyAction::FilterInput(character) => app.extend_filter(character),
+        KeyAction::FilterBackspace => app.shorten_filter(),
+        KeyAction::CompleteFilter => app.complete_filter(),
+        KeyAction::CommitFilter => app.commit_filter(),
+        KeyAction::AbandonFilter => app.abandon_filter(),
         KeyAction::ConfirmTransferOverwrite => app.confirm_transfer_overwrite(),
         KeyAction::Ignore => {}
     }
@@ -235,6 +241,12 @@ enum KeyAction {
     Yank,
     Paste,
     ConfirmTransferOverwrite,
+    OpenFilter,
+    FilterInput(char),
+    FilterBackspace,
+    CompleteFilter,
+    CommitFilter,
+    AbandonFilter,
     Ignore,
 }
 
@@ -268,16 +280,22 @@ fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAct
                 KeyCode::Enter => KeyAction::SubmitText,
                 KeyCode::Backspace => KeyAction::Backspace,
                 KeyCode::Esc => KeyAction::CancelDialog,
-                KeyCode::Char(character)
-                    if !modifiers.intersects(
-                        KeyModifiers::CONTROL
-                            | KeyModifiers::ALT
-                            | KeyModifiers::SUPER
-                            | KeyModifiers::HYPER
-                            | KeyModifiers::META,
-                    ) =>
-                {
-                    KeyAction::Input(character)
+                KeyCode::Char(character) if types_text(modifiers) => KeyAction::Input(character),
+                _ => KeyAction::Ignore,
+            };
+        }
+        // The filter prompt takes the letters, so the arrows are what walks the
+        // matches without leaving it.
+        InputMode::Filter => {
+            return match code {
+                KeyCode::Enter => KeyAction::CommitFilter,
+                KeyCode::Esc => KeyAction::AbandonFilter,
+                KeyCode::Backspace => KeyAction::FilterBackspace,
+                KeyCode::Tab => KeyAction::CompleteFilter,
+                KeyCode::Down => KeyAction::MoveDown,
+                KeyCode::Up => KeyAction::MoveUp,
+                KeyCode::Char(character) if types_text(modifiers) => {
+                    KeyAction::FilterInput(character)
                 }
                 _ => KeyAction::Ignore,
             };
@@ -318,8 +336,21 @@ fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAct
         KeyCode::Char('S') => KeyAction::OpenConnections,
         KeyCode::Char('y') => KeyAction::Yank,
         KeyCode::Char('p') => KeyAction::Paste,
+        KeyCode::Char('/') => KeyAction::OpenFilter,
         _ => KeyAction::Ignore,
     }
+}
+
+/// Whether a character key is the user typing text rather than reaching for a
+/// modified shortcut.
+fn types_text(modifiers: KeyModifiers) -> bool {
+    !modifiers.intersects(
+        KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::SUPER
+            | KeyModifiers::HYPER
+            | KeyModifiers::META,
+    )
 }
 
 #[cfg(test)]
@@ -530,6 +561,46 @@ mod tests {
         assert_eq!(
             key_action(KeyCode::Char('u'), KeyModifiers::NONE, InputMode::Main),
             KeyAction::Ignore
+        );
+    }
+
+    /// The prompt has to take the letters that are commands in Main mode, or
+    /// filtering for a name with a `q` or an `x` in it would quit or close a tab.
+    /// The arrows stay navigation, which is what walks the matches without
+    /// leaving the prompt.
+    #[test]
+    fn the_filter_prompt_takes_the_letters_and_leaves_the_arrows_alone() {
+        assert_eq!(
+            key_action(KeyCode::Char('/'), KeyModifiers::NONE, InputMode::Main),
+            KeyAction::OpenFilter
+        );
+        for character in ['q', 'x', 'j', 'R', '/'] {
+            assert_eq!(
+                key_action(
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE,
+                    InputMode::Filter
+                ),
+                KeyAction::FilterInput(character)
+            );
+        }
+        for (code, action) in [
+            (KeyCode::Tab, KeyAction::CompleteFilter),
+            (KeyCode::Down, KeyAction::MoveDown),
+            (KeyCode::Up, KeyAction::MoveUp),
+            (KeyCode::Enter, KeyAction::CommitFilter),
+            (KeyCode::Esc, KeyAction::AbandonFilter),
+            (KeyCode::Backspace, KeyAction::FilterBackspace),
+        ] {
+            assert_eq!(
+                key_action(code, KeyModifiers::NONE, InputMode::Filter),
+                action
+            );
+        }
+        assert_eq!(
+            key_action(KeyCode::Char('d'), KeyModifiers::CONTROL, InputMode::Filter),
+            KeyAction::Ignore,
+            "a modified key is a shortcut, not typed text"
         );
     }
 

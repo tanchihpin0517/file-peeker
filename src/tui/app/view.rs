@@ -14,9 +14,16 @@ use crate::tui::browser_context::{BrowserRow, ExpansionStatus, ListingStatus};
 
 impl App {
     pub(crate) fn render(&mut self, frame: &mut Frame<'_>) {
-        let [header, tabs, body, footer] = Layout::vertical([
+        // The prompt takes a line above the list it narrows, and none at all when
+        // it is closed, so the list reads downwards from what was typed.
+        let prompt_height = u16::from(
+            self.active_context()
+                .is_some_and(|context| context.filter().is_some()),
+        );
+        let [header, tabs, prompt, body, footer] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Length(1),
+            Constraint::Length(prompt_height),
             Constraint::Min(1),
             Constraint::Length(2),
         ])
@@ -36,6 +43,7 @@ impl App {
             header,
         );
         self.render_tabs(frame, tabs);
+        self.render_filter_prompt(frame, prompt);
 
         if self.active_context().is_some() {
             let block = file_list_block();
@@ -50,7 +58,7 @@ impl App {
                 frame,
                 body,
                 block,
-                viewport.rows.iter().map(row_list_item),
+                viewport.rows.iter().copied().map(row_list_item),
                 viewport.selected,
             );
         } else {
@@ -64,6 +72,48 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.footer_text()), footer);
         self.render_overlay(frame);
+    }
+
+    /// Draws the filter query above the list, with what it matched beside it.
+    ///
+    /// `area` is empty unless a prompt is open, so this draws nothing the rest of
+    /// the time.
+    fn render_filter_prompt(&self, frame: &mut Frame<'_>, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        let Some(context) = self.active_context() else {
+            return;
+        };
+        let Some(query) = context.filter() else {
+            return;
+        };
+        let matches = context.filter_matches();
+        let summary = match matches {
+            None => String::new(),
+            Some(0) => "  no matches".to_owned(),
+            Some(1) => "  1 match".to_owned(),
+            Some(count) => format!("  {count} matches"),
+        };
+        let query_style = if matches == Some(0) {
+            Style::default().fg(Color::Red)
+        } else {
+            input_style()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("/{query}"), query_style),
+                Span::styled(summary, Style::default().fg(Color::DarkGray)),
+            ])),
+            area,
+        );
+        // A real cursor is the cue that keys are going into the prompt rather than
+        // the list.
+        if let Ok(typed) = u16::try_from(query.chars().count() + 1)
+            && typed < area.width
+        {
+            frame.set_cursor_position((area.x + typed, area.y));
+        }
     }
 
     fn render_tabs(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -129,8 +179,9 @@ impl App {
                 "S: connections  q/Esc: quit"
             }
             super::InputMode::Main => {
-                "y: copy  p: paste  [: previous  ]: next  n: new browser  x: close  S: connections  q/Esc: quit"
+                "/: filter  y: copy  p: paste  [: previous  ]: next  n: new browser  x: close  S: connections  q/Esc: quit"
             }
+            super::InputMode::Filter => "Tab: complete  ↑/↓: select  Enter: keep  Esc: cancel",
             super::InputMode::ConnectionManager => {
                 "j/k: select  Enter: activate  n: new browser  a: add  d: close  q/Esc: dismiss"
             }
@@ -451,19 +502,27 @@ fn input_style() -> Style {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::App;
+    use crate::tui::browser_context::ListingStatus;
 
     fn rendered(app: &mut App, width: u16, height: u16) -> String {
+        rendered_lines(app, width, height).concat()
+    }
+
+    fn rendered_lines(app: &mut App, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|row| {
+                (0..width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect()
+            })
             .collect()
     }
 
@@ -485,6 +544,90 @@ mod tests {
         assert!(output.contains("Local  "));
         assert!(output.contains("Files"));
         assert!(!output.contains("Locations"));
+        app.shutdown().await.unwrap();
+    }
+
+    /// A browser whose listing of three files has been fully applied.
+    async fn listed(directory: &std::path::Path) -> App {
+        for name in ["alpha.txt", "beta.txt", "gamma.txt"] {
+            tokio::fs::write(directory.join(name), b"").await.unwrap();
+        }
+        let mut app = App::new();
+        app.start(Some(directory.to_str().unwrap())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                app.pump_events();
+                if app
+                    .active_context()
+                    .is_some_and(|context| context.status() == &ListingStatus::Complete)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        app
+    }
+
+    /// The line index of the file list's first and last row, read off its border.
+    fn list_bounds(lines: &[String]) -> (usize, usize) {
+        let top = lines
+            .iter()
+            .position(|line| line.contains('┌') && line.contains("Files"))
+            .expect("the file list is drawn with a border");
+        let bottom = lines
+            .iter()
+            .rposition(|line| line.contains('└'))
+            .expect("the file list border is closed");
+        (top + 1, bottom - 1)
+    }
+
+    /// The query is read downwards into the matches: it takes the line directly
+    /// above the list, and the matches start at the list's top edge.
+    #[tokio::test]
+    async fn the_filter_prompt_sits_directly_above_the_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = listed(directory.path()).await;
+
+        let closed = rendered_lines(&mut app, 60, 16);
+        let (closed_first, _) = list_bounds(&closed);
+        assert!(
+            closed[closed_first].contains("alpha.txt"),
+            "an unfiltered list starts at the top edge"
+        );
+
+        app.open_filter();
+        for character in "beta".chars() {
+            app.extend_filter(character);
+        }
+        let open = rendered_lines(&mut app, 60, 16);
+        let (first, _) = list_bounds(&open);
+        assert_eq!(
+            first,
+            closed_first + 1,
+            "the prompt takes a line of its own, and none while it is closed"
+        );
+        assert!(
+            open[first - 2].contains("/beta"),
+            "the query is echoed on the line above the list"
+        );
+        assert!(open[first - 2].contains("1 match"));
+        assert!(
+            open[first].contains("beta.txt"),
+            "the match sits on the first row of the pane, under the query"
+        );
+
+        app.extend_filter('z');
+        assert!(rendered(&mut app, 60, 16).contains("no matches"));
+
+        app.abandon_filter();
+        let closed = rendered_lines(&mut app, 60, 16);
+        let (first, _) = list_bounds(&closed);
+        assert!(closed[first].contains("alpha.txt"));
+        assert!(closed.concat().contains("/: filter"));
+
         app.shutdown().await.unwrap();
     }
 }
