@@ -84,6 +84,21 @@ struct TransferTask {
     handle: JoinHandle<()>,
 }
 
+/// How long a quit key waits for the press that confirms it.
+const QUIT_CONFIRMATION: Duration = Duration::from_secs(2);
+
+/// A quit key waiting to be confirmed, and the timer that gives up on it.
+///
+/// The timer is a tracked task reporting through the lifecycle channel rather than a
+/// deadline the event loop selects over, because the loop deliberately owns no timer:
+/// it draws when something happens, and an expiring confirmation is something
+/// happening. Its ID is what makes a timer from an earlier press harmless.
+#[derive(Debug)]
+struct PendingQuit {
+    id: Uuid,
+    timer: JoinHandle<()>,
+}
+
 #[derive(Debug)]
 enum LifecycleEvent {
     ConnectionReady {
@@ -109,6 +124,9 @@ enum LifecycleEvent {
         conflict: CopyConflict,
         result: Result<CopyResult, io::Error>,
     },
+    QuitUnconfirmed {
+        id: Uuid,
+    },
 }
 
 #[derive(Debug)]
@@ -131,6 +149,7 @@ pub(crate) struct App {
     close_tasks: HashMap<ConnectionRecordId, JoinHandle<()>>,
     transfer_selection: Option<TransferSelection>,
     transfer_task: Option<TransferTask>,
+    pending_quit: Option<PendingQuit>,
     status_message: Option<String>,
     status_error: Option<String>,
 }
@@ -158,6 +177,7 @@ impl App {
             close_tasks: HashMap::new(),
             transfer_selection: None,
             transfer_task: None,
+            pending_quit: None,
             status_message: None,
             status_error: None,
         }
@@ -362,6 +382,17 @@ impl App {
                 conflict,
                 result,
             } => self.apply_transfer_completed(transfer_id, request, conflict, result),
+            // A timer from a press that has already been answered says nothing about
+            // the one waiting now.
+            LifecycleEvent::QuitUnconfirmed { id } => {
+                if self
+                    .pending_quit
+                    .as_ref()
+                    .is_some_and(|pending| pending.id == id)
+                {
+                    self.pending_quit = None;
+                }
+            }
         }
     }
 
@@ -1018,6 +1049,43 @@ impl App {
         }
     }
 
+    /// Takes a press of a quit key, reporting whether it quits.
+    ///
+    /// The first press only arms a confirmation, so the keys that leave the browser
+    /// take two presses; the second takes it. A press that arrives after the
+    /// confirmation has lapsed is a first press again rather than the second of a
+    /// pair, which is what makes leaving deliberate rather than a matter of timing.
+    pub(crate) fn press_quit(&mut self) -> bool {
+        if let Some(pending) = self.pending_quit.take() {
+            pending.timer.abort();
+            return true;
+        }
+        let id = Uuid::new_v4();
+        let sender = self.lifecycle_sender.clone();
+        self.pending_quit = Some(PendingQuit {
+            id,
+            timer: tokio::spawn(async move {
+                tokio::time::sleep(QUIT_CONFIRMATION).await;
+                let _ = sender.send(LifecycleEvent::QuitUnconfirmed { id });
+            }),
+        });
+        false
+    }
+
+    /// Whether a quit key is waiting for the press that confirms it.
+    pub(crate) fn quit_pending(&self) -> bool {
+        self.pending_quit.is_some()
+    }
+
+    /// Stands a waiting confirmation down, which is what any key that is not another
+    /// quit press does: a press confirms the press before it, not one buried under a
+    /// burst of navigation.
+    pub(crate) fn cancel_quit(&mut self) {
+        if let Some(pending) = self.pending_quit.take() {
+            pending.timer.abort();
+        }
+    }
+
     pub(crate) fn open_filter(&mut self) {
         if let Some(context) = self.active_context_mut() {
             context.begin_filter();
@@ -1045,6 +1113,12 @@ impl App {
     pub(crate) fn descend_filter(&mut self) {
         if let Some(context) = self.active_context_mut() {
             context.descend_filter();
+        }
+    }
+
+    pub(crate) fn clear_filter_entry(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.clear_filter_entry();
         }
     }
 
@@ -1091,6 +1165,10 @@ impl App {
     }
 
     pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
+        if let Some(pending) = self.pending_quit.take() {
+            pending.timer.abort();
+            let _ = pending.timer.await;
+        }
         if let Some(task) = self.transfer_task.take() {
             task.handle.abort();
             let _ = task.handle.await;
@@ -1132,7 +1210,7 @@ mod tests {
 
     use crate::ServerLocation;
 
-    use super::{App, ConnectionStatus, InputMode};
+    use super::{App, ConnectionStatus, InputMode, LifecycleEvent};
     use crate::tui::browser_context::{BrowserContext, ListingStatus};
 
     #[test]
@@ -1232,6 +1310,35 @@ mod tests {
 
         app.submit_filter();
         assert_eq!(app.input_mode(), InputMode::Main);
+
+        app.shutdown().await.unwrap();
+    }
+
+    /// A confirmation that is never answered lapses, and the press after that is a
+    /// first press again rather than the second of a pair.
+    #[tokio::test]
+    async fn an_unanswered_quit_confirmation_lapses() {
+        let mut app = App::new();
+
+        assert!(!app.press_quit());
+        let lapsed = app.pending_quit.as_ref().expect("armed").id;
+
+        app.lifecycle_sender
+            .send(LifecycleEvent::QuitUnconfirmed { id: lapsed })
+            .unwrap();
+        app.pump_events();
+        assert!(!app.quit_pending(), "the timer stood it down");
+
+        assert!(!app.press_quit(), "so this press arms rather than quitting");
+        app.lifecycle_sender
+            .send(LifecycleEvent::QuitUnconfirmed { id: lapsed })
+            .unwrap();
+        app.pump_events();
+        assert!(
+            app.quit_pending(),
+            "a timer from the earlier press says nothing about this one"
+        );
+        assert!(app.press_quit());
 
         app.shutdown().await.unwrap();
     }

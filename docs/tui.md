@@ -84,6 +84,23 @@ capping the UI far below what the server streams. The listing channel bound is
 correspondingly deep enough for a listing task to run a frame ahead of the
 renderer while still bounding a producer that outruns it.
 
+## Leaving
+
+`q`, `Esc`, and `Ctrl-C` leave the browser on two presses rather than one. The first
+arms a confirmation that takes over the footer, and the second takes it; the pair may
+be mixed, since the three keys mean the same thing. Any other key stands the
+confirmation down, so a quit is never the tail of a burst of navigation that happened
+to end on one. `Ctrl-C` is answered as a key rather than a signal because raw mode
+delivers it that way, and inside the filter prompt it closes the prompt instead --
+the prompt is the thing it is expected to interrupt.
+
+An unanswered confirmation lapses. Its timer is a tracked task reporting through the
+lifecycle channel rather than a deadline the event loop selects over, because the
+loop deliberately owns no timer: it draws when something happens, and a lapsing
+confirmation is something happening. The timer carries the ID of the press that
+armed it, so one belonging to a press already answered cannot stand down the
+confirmation waiting now.
+
 Terminal events arrive over their own channel, filled by a task that owns the
 Ratatui event stream. That stream registers a wake task on its first `Pending`
 and suppresses later registrations until it fires, so polling it from a `select!`
@@ -134,7 +151,8 @@ selection follows the nearest match rather than a carried-along ancestor. `Tab`
 extends the query to the longest prefix every match agrees on, the way a shell
 completes a partial word, which can never narrow what is on screen because every
 match starts with the prefix it completes to. `Esc` closes the prompt and puts the
-selection back where it started.
+selection back where it started, and `Ctrl-C` does the same: raw mode delivers it as
+a key rather than a signal, and a prompt is what it is expected to interrupt.
 
 `Enter` takes two presses, because the first has something to say: a query that
 only narrowed to a row is not yet that row, so the first press spells the selected
@@ -147,10 +165,14 @@ Moving the selection spells out the row it lands on the same way, so walking the
 candidates reads as choosing between them. What narrows the rows is still only what
 was typed: the candidate is spelled out *over* the query rather than into it, which
 is what keeps the set being walked from collapsing to the one candidate showing.
-Editing adopts what is on screen, so a backspace after walking onto `june.txt`
-leaves `june.tx` rather than the query that found it. `Tab` and `Enter` therefore
-complete to different things on purpose: `Tab` to what every match agrees on,
-`Enter` to the one match selected.
+Every key that edits or spends the prompt text works on what is on screen rather
+than on the query underneath it: a backspace after walking onto `june.txt` leaves
+`june.tx`, `Tab` extends the name rather than jumping back to the fragment that
+found it, and the `/` that steps into a directory spends the name, so the backspace
+that steps back out returns `workspace` rather than the `wo` that found it. Only
+moving the selection writes over the query instead of into it, because that is what
+the candidate walk needs. `Tab` and `Enter` therefore complete to different things
+on purpose: `Tab` to what every match agrees on, `Enter` to the one match selected.
 
 Matching is a substring rather than a fuzzy subsequence so that completion has
 something to complete to: a subsequence match shares no prefix with what was
@@ -179,6 +201,13 @@ it, and across the `/` that opened the prompt it closes the prompt as `Esc` woul
 A directory the prompt opened is part of what the prompt did, so abandoning closes
 it while committing keeps it; one that was already expanded is not, and stays open
 either way.
+
+`Ctrl-W` walks the same ladder a segment at a time rather than a character at a
+time, which is what the chord that kills a word means where a path segment is the
+word: it clears the query, then the directory a `/` stepped into, and then the
+prompt. The directory takes the query that entered it along with it, because the
+entry is the directory rather than the separator in front of it, so `/dir/` clears
+to `/` in one press rather than back to `/dir`.
 
 The prompt takes the letters, so walking and scrolling the matches without leaving
 it belongs to the arrows and to the chords a prompt is expected to answer:

@@ -18,11 +18,13 @@ directories holding them, `Tab` completes the query as far as those matches
 agree, a further `/` steps into the directory the query names outright without
 moving the root, backspace walks back out again, `Enter` spells the selected match
 out and then
-keeps it, and `Esc` puts the selection back. `Ctrl-N`/`Ctrl-P` walk the matches
-and `Ctrl-D`/`Ctrl-U` scroll them. Press
+keeps it, and `Esc` puts the selection back. `Ctrl-N`/`Ctrl-P` walk the matches,
+`Ctrl-D`/`Ctrl-U` scroll them, and `Ctrl-W` clears the last segment of the query.
+Press
 `y` on a regular file and `p` in any browser to stream it between connections.
 Remote-to-local copy/paste is the download workflow; an existing destination
-requires explicit overwrite confirmation.
+requires explicit overwrite confirmation. `q`, `Esc`, and `Ctrl-C` leave the browser
+on a second press, which any other key or a couple of seconds stands down.
 
 ## Build
 

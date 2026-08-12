@@ -194,6 +194,11 @@ impl App {
     }
 
     fn footer_text(&self) -> String {
+        // An armed confirmation takes the whole line: the press only counts while it
+        // is on screen, so it is the one thing worth reading.
+        if self.quit_pending() {
+            return "Press q or Ctrl-C again to quit  any other key: stay".to_owned();
+        }
         let controls = match self.input_mode() {
             super::InputMode::Main if self.active_context_id.is_none() => {
                 "S: connections  q/Esc: quit"
@@ -202,7 +207,7 @@ impl App {
                 "/: filter  y: copy  p: paste  [: previous  ]: next  n: new browser  x: close  S: connections  q/Esc: quit"
             }
             super::InputMode::Filter => {
-                "Tab: complete  /: open directory  ↑/↓ or Ctrl-N/P: select  Ctrl-D/U: scroll  Enter: fill in, then keep  Esc: cancel"
+                "Tab: complete  /: open directory  Ctrl-W: clear  ↑/↓ or Ctrl-N/P: select  Ctrl-D/U: scroll  Enter: fill in, then keep  Esc/Ctrl-C: cancel"
             }
             super::InputMode::ConnectionManager => {
                 "j/k: select  Enter: activate  n: new browser  a: add  d: close  q/Esc: dismiss"
@@ -604,6 +609,24 @@ mod tests {
             .rposition(|line| line.contains('└'))
             .expect("the file list border is closed");
         (top + 1, bottom - 1)
+    }
+
+    /// An armed confirmation takes the footer, since the press only counts while it
+    /// is on screen.
+    #[tokio::test]
+    async fn an_armed_quit_confirmation_takes_the_footer() {
+        let mut app = App::new();
+        app.start(Some(".")).await.unwrap();
+        assert!(rendered(&mut app, 78, 12).contains("/: filter"));
+
+        app.press_quit();
+        let armed = rendered(&mut app, 78, 12);
+        assert!(armed.contains("Press q or Ctrl-C again to quit"));
+        assert!(!armed.contains("/: filter"));
+
+        app.cancel_quit();
+        assert!(rendered(&mut app, 78, 12).contains("/: filter"));
+        app.shutdown().await.unwrap();
     }
 
     /// The query is read downwards into the matches: it takes the line directly

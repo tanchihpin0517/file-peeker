@@ -620,9 +620,13 @@ impl BrowserContext {
     /// further leave the query alone, so a completion never narrows what is on
     /// screen -- every match starts with the prefix it completes to.
     pub(crate) fn complete_filter(&mut self) {
-        let Some(filter) = &self.filter else {
+        // Extends what is on screen, so walking onto a candidate and then completing
+        // does not throw the candidate away and jump the prompt back to the fragment
+        // that found it.
+        let Some(filter) = &mut self.filter else {
             return;
         };
+        filter.adopt_filled();
         if filter.query.is_empty() {
             return;
         }
@@ -707,14 +711,51 @@ impl BrowserContext {
             self.start_directory_listing(index);
         }
         if let Some(filter) = &mut self.filter {
-            filter.filled = None;
-            filter.warning = None;
+            // What entered the directory is the text that was on screen, a candidate
+            // walked onto included, so that is what the query spent here has to be:
+            // a backspace over this `/` gives back the name, not the fragment that
+            // was typed before the walk.
+            filter.adopt_filled();
             let query = std::mem::take(&mut filter.query);
             filter.descents.push(Descent {
                 path,
                 query,
                 opened: closed,
             });
+        }
+        self.follow_filter();
+    }
+
+    /// Clears the last entry in the prompt in one stroke, and closes the prompt once
+    /// there is no entry left.
+    ///
+    /// An entry is a whole segment, which is what makes this the segment-sized
+    /// counterpart of backspace: the query if there is one, and otherwise the
+    /// directory the last `/` stepped into -- taking with it the query that entered
+    /// it, because the directory is the entry rather than the separator in front of
+    /// it. `/dir/` therefore clears to `/` in one press rather than back to `/dir`.
+    ///
+    /// What it clears is what is on screen, so a candidate walked onto goes with it
+    /// rather than leaving the fragment that found it behind.
+    pub(crate) fn clear_filter_entry(&mut self) {
+        let Some(filter) = &mut self.filter else {
+            return;
+        };
+        if !filter.displayed().is_empty() {
+            filter.filled = None;
+            filter.warning = None;
+            filter.query.clear();
+            self.follow_filter();
+            return;
+        }
+        if filter.descents.is_empty() {
+            self.abandon_filter();
+            return;
+        }
+        self.ascend_filter();
+        if let Some(filter) = &mut self.filter {
+            filter.filled = None;
+            filter.query.clear();
         }
         self.follow_filter();
     }
@@ -2073,6 +2114,127 @@ mod tests {
         context.extend_filter('t');
         assert_eq!(context.filter(), Some("january-outside.txt"));
         assert_eq!(context.filter_matches(), Some(1), "typed, so it narrows");
+    }
+
+    /// Clearing takes one whole entry per press, which is the same ladder backspace
+    /// walks a character at a time: the query, then the directory a `/` stepped into
+    /// along with the query that entered it, then the prompt itself.
+    #[tokio::test]
+    async fn clearing_takes_the_last_entry_and_then_closes_the_prompt() {
+        let source = ScriptedClient::new([
+            listing([Ok(directory("work-notes")), Ok(directory("workspace"))]),
+            listing([Ok(entry("file.txt"))]),
+        ])
+        .await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.begin_filter();
+        for character in "wo".chars() {
+            context.extend_filter(character);
+        }
+        context.move_selection(true);
+        context.descend_filter();
+        while matches!(context.rows[1].expansion, ExpansionStatus::Loading { .. }) {
+            apply_next(&mut context, &mut receiver).await;
+        }
+        for character in "fil".chars() {
+            context.extend_filter(character);
+        }
+        assert_eq!(context.filter(), Some("fil"));
+
+        // The query goes, and the directory it was narrowing stays open.
+        context.clear_filter_entry();
+        assert_eq!(context.filter(), Some(""));
+        assert_eq!(context.filter_scope(), Some("workspace"));
+        assert_eq!(context.visible_names(8), ["workspace", "file.txt"]);
+
+        // With no query left, the next press is the directory itself, and the name
+        // that entered it goes with it rather than being left behind as a query.
+        context.clear_filter_entry();
+        assert_eq!(context.filter(), Some(""));
+        assert_eq!(context.filter_scope(), None);
+        assert_eq!(
+            context.row_names(),
+            ["work-notes", "workspace"],
+            "the directory the prompt opened is closed again"
+        );
+
+        // With no entry left at all, the prompt goes.
+        context.clear_filter_entry();
+        assert_eq!(context.filter(), None);
+    }
+
+    /// Clearing takes what is on screen with it, not just the query underneath.
+    #[tokio::test]
+    async fn clearing_takes_a_candidate_walked_onto_with_it() {
+        let source = ScriptedClient::new([listing([
+            Ok(directory("work-notes")),
+            Ok(directory("workspace")),
+        ])])
+        .await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.begin_filter();
+        for character in "wo".chars() {
+            context.extend_filter(character);
+        }
+        context.move_selection(true);
+        assert_eq!(context.filter(), Some("workspace"));
+
+        context.clear_filter_entry();
+        assert_eq!(
+            context.filter(),
+            Some(""),
+            "the spelled-out name goes too, leaving no `wo` behind"
+        );
+    }
+
+    /// What entered a directory is the text that was on screen. Walking onto a
+    /// candidate spells its name out, so a backspace over that `/` has to give the
+    /// name back rather than the fragment typed before the walk.
+    #[tokio::test]
+    async fn backspace_over_a_slash_restores_the_name_that_entered_the_directory() {
+        let source = ScriptedClient::new([
+            listing([Ok(directory("work-notes")), Ok(directory("workspace"))]),
+            listing([Ok(entry("file.txt"))]),
+        ])
+        .await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.begin_filter();
+        for character in "wo".chars() {
+            context.extend_filter(character);
+        }
+        assert_eq!(context.filter(), Some("wo"));
+        assert_eq!(context.filter_matches(), Some(2));
+
+        context.move_selection(true);
+        assert_eq!(
+            context.filter(),
+            Some("workspace"),
+            "walking onto a candidate spells it out"
+        );
+
+        context.descend_filter();
+        assert_eq!(context.filter_scope(), Some("workspace"));
+        assert_eq!(context.filter(), Some(""));
+
+        context.shorten_filter();
+        assert_eq!(
+            context.filter(),
+            Some("workspace"),
+            "the name that entered it, not the `wo` that found it"
+        );
+        assert_eq!(context.filter_scope(), None);
     }
 
     /// Backspace walks the prompt back one keystroke at a time, including over each

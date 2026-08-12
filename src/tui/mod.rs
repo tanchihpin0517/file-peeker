@@ -159,8 +159,17 @@ fn apply_terminal_events(
 
 /// Applies one key press, reporting whether the loop should keep running.
 fn apply_key(app: &mut App, key: KeyEvent) -> Flow {
-    match key_action(key.code, key.modifiers, app.input_mode()) {
-        KeyAction::Quit => return Flow::Quit,
+    let action = key_action(key.code, key.modifiers, app.input_mode());
+    if action != KeyAction::Quit {
+        app.cancel_quit();
+    }
+    match action {
+        // Leaving takes two presses, so the first only arms the confirmation.
+        KeyAction::Quit => {
+            if app.press_quit() {
+                return Flow::Quit;
+            }
+        }
         KeyAction::Refresh => app.refresh_active_context(),
         KeyAction::MoveDown => app.move_active_selection(true),
         KeyAction::MoveUp => app.move_active_selection(false),
@@ -198,6 +207,7 @@ fn apply_key(app: &mut App, key: KeyEvent) -> Flow {
         KeyAction::FilterBackspace => app.shorten_filter(),
         KeyAction::CompleteFilter => app.complete_filter(),
         KeyAction::DescendFilter => app.descend_filter(),
+        KeyAction::ClearFilterEntry => app.clear_filter_entry(),
         KeyAction::SubmitFilter => app.submit_filter(),
         KeyAction::AbandonFilter => app.abandon_filter(),
         KeyAction::ConfirmTransferOverwrite => app.confirm_transfer_overwrite(),
@@ -251,6 +261,7 @@ enum KeyAction {
     FilterBackspace,
     CompleteFilter,
     DescendFilter,
+    ClearFilterEntry,
     SubmitFilter,
     AbandonFilter,
     Ignore,
@@ -300,6 +311,12 @@ fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAct
                     KeyCode::Char('p') => KeyAction::MoveUp,
                     KeyCode::Char('d') => KeyAction::HalfPageDown,
                     KeyCode::Char('u') => KeyAction::HalfPageUp,
+                    // A path segment is what a word is here, so the chord that kills
+                    // a word kills the last one.
+                    KeyCode::Char('w') => KeyAction::ClearFilterEntry,
+                    // Raw mode delivers this as a key rather than a signal, and a
+                    // prompt is what it is expected to interrupt.
+                    KeyCode::Char('c') => KeyAction::AbandonFilter,
                     _ => KeyAction::Ignore,
                 };
             }
@@ -337,6 +354,9 @@ fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAct
         match code {
             KeyCode::Char('d') => return KeyAction::HalfPageDown,
             KeyCode::Char('u') => return KeyAction::HalfPageUp,
+            // Raw mode delivers the interrupt as a key rather than a signal, so it
+            // has to be answered here to leave at all.
+            KeyCode::Char('c') => return KeyAction::Quit,
             _ => {}
         }
     }
@@ -379,7 +399,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        App, Cli, FRAME_BUDGET, Flow, InputMode, KeyAction, TERMINAL_EVENT_CAPACITY,
+        App, Cli, FRAME_BUDGET, Flow, InputMode, KeyAction, TERMINAL_EVENT_CAPACITY, apply_key,
         apply_terminal_events, key_action,
     };
     use crate::tui::browser_context::ListingStatus;
@@ -428,7 +448,9 @@ mod tests {
             "the burst should be drained, leaving nothing for the next frame"
         );
 
-        // Quitting mid-burst reports back rather than applying the rest.
+        // Quitting mid-burst reports back rather than applying the rest. It takes the
+        // pair of presses that a quit takes anywhere.
+        sender.send(Ok(press(KeyCode::Char('q')))).await.unwrap();
         sender.send(Ok(press(KeyCode::Char('q')))).await.unwrap();
         sender.send(Ok(press(KeyCode::Char('j')))).await.unwrap();
         let first = terminal_events.recv().await.unwrap();
@@ -447,6 +469,35 @@ mod tests {
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// Leaving the browser takes two presses, and two in a row: a key in between
+    /// stands the confirmation down, so a quit is never the tail of a burst of
+    /// navigation that happened to end on one.
+    #[tokio::test]
+    async fn quitting_takes_two_presses_with_nothing_in_between() {
+        let mut app = App::new();
+        app.start(Some(".")).await.unwrap();
+        let quit = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        assert_eq!(apply_key(&mut app, quit), Flow::Continue);
+        assert!(app.quit_pending(), "the first press only arms it");
+
+        assert_eq!(
+            apply_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)
+            ),
+            Flow::Continue
+        );
+        assert!(!app.quit_pending(), "any other key stands it down");
+
+        // The pair may be mixed, since both keys mean the same thing.
+        assert_eq!(apply_key(&mut app, quit), Flow::Continue);
+        assert_eq!(apply_key(&mut app, interrupt), Flow::Quit);
+
+        app.shutdown().await.unwrap();
     }
 
     #[test]
@@ -628,6 +679,8 @@ mod tests {
             ('p', KeyAction::MoveUp),
             ('d', KeyAction::HalfPageDown),
             ('u', KeyAction::HalfPageUp),
+            ('w', KeyAction::ClearFilterEntry),
+            ('c', KeyAction::AbandonFilter),
         ] {
             assert_eq!(
                 key_action(
@@ -651,6 +704,11 @@ mod tests {
             key_action(KeyCode::Char('x'), KeyModifiers::CONTROL, InputMode::Filter),
             KeyAction::Ignore,
             "a chord the prompt has no use for is not typed text"
+        );
+        assert_eq!(
+            key_action(KeyCode::Char('c'), KeyModifiers::CONTROL, InputMode::Main),
+            KeyAction::Quit,
+            "outside the prompt the same chord leaves the browser, on a confirmation"
         );
     }
 
