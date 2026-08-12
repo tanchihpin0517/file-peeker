@@ -62,12 +62,58 @@ pub(crate) struct Viewport<'a> {
     pub(crate) selected: Option<usize>,
 }
 
-/// A live filter over the rows, and the selection to put back if it is
-/// abandoned.
+/// A live filter over the rows, the directory it has stepped into, and the
+/// selection to put back if it is abandoned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Filter {
+    /// What the user typed, and what narrows the rows. The selected candidate is
+    /// spelled out over it rather than into it, so walking the candidates never
+    /// shrinks the set being walked.
     query: String,
-    restore_selection: Option<usize>,
+    /// The name of the selected match, spelled out in the prompt in place of the
+    /// query. Cleared by anything that edits the query.
+    filled: Option<String>,
+    /// What the last `/` refused to do, shown in the prompt until the next keystroke
+    /// so the key never fails silently.
+    warning: Option<&'static str>,
+    /// The directories a `/` has stepped into, outermost first. The innermost is
+    /// what matching is confined to, which is what makes an empty query read as
+    /// "everything in here".
+    descents: Vec<Descent>,
+    /// Held as a path rather than an index, because rows inserted while the prompt
+    /// is open -- by a streaming listing, or by the expansion a `/` starts -- would
+    /// drift an index out from under it.
+    restore_path: Option<String>,
+}
+
+impl Filter {
+    fn scope(&self) -> Option<&str> {
+        self.descents.last().map(|descent| descent.path.as_str())
+    }
+
+    /// What the prompt shows: the selected candidate when one has been spelled out,
+    /// and otherwise the query itself.
+    fn displayed(&self) -> &str {
+        self.filled.as_deref().unwrap_or(&self.query)
+    }
+
+    /// Folds a spelled-out candidate back into the query, so editing edits the text
+    /// that is on screen.
+    fn adopt_filled(&mut self) {
+        if let Some(filled) = self.filled.take() {
+            self.query = filled;
+        }
+        self.warning = None;
+    }
+}
+
+/// A directory a `/` stepped into, and what stepping back out of it takes: the
+/// query that was spent entering it, and whether entering it is what opened it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Descent {
+    path: String,
+    query: String,
+    opened: bool,
 }
 
 /// Which rows a frame may show: every row, or the rows a filter matched
@@ -127,6 +173,17 @@ impl VisibleRows {
             Self::All(_) => row.min(last),
             Self::Filtered { rows, .. } => start_of(rows, row).min(last),
         })
+    }
+
+    /// Whether `row` is on screen because it matched, rather than to place a match
+    /// under it.
+    fn matched(&self, row: usize) -> bool {
+        match self {
+            Self::All(_) => true,
+            Self::Filtered { rows, .. } => rows
+                .get(start_of(rows, row))
+                .is_some_and(|visible| visible.row == row && visible.matched),
+        }
     }
 
     /// Where the nearest match at or after `row` sits, falling back to the last
@@ -387,6 +444,7 @@ impl BrowserContext {
             current.saturating_sub(1)
         };
         self.selected_index = visible.row(position);
+        self.fill_from_selection();
     }
 
     pub(crate) fn scroll_half_page(&mut self, down: bool) {
@@ -415,6 +473,7 @@ impl BrowserContext {
             current.saturating_sub(distance)
         };
         self.selected_index = visible.row(position);
+        self.fill_from_selection();
     }
 
     /// The rows the active filter leaves on screen: every name that matches, plus
@@ -426,9 +485,14 @@ impl BrowserContext {
     /// as the matching itself, and it means no row mutation anywhere else has to
     /// remember to invalidate anything. An unfiltered browser pays nothing.
     fn visible_rows(&self) -> VisibleRows {
-        let Some(needle) = self.needle() else {
+        let Some(filter) = &self.filter else {
             return VisibleRows::All(self.rows.len());
         };
+        let needle = (!filter.query.is_empty()).then(|| filter.query.to_lowercase());
+        let scope = filter.scope();
+        if needle.is_none() && scope.is_none() {
+            return VisibleRows::All(self.rows.len());
+        }
         let mut rows = Vec::new();
         let mut matches = 0;
         // The ancestor chain of the row under consideration, and whether each
@@ -437,8 +501,16 @@ impl BrowserContext {
         let mut ancestors: Vec<(usize, bool)> = Vec::new();
         for (index, row) in self.rows.iter().enumerate() {
             ancestors.truncate(row.depth);
-            let hit = matches_needle(&row.entry.name, &needle);
-            if hit {
+            // The directory a `/` stepped into stays on screen whatever the query
+            // does, so stepping into an empty or still-loading one still shows
+            // where the prompt is pointed.
+            let entered = scope == Some(row.path.as_str());
+            let hit = !entered
+                && in_scope(&row.path, scope)
+                && needle
+                    .as_ref()
+                    .is_none_or(|needle| matches_needle(&row.entry.name, needle));
+            if hit || entered {
                 for (ancestor, emitted) in &mut ancestors {
                     if !*emitted {
                         rows.push(VisibleRow {
@@ -450,53 +522,83 @@ impl BrowserContext {
                 }
                 rows.push(VisibleRow {
                     row: index,
-                    matched: true,
+                    matched: hit,
                 });
-                matches += 1;
+                matches += usize::from(hit);
             }
-            ancestors.push((index, hit));
+            ancestors.push((index, hit || entered));
         }
         VisibleRows::Filtered { rows, matches }
     }
 
-    /// The active query, lowercased for matching. `None` covers both no filter at
-    /// all and an open prompt with nothing typed yet, which narrow nothing.
-    fn needle(&self) -> Option<String> {
+    /// What the prompt shows, which is the selected candidate once one has been
+    /// spelled out and the typed query until then.
+    pub(crate) fn filter(&self) -> Option<&str> {
+        self.filter.as_ref().map(Filter::displayed)
+    }
+
+    /// The directory a `/` stepped into, relative to the root, which the prompt
+    /// shows as the segments already committed.
+    pub(crate) fn filter_scope(&self) -> Option<&str> {
+        let scope = self.filter.as_ref()?.scope()?;
+        Path::new(scope)
+            .strip_prefix(&self.root_path)
+            .ok()
+            .and_then(Path::to_str)
+            .or(Some(scope))
+    }
+
+    /// What the last `/` refused to do, until the next keystroke clears it.
+    pub(crate) fn filter_warning(&self) -> Option<&'static str> {
+        self.filter.as_ref()?.warning
+    }
+
+    /// How many rows the query matches. `None` when there is no query to report on,
+    /// including the empty one a `/` leaves behind.
+    pub(crate) fn filter_matches(&self) -> Option<usize> {
         self.filter
             .as_ref()
-            .map(|filter| filter.query.to_lowercase())
-            .filter(|needle| !needle.is_empty())
-    }
-
-    pub(crate) fn filter(&self) -> Option<&str> {
-        self.filter.as_ref().map(|filter| filter.query.as_str())
-    }
-
-    /// How many rows the active query matches, or `None` when nothing is narrowed.
-    pub(crate) fn filter_matches(&self) -> Option<usize> {
+            .filter(|filter| !filter.query.is_empty())?;
         self.visible_rows().matches()
     }
 
-    /// Opens the filter prompt, remembering the selection so abandoning it can put
-    /// it back.
+    /// Opens the filter prompt, remembering the selected row so abandoning it can
+    /// put the selection back.
     pub(crate) fn begin_filter(&mut self) {
         self.filter = Some(Filter {
             query: String::new(),
-            restore_selection: self.selected_index,
+            filled: None,
+            warning: None,
+            descents: Vec::new(),
+            restore_path: self.selected_path(),
         });
     }
 
     pub(crate) fn extend_filter(&mut self, character: char) {
         if let Some(filter) = &mut self.filter {
+            filter.adopt_filled();
             filter.query.push(character);
             self.follow_filter();
         }
     }
 
+    /// Deletes the last character typed, and when there is none, the last `/`.
+    ///
+    /// Backspace walks the prompt back keystroke by keystroke: over a query it
+    /// deletes characters, over the `/` that stepped into a directory it steps back
+    /// out of it and restores the query that entered it, and over the `/` that
+    /// opened the prompt it closes the prompt.
     pub(crate) fn shorten_filter(&mut self) {
-        if let Some(filter) = &mut self.filter {
-            filter.query.pop();
+        let Some(filter) = &mut self.filter else {
+            return;
+        };
+        filter.adopt_filled();
+        if filter.query.pop().is_some() {
             self.follow_filter();
+        } else if filter.descents.is_empty() {
+            self.abandon_filter();
+        } else {
+            self.ascend_filter();
         }
     }
 
@@ -505,12 +607,18 @@ impl BrowserContext {
     /// further leave the query alone, so a completion never narrows what is on
     /// screen -- every match starts with the prefix it completes to.
     pub(crate) fn complete_filter(&mut self) {
-        let Some(needle) = self.needle() else {
+        let Some(filter) = &self.filter else {
             return;
         };
+        if filter.query.is_empty() {
+            return;
+        }
+        let needle = filter.query.to_lowercase();
+        let scope = filter.scope();
         let mut matches = self
             .rows
             .iter()
+            .filter(|row| scope != Some(row.path.as_str()) && in_scope(&row.path, scope))
             .map(|row| row.entry.name.as_str())
             .filter(|name| matches_needle(name, &needle));
         let Some(first) = matches.next() else {
@@ -534,20 +642,175 @@ impl BrowserContext {
         if completion.chars().count() <= filter.query.chars().count() {
             return;
         }
+        filter.filled = None;
+        filter.warning = None;
         filter.query = completion;
         self.follow_filter();
     }
 
-    /// Closes the prompt, keeping the row the filter led to selected.
+    /// Steps into the selected directory: it is expanded if it was closed, the
+    /// query is spent getting here, and matching is confined to what lies under it.
+    ///
+    /// The root never moves, so this opens a directory rather than navigating to
+    /// one -- the tab, its path, and everything outside stay put, and the prompt
+    /// reads as a path because each `/` commits one segment. A name can never
+    /// contain a `/`, so nothing is lost by spending the key this way rather than
+    /// on a query that could only ever match nothing.
+    ///
+    /// Only a directory the prompt names outright is opened. A query that has merely
+    /// narrowed onto one is narrowing onto its neighbours just as much, so guessing
+    /// at it would open the wrong directory as readily as the right one; the prompt
+    /// says why it did nothing instead.
+    pub(crate) fn descend_filter(&mut self) {
+        let Some(filter) = &self.filter else {
+            return;
+        };
+        if self
+            .selected_candidate()
+            .is_none_or(|name| name != filter.displayed())
+        {
+            self.warn_filter("no exact match to open");
+            return;
+        }
+        let Some((index, path, closed)) = self
+            .effective_selection()
+            .and_then(|index| Some((index, self.rows.get(index)?)))
+            .filter(|(_, row)| row.entry.navigable)
+            .map(|(index, row)| {
+                (
+                    index,
+                    row.path.clone(),
+                    matches!(
+                        row.expansion,
+                        ExpansionStatus::Collapsed | ExpansionStatus::Failed { .. }
+                    ),
+                )
+            })
+        else {
+            self.warn_filter("not a directory");
+            return;
+        };
+        if closed {
+            self.start_directory_listing(index);
+        }
+        if let Some(filter) = &mut self.filter {
+            filter.filled = None;
+            filter.warning = None;
+            let query = std::mem::take(&mut filter.query);
+            filter.descents.push(Descent {
+                path,
+                query,
+                opened: closed,
+            });
+        }
+        self.follow_filter();
+    }
+
+    /// Steps back out of the last directory a `/` entered, closing it again if
+    /// entering it is what opened it, and restoring the query that entered it.
+    fn ascend_filter(&mut self) {
+        let Some(descent) = self.filter.as_mut().and_then(|filter| {
+            let descent = filter.descents.pop()?;
+            filter.query.clone_from(&descent.query);
+            Some(descent)
+        }) else {
+            return;
+        };
+        self.close_descent(&descent);
+        self.follow_filter();
+    }
+
+    /// Fills the selected match into the query, or closes the prompt when the query
+    /// already names it.
+    ///
+    /// Two presses rather than one, because the first has something to say: a query
+    /// that only narrowed to a row is not yet that row, and seeing it spelled out is
+    /// what makes the second press a confirmation rather than a guess. A row the
+    /// query did not match -- the directory a `/` stepped into, or an ancestor the
+    /// arrows walked onto -- has nothing to fill in, so it is taken directly.
+    pub(crate) fn submit_filter(&mut self) {
+        let Some(filter) = &self.filter else {
+            return;
+        };
+        if self
+            .selected_candidate()
+            .is_some_and(|name| name != filter.displayed())
+        {
+            self.fill_from_selection();
+        } else {
+            self.commit_filter();
+        }
+    }
+
+    /// Spells the selected match out in the prompt, which is what makes walking the
+    /// candidates read as choosing one. Matching still goes by what was typed, so a
+    /// candidate spelled out over the query never shrinks the set being walked.
+    ///
+    /// Does nothing without a prompt, so every selection move can call it. A row the
+    /// query did not match has no name to spell out and puts the query back on
+    /// screen.
+    fn fill_from_selection(&mut self) {
+        if self.filter.is_none() {
+            return;
+        }
+        let candidate = self.selected_candidate();
+        if let Some(filter) = &mut self.filter {
+            filter.filled = candidate;
+            filter.warning = None;
+        }
+    }
+
+    fn warn_filter(&mut self, warning: &'static str) {
+        if let Some(filter) = &mut self.filter {
+            filter.warning = Some(warning);
+        }
+    }
+
+    /// The selected row's name, when the query is what put it on screen.
+    fn selected_candidate(&self) -> Option<String> {
+        let visible = self.visible_rows();
+        self.effective_selection()
+            .filter(|index| visible.matched(*index))
+            .and_then(|index| self.rows.get(index))
+            .map(|row| row.entry.name.clone())
+    }
+
+    /// Closes the prompt, keeping the row the filter led to selected and every
+    /// directory it opened on the way there open.
     pub(crate) fn commit_filter(&mut self) {
         self.filter = None;
     }
 
-    /// Closes the prompt and puts the selection back where it started.
+    /// Closes the prompt and leaves the tree as the prompt found it: every directory
+    /// it opened closes again, deepest first, and the selection goes back to the row
+    /// it started on.
     pub(crate) fn abandon_filter(&mut self) {
-        if let Some(filter) = self.filter.take() {
-            self.selected_index = filter.restore_selection;
+        let Some(filter) = self.filter.take() else {
+            return;
+        };
+        for descent in filter.descents.iter().rev() {
+            self.close_descent(descent);
         }
+        self.selected_index = filter
+            .restore_path
+            .and_then(|path| self.rows.iter().position(|row| row.path == path));
+    }
+
+    fn close_descent(&mut self, descent: &Descent) {
+        if descent.opened
+            && let Some(index) = self
+                .rows
+                .iter()
+                .position(|row| row.path == descent.path && row.entry.navigable)
+        {
+            self.collapse_directory(index);
+        }
+    }
+
+    fn selected_path(&self) -> Option<String> {
+        self.effective_selection()
+            .and_then(|index| self.rows.get(index))
+            .map(|row| row.path.clone())
     }
 
     /// Moves the selection onto a row the query leaves on screen, so typing never
@@ -900,6 +1163,15 @@ fn child_path(parent: &str, name: &str) -> String {
 /// typed, so `Tab` would have nothing to agree on.
 fn matches_needle(name: &str, needle: &str) -> bool {
     name.to_lowercase().contains(needle)
+}
+
+/// Whether a row lies inside the directory a `/` stepped into, or anywhere at all
+/// when none has been.
+///
+/// Compared by path component rather than by string prefix, so entering `reports`
+/// never captures `reports-old`.
+fn in_scope(path: &str, scope: Option<&str>) -> bool {
+    scope.is_none_or(|scope| Path::new(path).starts_with(scope))
 }
 
 #[cfg(test)]
@@ -1522,6 +1794,297 @@ mod tests {
             ["reports", "january.txt", "summary.txt", "root.txt"]
         );
         context
+    }
+
+    /// A browser holding one directory and two files beside it, plus a scripted
+    /// listing of that directory for a `/` to open.
+    async fn nested_source() -> Arc<ScriptedClient> {
+        ScriptedClient::new([
+            listing([
+                Ok(directory("reports")),
+                Ok(entry("january-outside.txt")),
+                Ok(entry("outside.txt")),
+            ]),
+            listing([Ok(entry("january.txt")), Ok(entry("june.txt"))]),
+            listing([Ok(entry("january.txt")), Ok(entry("june.txt"))]),
+        ])
+        .await
+    }
+
+    /// `/` opens a directory rather than navigating to one: the root stays where it
+    /// is, and everything outside the directory drops out of the matching.
+    #[tokio::test]
+    async fn stepping_into_a_directory_scopes_the_query_without_moving_the_root() {
+        let source = nested_source().await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.begin_filter();
+        for character in "rep".chars() {
+            context.extend_filter(character);
+        }
+
+        // A query that has only narrowed onto the directory does not open it.
+        context.descend_filter();
+        assert_eq!(context.filter_scope(), None);
+        assert_eq!(context.filter_warning(), Some("no exact match to open"));
+
+        context.complete_filter();
+        assert_eq!(context.filter(), Some("reports"));
+        assert_eq!(
+            context.filter_warning(),
+            None,
+            "the next keystroke clears it"
+        );
+        context.descend_filter();
+
+        assert_eq!(context.root_path(), "/home", "the root never moves");
+        assert_eq!(context.filter_scope(), Some("reports"));
+        assert_eq!(
+            context.filter(),
+            Some(""),
+            "the query is spent stepping in, ready for the next segment"
+        );
+        assert_eq!(
+            context.visible_names(8),
+            ["reports"],
+            "the directory shows while its children are still loading"
+        );
+
+        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+            apply_next(&mut context, &mut receiver).await;
+        }
+        assert_eq!(
+            context.visible_names(8),
+            ["reports", "january.txt", "june.txt"],
+            "an empty query inside a directory means everything in it"
+        );
+
+        for character in "jan".chars() {
+            context.extend_filter(character);
+        }
+        assert_eq!(
+            context.filter_matches(),
+            Some(1),
+            "january-outside.txt is out of scope"
+        );
+        assert_eq!(context.visible_names(8), ["reports", "january.txt"]);
+
+        // Completion agrees only among the matches inside the directory. The
+        // out-of-scope january-outside.txt would have cut this back to "january".
+        context.complete_filter();
+        assert_eq!(context.filter(), Some("january.txt"));
+
+        // A file is named outright here, and still has nothing to step into.
+        context.descend_filter();
+        assert_eq!(context.filter_scope(), Some("reports"));
+        assert_eq!(context.filter(), Some("january.txt"));
+        assert_eq!(context.filter_warning(), Some("not a directory"));
+    }
+
+    /// Enter is a confirmation, so it first spells out what the query narrowed to
+    /// and only takes it once the query says it outright.
+    #[tokio::test]
+    async fn enter_fills_the_selected_match_in_before_it_takes_it() {
+        let source = nested_source().await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.begin_filter();
+        context.extend_filter('u');
+        assert_eq!(context.filter_matches(), Some(2), "both outside names");
+        assert_eq!(
+            context.selected_entry().unwrap().name,
+            "january-outside.txt"
+        );
+
+        context.submit_filter();
+        assert_eq!(
+            context.filter(),
+            Some("january-outside.txt"),
+            "the first Enter spells the selected match out"
+        );
+        assert_eq!(
+            context.filter_matches(),
+            Some(2),
+            "spelling a candidate out must not shrink the set it came from"
+        );
+        assert_eq!(
+            context.selected_entry().unwrap().name,
+            "january-outside.txt"
+        );
+
+        context.submit_filter();
+        assert_eq!(
+            context.filter(),
+            None,
+            "the prompt already named the row, so the second Enter takes it"
+        );
+        assert_eq!(
+            context.selected_entry().unwrap().name,
+            "january-outside.txt"
+        );
+
+        // A row the query did not match has nothing to fill in. Stepping into a
+        // directory leaves the selection on the directory itself, which is on screen
+        // to place its contents rather than because it matched.
+        context.begin_filter();
+        for character in "rep".chars() {
+            context.extend_filter(character);
+        }
+        context.submit_filter();
+        context.descend_filter();
+        assert_eq!(context.filter_scope(), Some("reports"));
+        assert_eq!(context.selected_entry().unwrap().name, "reports");
+        context.submit_filter();
+        assert_eq!(context.filter(), None, "taken directly");
+        assert_eq!(context.selected_entry().unwrap().name, "reports");
+    }
+
+    /// Walking the candidates spells each one out in the prompt, which is only
+    /// useful if the walk survives it: matching goes by what was typed, so the set
+    /// being walked stays put while the text on screen changes.
+    #[tokio::test]
+    async fn walking_the_candidates_spells_each_one_out_without_narrowing_them() {
+        let source = nested_source().await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.begin_filter();
+        context.extend_filter('u');
+        assert_eq!(context.filter(), Some("u"), "the query as typed");
+
+        context.move_selection(true);
+        assert_eq!(context.filter(), Some("outside.txt"));
+        assert_eq!(context.filter_matches(), Some(2));
+
+        context.move_selection(false);
+        assert_eq!(
+            context.filter(),
+            Some("january-outside.txt"),
+            "the walk still has both candidates to move between"
+        );
+
+        // Typing edits the text on screen, so the spelled-out candidate is what the
+        // next keystroke lands on.
+        context.shorten_filter();
+        assert_eq!(context.filter(), Some("january-outside.tx"));
+        context.extend_filter('t');
+        assert_eq!(context.filter(), Some("january-outside.txt"));
+        assert_eq!(context.filter_matches(), Some(1), "typed, so it narrows");
+    }
+
+    /// Backspace walks the prompt back one keystroke at a time, including over each
+    /// `/`: out of the directory it opened, then out of the prompt itself.
+    #[tokio::test]
+    async fn backspace_undoes_each_slash_and_then_the_prompt() {
+        let source = nested_source().await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+        context.move_selection(true);
+        let restored = context.selected_entry().unwrap().name;
+
+        context.begin_filter();
+        for character in "reports".chars() {
+            context.extend_filter(character);
+        }
+        context.descend_filter();
+        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+            apply_next(&mut context, &mut receiver).await;
+        }
+        context.extend_filter('j');
+        assert_eq!(context.filter_matches(), Some(2));
+
+        context.shorten_filter();
+        assert_eq!(context.filter(), Some(""), "back to the whole directory");
+
+        // The backspace over the `/` closes the directory it opened and hands back
+        // the query that entered it.
+        context.shorten_filter();
+        assert_eq!(context.filter(), Some("reports"));
+        assert_eq!(context.filter_scope(), None);
+        assert_eq!(
+            context.row_names(),
+            ["reports", "january-outside.txt", "outside.txt"],
+            "the directory the prompt opened is closed again"
+        );
+        assert_eq!(context.selected_entry().unwrap().name, "reports");
+
+        while context.filter() != Some("") {
+            context.shorten_filter();
+        }
+
+        // Nothing is left to delete but the `/` that opened the prompt.
+        context.shorten_filter();
+        assert_eq!(context.filter(), None);
+        assert_eq!(
+            context.selected_entry().unwrap().name,
+            restored,
+            "closing this way puts the selection back, like Esc"
+        );
+    }
+
+    /// A directory the prompt opened is part of what the prompt did, so abandoning
+    /// closes it and committing keeps it. One the user had already expanded is not,
+    /// and stays open either way.
+    #[tokio::test]
+    async fn only_the_directories_the_prompt_opened_close_when_it_is_abandoned() {
+        let source = nested_source().await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.begin_filter();
+        // Enter spells the selected directory out, which is what lets `/` open it.
+        context.submit_filter();
+        context.descend_filter();
+        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+            apply_next(&mut context, &mut receiver).await;
+        }
+        assert_eq!(context.rows().len(), 5);
+
+        context.abandon_filter();
+        assert_eq!(
+            context.row_names(),
+            ["reports", "january-outside.txt", "outside.txt"]
+        );
+
+        context.begin_filter();
+        // Enter spells the selected directory out, which is what lets `/` open it.
+        context.submit_filter();
+        context.descend_filter();
+        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+            apply_next(&mut context, &mut receiver).await;
+        }
+        context.commit_filter();
+        assert_eq!(
+            context.row_names(),
+            [
+                "reports",
+                "january.txt",
+                "june.txt",
+                "january-outside.txt",
+                "outside.txt"
+            ],
+            "committing keeps what the prompt opened on the way to the row it kept"
+        );
+
+        // Stepping into an already-open directory is not what opened it.
+        context.begin_filter();
+        context.submit_filter();
+        context.descend_filter();
+        assert_eq!(context.filter_scope(), Some("reports"));
+        context.abandon_filter();
+        assert_eq!(context.rows().len(), 5);
     }
 
     /// A match inside a directory is unreadable without the directory, so the

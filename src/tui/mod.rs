@@ -193,7 +193,8 @@ fn apply_key(app: &mut App, key: KeyEvent) -> Flow {
         KeyAction::FilterInput(character) => app.extend_filter(character),
         KeyAction::FilterBackspace => app.shorten_filter(),
         KeyAction::CompleteFilter => app.complete_filter(),
-        KeyAction::CommitFilter => app.commit_filter(),
+        KeyAction::DescendFilter => app.descend_filter(),
+        KeyAction::SubmitFilter => app.submit_filter(),
         KeyAction::AbandonFilter => app.abandon_filter(),
         KeyAction::ConfirmTransferOverwrite => app.confirm_transfer_overwrite(),
         KeyAction::Ignore => {}
@@ -245,7 +246,8 @@ enum KeyAction {
     FilterInput(char),
     FilterBackspace,
     CompleteFilter,
-    CommitFilter,
+    DescendFilter,
+    SubmitFilter,
     AbandonFilter,
     Ignore,
 }
@@ -284,14 +286,27 @@ fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAct
                 _ => KeyAction::Ignore,
             };
         }
-        // The filter prompt takes the letters, so the arrows are what walks the
-        // matches without leaving it.
+        // The filter prompt takes the letters, so moving and scrolling the matches
+        // without leaving it is left to the arrows and to the readline chords a
+        // prompt is expected to answer.
         InputMode::Filter => {
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                return match code {
+                    KeyCode::Char('n') => KeyAction::MoveDown,
+                    KeyCode::Char('p') => KeyAction::MoveUp,
+                    KeyCode::Char('d') => KeyAction::HalfPageDown,
+                    KeyCode::Char('u') => KeyAction::HalfPageUp,
+                    _ => KeyAction::Ignore,
+                };
+            }
             return match code {
-                KeyCode::Enter => KeyAction::CommitFilter,
+                KeyCode::Enter => KeyAction::SubmitFilter,
                 KeyCode::Esc => KeyAction::AbandonFilter,
                 KeyCode::Backspace => KeyAction::FilterBackspace,
                 KeyCode::Tab => KeyAction::CompleteFilter,
+                // A name never contains a separator, so the key that could only
+                // match nothing steps into the selected directory instead.
+                KeyCode::Char('/') => KeyAction::DescendFilter,
                 KeyCode::Down => KeyAction::MoveDown,
                 KeyCode::Up => KeyAction::MoveUp,
                 KeyCode::Char(character) if types_text(modifiers) => {
@@ -574,7 +589,7 @@ mod tests {
             key_action(KeyCode::Char('/'), KeyModifiers::NONE, InputMode::Main),
             KeyAction::OpenFilter
         );
-        for character in ['q', 'x', 'j', 'R', '/'] {
+        for character in ['q', 'x', 'j', 'R'] {
             assert_eq!(
                 key_action(
                     KeyCode::Char(character),
@@ -586,9 +601,10 @@ mod tests {
         }
         for (code, action) in [
             (KeyCode::Tab, KeyAction::CompleteFilter),
+            (KeyCode::Char('/'), KeyAction::DescendFilter),
             (KeyCode::Down, KeyAction::MoveDown),
             (KeyCode::Up, KeyAction::MoveUp),
-            (KeyCode::Enter, KeyAction::CommitFilter),
+            (KeyCode::Enter, KeyAction::SubmitFilter),
             (KeyCode::Esc, KeyAction::AbandonFilter),
             (KeyCode::Backspace, KeyAction::FilterBackspace),
         ] {
@@ -597,10 +613,40 @@ mod tests {
                 action
             );
         }
+    }
+
+    /// A prompt is expected to answer the readline chords, and the list under it
+    /// still has to scroll, so both keep working while the letters are taken.
+    #[test]
+    fn the_filter_prompt_answers_the_readline_and_scroll_chords() {
+        for (character, action) in [
+            ('n', KeyAction::MoveDown),
+            ('p', KeyAction::MoveUp),
+            ('d', KeyAction::HalfPageDown),
+            ('u', KeyAction::HalfPageUp),
+        ] {
+            assert_eq!(
+                key_action(
+                    KeyCode::Char(character),
+                    KeyModifiers::CONTROL,
+                    InputMode::Filter
+                ),
+                action
+            );
+            assert_eq!(
+                key_action(
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE,
+                    InputMode::Filter
+                ),
+                KeyAction::FilterInput(character),
+                "unmodified, the same key is typed into the query"
+            );
+        }
         assert_eq!(
-            key_action(KeyCode::Char('d'), KeyModifiers::CONTROL, InputMode::Filter),
+            key_action(KeyCode::Char('x'), KeyModifiers::CONTROL, InputMode::Filter),
             KeyAction::Ignore,
-            "a modified key is a shortcut, not typed text"
+            "a chord the prompt has no use for is not typed text"
         );
     }
 

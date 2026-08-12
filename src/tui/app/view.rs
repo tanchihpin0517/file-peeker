@@ -88,31 +88,47 @@ impl App {
         let Some(query) = context.filter() else {
             return;
         };
+        // Each `/` that stepped into a directory shows as the path segment it
+        // committed, so the prompt reads as the place the query is being applied.
+        let entered = context
+            .filter_scope()
+            .map_or_else(|| "/".to_owned(), |scope| format!("/{scope}/"));
+        // What the last `/` refused to do outranks the count, since it is the answer
+        // to the key just pressed.
         let matches = context.filter_matches();
-        let summary = match matches {
-            None => String::new(),
-            Some(0) => "  no matches".to_owned(),
-            Some(1) => "  1 match".to_owned(),
-            Some(count) => format!("  {count} matches"),
+        let warning = context.filter_warning();
+        let summary = match (warning, matches) {
+            (Some(warning), _) => format!("  {warning}"),
+            (None, None) => String::new(),
+            (None, Some(0)) => "  no matches".to_owned(),
+            (None, Some(1)) => "  1 match".to_owned(),
+            (None, Some(count)) => format!("  {count} matches"),
+        };
+        let summary_style = if warning.is_some() || matches == Some(0) {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::DarkGray)
         };
         let query_style = if matches == Some(0) {
             Style::default().fg(Color::Red)
         } else {
             input_style()
         };
+        let cursor = entered.chars().count() + query.chars().count();
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(format!("/{query}"), query_style),
-                Span::styled(summary, Style::default().fg(Color::DarkGray)),
+                Span::styled(entered, Style::default().fg(Color::DarkGray)),
+                Span::styled(query.to_owned(), query_style),
+                Span::styled(summary, summary_style),
             ])),
             area,
         );
         // A real cursor is the cue that keys are going into the prompt rather than
         // the list.
-        if let Ok(typed) = u16::try_from(query.chars().count() + 1)
-            && typed < area.width
+        if let Ok(cursor) = u16::try_from(cursor)
+            && cursor < area.width
         {
-            frame.set_cursor_position((area.x + typed, area.y));
+            frame.set_cursor_position((area.x + cursor, area.y));
         }
     }
 
@@ -181,7 +197,9 @@ impl App {
             super::InputMode::Main => {
                 "/: filter  y: copy  p: paste  [: previous  ]: next  n: new browser  x: close  S: connections  q/Esc: quit"
             }
-            super::InputMode::Filter => "Tab: complete  ↑/↓: select  Enter: keep  Esc: cancel",
+            super::InputMode::Filter => {
+                "Tab: complete  /: open directory  ↑/↓ or Ctrl-N/P: select  Ctrl-D/U: scroll  Enter: fill in, then keep  Esc: cancel"
+            }
             super::InputMode::ConnectionManager => {
                 "j/k: select  Enter: activate  n: new browser  a: add  d: close  q/Esc: dismiss"
             }
@@ -618,6 +636,10 @@ mod tests {
             open[first].contains("beta.txt"),
             "the match sits on the first row of the pane, under the query"
         );
+
+        // A `/` that refused to open anything answers on the same line.
+        app.descend_filter();
+        assert!(rendered(&mut app, 60, 16).contains("no exact match to open"));
 
         app.extend_filter('z');
         assert!(rendered(&mut app, 60, 16).contains("no matches"));

@@ -119,18 +119,65 @@ each match so a hit inside a directory still reads as being inside it. The
 selection follows the nearest match rather than a carried-along ancestor. `Tab`
 extends the query to the longest prefix every match agrees on, the way a shell
 completes a partial word, which can never narrow what is on screen because every
-match starts with the prefix it completes to. `Enter` closes the prompt keeping
-the row the filter led to; `Esc` closes it and puts the selection back where it
-started. The prompt takes the letters, so the arrows are what walk the matches
-without leaving it.
+match starts with the prefix it completes to. `Esc` closes the prompt and puts the
+selection back where it started.
+
+`Enter` takes two presses, because the first has something to say: a query that
+only narrowed to a row is not yet that row, so the first press spells the selected
+match out in the prompt and the second, now that the prompt names it outright,
+closes the prompt on it. A row the query did not match -- the directory a `/`
+stepped into, or an ancestor the arrows walked onto -- has nothing to spell out and
+is taken by the first press.
+
+Moving the selection spells out the row it lands on the same way, so walking the
+candidates reads as choosing between them. What narrows the rows is still only what
+was typed: the candidate is spelled out *over* the query rather than into it, which
+is what keeps the set being walked from collapsing to the one candidate showing.
+Editing adopts what is on screen, so a backspace after walking onto `june.txt`
+leaves `june.tx` rather than the query that found it. `Tab` and `Enter` therefore
+complete to different things on purpose: `Tab` to what every match agrees on,
+`Enter` to the one match selected.
 
 Matching is a substring rather than a fuzzy subsequence so that completion has
 something to complete to: a subsequence match shares no prefix with what was
 typed, leaving `Tab` nothing to agree on.
 
-The query belongs to the Browser Context whose rows it narrows, not to the
-overlay stack, so `InputMode::Filter` is derived from the active Context rather
-than stored beside it. Filtering never removes rows: expansion, streaming
+A second `/` steps into the selected directory: it is expanded inline if it was
+closed, the query is spent getting there, and matching is confined to what lies
+under it, so an empty query then reads as everything inside. The root never moves
+-- this opens a directory rather than navigating to one, leaving the tab, its
+path, and everything outside where they were -- and the prompt shows the segments
+committed so far, so `/src/tui/` reads as the place the next query applies. A name
+can never contain a separator, so the key is spent on this rather than on a query
+that could only ever match nothing.
+
+Only a directory the prompt names outright is opened. A query that has merely
+narrowed onto one is narrowing onto its neighbours just as much, so guessing at it
+would open the wrong directory as readily as the right one; `Tab`, `Enter`, or
+`Ctrl-N`/`Ctrl-P` are what name it first. A `/` that opens nothing says why on the
+prompt line -- `no exact match to open`, or `not a directory` for a name that is
+neither -- until the next keystroke clears it, so the key never fails silently.
+
+Backspace walks the prompt back one keystroke at a time, including over each `/`:
+across a query it deletes characters, across the `/` that entered a directory it
+steps back out, closing the directory again and restoring the query that entered
+it, and across the `/` that opened the prompt it closes the prompt as `Esc` would.
+A directory the prompt opened is part of what the prompt did, so abandoning closes
+it while committing keeps it; one that was already expanded is not, and stays open
+either way.
+
+The prompt takes the letters, so walking and scrolling the matches without leaving
+it belongs to the arrows and to the chords a prompt is expected to answer:
+`Ctrl-N`/`Ctrl-P` move the selection and `Ctrl-D`/`Ctrl-U` scroll it by half a
+page.
+
+The query, the candidate spelled out over it, the directories a `/` has stepped
+into, and the row to restore all
+belong to the Browser Context whose rows they narrow, not to the overlay stack, so
+`InputMode::Filter` is derived from the active Context rather than stored beside
+it. The restore point is a path rather than an index, because rows inserted while
+the prompt is open -- by a streaming listing, or by the expansion a `/` starts --
+would drift an index out from under it. Filtering never removes rows: expansion, streaming
 insertion, and collapse all address rows by index, so a filter that dropped them
 would move every index out from under an in-flight listing. It is a window
 instead, and the only state it moves is the selection and the scroll offset,

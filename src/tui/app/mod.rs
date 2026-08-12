@@ -1042,9 +1042,15 @@ impl App {
         }
     }
 
-    pub(crate) fn commit_filter(&mut self) {
+    pub(crate) fn descend_filter(&mut self) {
         if let Some(context) = self.active_context_mut() {
-            context.commit_filter();
+            context.descend_filter();
+        }
+    }
+
+    pub(crate) fn submit_filter(&mut self) {
+        if let Some(context) = self.active_context_mut() {
+            context.submit_filter();
         }
     }
 
@@ -1216,7 +1222,15 @@ mod tests {
             Some("beta.txt".to_owned())
         );
 
-        app.commit_filter();
+        // The first Enter spells out what was narrowed to; the second takes it.
+        app.submit_filter();
+        assert_eq!(
+            app.active_context().and_then(BrowserContext::filter),
+            Some("beta.txt")
+        );
+        assert_eq!(app.input_mode(), InputMode::Filter);
+
+        app.submit_filter();
         assert_eq!(app.input_mode(), InputMode::Main);
 
         app.shutdown().await.unwrap();
