@@ -48,11 +48,11 @@ pub(crate) struct ConnectionInfo {
     pub token: String,
 }
 
-/// Where a Session's server should run. The request that produces a
+/// Where a connection's server should run. The request that produces a
 /// [`RunningServer`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ServerLocation {
-    /// Inside this process, for a local Session.
+    /// Inside this process, for a local connection.
     Embedded,
     /// On a remote host, launched over SSH.
     Ssh {
@@ -187,8 +187,8 @@ impl ServerConnection {
     /// Returns a handle to the open channel. Cheap: a `Channel` is refcounted.
     ///
     /// Infallible because `shutdown` consumes the connection, so a caller
-    /// cannot hold one that has been stopped. A closed *Session* is rejected
-    /// one layer up, where the connection slot is emptied.
+    /// cannot hold one that has been stopped. A *closed* connection is rejected
+    /// one layer up, where the Client empties its slot.
     pub(crate) fn channel(&self) -> Channel {
         self.channel.clone()
     }
@@ -200,7 +200,7 @@ impl ServerConnection {
     /// Gracefully shuts down this managed server.
     ///
     /// Named `shutdown` rather than `close` to keep the server's lifecycle
-    /// distinct from `Session::close`, which is what calls it.
+    /// distinct from `Client::close`, which is what calls it.
     ///
     /// # Errors
     ///
@@ -210,7 +210,7 @@ impl ServerConnection {
         let server = self
             .server
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session is closed"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "connection is closed"))?;
         match server {
             RunningServer::Embedded(handle) => embedded::shutdown(handle).await,
             RunningServer::Ssh(server) => ssh::shutdown(server).await,

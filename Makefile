@@ -15,7 +15,7 @@ lint:
 # Targets whose `required-features` are unmet are silently skipped unless named
 # explicitly, so the slim build the remote installer uses needs its own check.
 # It is also what keeps `client` out of a server-only build now that `client`
-# pulls the server in: nothing here may reference `session` or `client`.
+# pulls the server in: nothing here may reference `client`.
 slim-server:
 	cargo check --no-default-features --features server --bin file-peeker-server
 

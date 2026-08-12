@@ -28,7 +28,7 @@ pub(crate) enum ServerError {
 ///
 /// The server runs on its own task, so the same code serves the standalone
 /// `file-peeker-server` process and a client that embeds its own server for a
-/// local Session. Both learn where to connect the same way: an ephemeral
+/// local connection. Both learn where to connect the same way: an ephemeral
 /// loopback port plus a bearer token.
 #[derive(Debug)]
 pub(crate) struct ServerHandle {

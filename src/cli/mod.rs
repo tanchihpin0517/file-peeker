@@ -1,5 +1,5 @@
 //! The `file-peeker-client` binary: a test-only CLI for exercising
-//! [`Client`](crate::Client) and [`Session`](crate::Session) workflows.
+//! [`Client`](crate::Client) workflows.
 
 mod command;
 pub(crate) mod connect;

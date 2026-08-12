@@ -2,7 +2,7 @@
 //!
 //! [`serve::start`] is the reusable core: it binds a loopback listener and
 //! serves on a task, which is how the client embeds its own server for a local
-//! Session. The `file-peeker-server` binary wraps that same core in a command
+//! connection. The `file-peeker-server` binary wraps that same core in a command
 //! line and a stdin lifetime lease.
 
 mod ops;

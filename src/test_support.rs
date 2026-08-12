@@ -1,10 +1,10 @@
-//! Fixtures for exercising `Session` workflows without touching a real
+//! Fixtures for exercising `Client` workflows without touching a real
 //! filesystem or a remote host.
 //!
 //! [`ScriptedServer`] is a real File Peeker server whose filesystem adapter has
 //! been swapped for a queue of canned responses. Everything below the response
 //! is genuine — the loopback listener, the bearer token, the health check, the
-//! channel, and every conversion in `session::rpc` — so a test built on
+//! channel, and every conversion in `client::rpc` — so a test built on
 //! it exercises the whole client stack and not just the layer above it.
 //!
 //! Compiled under `cfg(test)` only, so these fixtures cannot reach a release
@@ -21,12 +21,12 @@ use tonic::{Request, Response, Status};
 
 use crate::{
     DirectoryEntry, EntryKind,
+    client::connection::ServerConnection,
     protocol::v1::{
         EntryKind as ProtocolEntryKind, ListBatch, ListRequest, ListingEntry, ReadChunk,
         ReadRequest, ResolvePathRequest, ResolvePathResponse, WalkBatch, WalkRequest, WriteFrame,
         WriteResponse, file_peeker_server::FilePeeker,
     },
-    session::connection::ServerConnection,
 };
 
 /// One scripted response to a List request.

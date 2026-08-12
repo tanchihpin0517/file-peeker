@@ -1,10 +1,10 @@
 # File Peeker gRPC API v1
 
 The File Peeker remote client/server boundary uses protobuf over plaintext
-HTTP/2 on the server host's IPv4 loopback. Remote Sessions reach that endpoint
-through an OpenSSH SOCKS5 tunnel, so the remote hop is SSH-encrypted. Local
-Sessions speak the same protocol to a server embedded in the client process,
-reaching its loopback port directly instead of through a tunnel. The
+HTTP/2 on the server host's IPv4 loopback. Remote connections reach that
+endpoint through an OpenSSH SOCKS5 tunnel, so the remote hop is SSH-encrypted.
+Local connections speak the same protocol to a server embedded in the client
+process, reaching its loopback port directly instead of through a tunnel. The
 protobuf package is `file_peeker.v1`. The `.proto` source sits at `proto/` in the
 repository root and `build.rs` generates both halves into `crate::protocol`,
 which the client adapters and the server ops share directly.
@@ -25,19 +25,19 @@ is never placed in arguments, environment, files, diagnostics, or errors.
 Every gRPC request, including health checks, carries a sensitive metadata value:
 
 ```text
-authorization: Bearer <session token>
+authorization: Bearer <connection token>
 ```
 
 Missing or invalid credentials return generic `Unauthenticated`. The server
 binds only loopback and does not use TLS; SSH supplies encryption for remote
-sessions.
+connections.
 
 ## Services
 
 The standard `grpc.health.v1.Health` service verifies startup readiness. The
-client opens one authenticated channel per remote Session. Reconnection,
+client opens one authenticated channel per remote connection. Reconnection,
 interrupted-operation and replay behavior are owned by
-[Session Lifecycle](session-lifecycle.md).
+[Connection Lifecycle](connection-lifecycle.md).
 
 `file_peeker.v1.FilePeeker` exposes:
 

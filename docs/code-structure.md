@@ -21,16 +21,15 @@ failure policy and resource lifetime.
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| `crate::fs` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Session selection, SSH, gRPC, UI behavior |
+| `crate::fs` | Host-local filesystem behavior, transport-neutral types, streaming and cancellation semantics | Connection selection, SSH, gRPC, UI behavior |
 | `crate::protocol` | The generated wire contract and its transport limits, shared by both sides of the gRPC hop | Any filesystem or workflow behavior |
-| `session/rpc` | One request/response adapter per Session operation | Multi-step user workflows or operating-system UI actions |
-| `Session` | Target-independent workflow entry points, backend lock/lifecycle, and cross-Session phase ordering | Transport details, server lifecycle, or protobuf |
-| `session/connection` | Where a Session's server runs, how a stream reaches it, and its startup/shutdown | Filesystem operations or workflow policy |
-| `session/rpc` modules | One gRPC request/response adapter per Session operation | Public workflow policy |
+| `Client` | Target-independent workflow entry points, the connection registry and its per-connection locks, and cross-connection phase ordering | Transport details, server lifecycle, or protobuf |
+| `client/connection` | Where a connection's server runs, how a stream reaches it, and its startup/shutdown | Filesystem operations or workflow policy |
+| `client/rpc` modules | One gRPC request/response adapter per Client operation | Public workflow policy |
 | `crate::server` | Listener and serving lifecycle, plus RPC validation, protobuf conversion, transport batching and delegation to `fs` | Client workflows and UI state |
 | `crate::tui` | Application state, input routing, rendering and task ownership | Filesystem and transport semantics |
-| `crate::cli` | A test-only command surface that drives `Client` and `Session` workflows one at a time, and remote server provisioning over SSH | Behavior of its own; it composes existing workflows and prints results |
-| `test_support` | Scripted Session fixtures | Production behavior; it is compiled under `cfg(test)` only |
+| `crate::cli` | A test-only command surface that drives `Client` workflows one at a time, and remote server provisioning over SSH | Behavior of its own; it composes existing workflows and prints results |
+| `test_support` | Scripted server fixtures | Production behavior; it is compiled under `cfg(test)` only |
 
 The main boundary is:
 
@@ -38,7 +37,7 @@ The main boundary is:
 UI
    |
    v
-Session workflow
+Client workflow
    |
    v
 rpc adapter per operation
@@ -53,10 +52,10 @@ There is one backend. `ServerConnection` is where the two targets diverge, and
 they diverge in exactly two values: which process was started, and which
 connector reaches its loopback port.
 
-`Session` and the `rpc` modules remain separate. An `rpc` function answers
-“what does one request against the selected host look like?”, while a Session
+`Client` and the `rpc` modules remain separate. An `rpc` function answers
+“what does one request against the selected host look like?”, while a Client
 operation answers “what workflow does the caller want?”. Simple workflows may
-delegate once; more involved workflows, such as a cross-Session copy, compose
+delegate once; more involved workflows, such as a cross-connection copy, compose
 several requests and order the locks between them.
 
 ### One package, three binaries
@@ -74,7 +73,7 @@ src/
 ├── lib.rs                  module declarations and the crate-internal facade
 ├── fs/                     host-local filesystem behavior
 ├── protocol.rs             wire contract, including the generated `v1` module
-├── client.rs  session/     the Client and Session layer
+├── client/                 the Client layer: connections, operations, transport
 ├── test_support.rs         cfg(test) fixtures
 ├── server/                 the file-peeker-server binary's logic
 ├── cli/                    the file-peeker-client binary's logic
@@ -94,13 +93,13 @@ the rule is now written down and only partly enforced. A module may name:
 | --- | --- |
 | `fs` | nothing else in the crate |
 | `protocol` | nothing else in the crate |
-| `session`, `client` | `fs`, `protocol`, `server` |
-| `server` | `fs`, `protocol` — never `session` or `client` |
-| `tui`, `cli` | the crate-root facade (`Client`, `Session`, the entry types) |
+| `client` | `fs`, `protocol`, `server` |
+| `server` | `fs`, `protocol` — never `client` |
+| `tui`, `cli` | the crate-root facade (`Client`, the entry types) |
 
-`session` naming `server` is the point: a local Session embeds one. The reverse
-stays forbidden and stays enforced. `session`, `client`, and the facade are gated
-on the `client` feature; `server-core` — which carries the gRPC service and its
+`client` naming `server` is the point: a local connection embeds one. The
+reverse stays forbidden and stays enforced. `client` and the facade are gated on
+the `client` feature; `server-core` — which carries the gRPC service and its
 listener — is enabled by both `client` and `server`, but `server` does not enable
 `client`, so a `--features server` build still cannot compile a reference to
 them. `make slim-server` is what actually runs that build, because a target
@@ -145,12 +144,12 @@ The asymmetry is intentional. A `file/` directory should not be created merely
 to wrap the single `read.rs` operation. It becomes useful when several
 file-oriented operations need shared types or policy.
 
-### Client and Session
+### Client
 
 Status: implemented.
 
 ```text
-src/session/
+src/client/
 ├── mod.rs
 ├── path.rs
 ├── directory/
@@ -176,15 +175,15 @@ src/session/
     └── walk_dir.rs
 ```
 
-`src/client.rs` and `src/test_support.rs` sit beside this tree at the crate root.
+`src/test_support.rs` sits beside this tree at the crate root.
 
-- `session/mod.rs` owns Session construction, lifecycle and the guarded
-  connection accessor.
-- `path.rs` contains Rust-native Session path workflows.
+- `client/mod.rs` owns the connection registry, `ConnectionId`, connection
+  lifecycle and the guarded connection accessor.
+- `path.rs` contains Rust-native Client path workflows.
 - `directory/` contains transport-neutral directory result types and native
-  Session directory workflows.
-- `file/copy.rs` owns the destination-oriented Session-to-Session streamed copy
-  workflow.
+  Client directory workflows.
+- `file/copy.rs` owns the destination-oriented connection-to-connection streamed
+  copy workflow.
 - `rpc/` is the calling side of the protocol: one module per operation, each
   building a request and validating the response, plus the stream and write
   types they share. `rpc/write_file.rs` owns client-streaming request framing.
@@ -194,14 +193,14 @@ src/session/
   `ServerConnection`, channel construction, the bearer token, the health check —
   while `embedded.rs` and `ssh.rs` hold only what differs: how the server is
   started, how a stream reaches it, and how it is stopped.
-- `test_support.rs` provides the scripted `Session` fixtures every test module
+- `test_support.rs` provides the scripted server fixtures every test module
   shares. A `#[cfg(test)] mod tests` in one file cannot see helpers declared in
   another, so the fixtures need a module of their own; `cfg(test)` then keeps them
   structurally unreachable from any release build.
 
-`read_file` remains a private backend primitive rather than a caller-facing
-native read operation. The Session copy workflow consumes it directly, streaming
-the source Session's bytes into the destination Session's write.
+`read_file` remains a private primitive rather than a caller-facing native read
+operation. The copy workflow consumes it directly, streaming the source
+connection's bytes into the destination connection's write.
 
 ### Server
 
@@ -240,10 +239,17 @@ src/server/
 There is no server backend trait. The server has one real filesystem
 implementation, `FsService`; adding an interface there now would create a seam
 without variation. The same rule now applies on the client side, which is why
-The client no longer has one either. A backend trait would need real
+the client no longer has one either. A backend trait would need real
 implementations to vary, and the variation that once justified two of them moved
 into `ServerConnection`, where it is two enum variants rather than two
 adapters.
+
+There is no `Session` type for the same reason. Once the backend trait was gone,
+a Session was a UUID plus one connection slot — a wrapper with nothing of its
+own to own, existing only so the registry had something to store. Its lifecycle
+and its operations belong to `Client`, and callers name a connection with a
+`ConnectionId` rather than holding a handle. A type earns its place by owning an
+invariant; that one owned none.
 
 ### TUI
 
@@ -255,16 +261,18 @@ src/tui/
 ├── browser_context.rs
 └── app/
     ├── mod.rs
-    ├── session.rs
+    ├── connection.rs
     └── view.rs
 ```
 
 - `mod.rs` retains command-line parsing, terminal setup/restore, the event loop,
   direct key-to-command mapping, and `run`.
-- `app/mod.rs` owns `App`, ordered Session and tab records, lifecycle event/task
-  routing, explicit UI modes, and application commands.
-- `app/session.rs` narrowly owns TUI Session identity, derived labels, target
-  presentation, and Starting/Ready/Failed/Closing state.
+- `app/mod.rs` owns `App`, ordered connection and tab records, lifecycle
+  event/task routing, explicit UI modes, and application commands.
+- `app/connection.rs` narrowly owns TUI connection-row identity, derived labels,
+  target presentation, and Starting/Ready/Failed/Closing state. Its
+  `ConnectionRecordId` stays distinct from the Client's `ConnectionId`: a row
+  exists in `Starting` before a connection does, and outlives a failed open.
 - `app/view.rs` renders application state without owning async tasks or mutating
   browser state.
 - `browser_context.rs` is the deep browsing module: selected listing source,
@@ -294,8 +302,8 @@ src/cli/
 ```
 
 - `command.rs` owns the clap tree, tracing setup, and `run`.
-- One module per subcommand, each driving a single `Client` or `Session`
-  workflow and printing what it observed. These modules add no behavior of their
+- One module per subcommand, each driving a single `Client` workflow and
+  printing what it observed. These modules add no behavior of their
   own; see [Client CLI](client-cli.md).
 - `install.rs` and its bundled shell script own remote provisioning from an
   uploaded source tree. The script is `include_str!`'d, so it has to sit beside
@@ -308,7 +316,7 @@ src/cli/
 
 | Feature | Adds | Gated dependencies |
 | --- | --- | --- |
-| `client` | `client.rs`, `session/`, and the crate-root facade | async-trait, dirs, hyper-util, serde, tower, tracing, uuid |
+| `client` | `client/` and the crate-root facade | async-trait, dirs, hyper-util, serde, tower, tracing, uuid |
 | `cli` | `crate::cli` and the `file-peeker-client` binary; implies `client` | tracing-subscriber |
 | `tui` | `crate::tui` and the `file-peeker` binary; implies `client` | crossterm, ratatui |
 | `server` | `crate::server` and the `file-peeker-server` binary | none |
@@ -338,16 +346,16 @@ instead of vanishing.
 Before adding a file, identify the operation's semantic owner:
 
 1. Put host-local filesystem mechanics in `crate::fs`.
-2. Put one request against the selected host in `session/rpc`.
-3. Put protobuf conversion and wire batching in `session/rpc/` and server
+2. Put one request against the selected host in `client/rpc`.
+3. Put protobuf conversion and wire batching in `client/rpc/` and server
    `ops`. There is no second adapter to write: both targets use this one.
-4. Put public multi-step ordering and lifecycle coordination in `Session`.
-5. Touch `session/connection/` only for server lifecycle or transport, and put
+4. Put public multi-step ordering and lifecycle coordination in `Client`.
+5. Touch `client/connection/` only for server lifecycle or transport, and put
    anything both targets share in `connection/mod.rs` rather than in
    `embedded.rs` and `ssh.rs` twice.
 6. Add a UI adapter only when that boundary has a real consumer.
 
-A public Session workflow does not require an identically named core, backend
+A public Client workflow does not require an identically named core, backend
 and RPC operation. Layers should mirror semantics only where the semantics
 are actually shared.
 
@@ -405,7 +413,7 @@ are actually shared.
 4. Add an `rpc` module only for a new request against the selected host.
 5. Add the protocol, server, and backend-adapter work that primitive needs. It
    is one path, so a capability that works for one target works for both.
-6. Add Session composition for caller workflows.
+6. Add Client composition for caller workflows.
 7. Add UI adapters only for real consumers.
 8. Keep tests beside the layer-specific invariant they verify.
 9. Update this document when the new feature changes a responsibility boundary.
@@ -427,7 +435,7 @@ src/fs/directory/
 ├── list.rs
 └── walk.rs
 
-src/session/
+src/client/
 ├── directory/
 │   ├── mod.rs
 │   ├── list.rs

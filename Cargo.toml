@@ -22,9 +22,9 @@ default = ["cli", "server", "tui"]
 cli = ["client", "dep:tracing-subscriber"]
 server = ["server-core"]
 tui = ["client", "dep:crossterm", "dep:ratatui"]
-# Internal: the Client/Session layer the two front ends share. Enable it through
-# `cli` or `tui` rather than directly. It pulls in `server-core` because a local
-# Session runs its own server in-process.
+# Internal: the Client layer the two front ends share. Enable it through `cli`
+# or `tui` rather than directly. It pulls in `server-core` because a local
+# connection runs its own server in-process.
 client = [
     "server-core",
     "dep:async-trait",

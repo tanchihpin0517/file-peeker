@@ -1,8 +1,8 @@
-//! A File Peeker server running inside this process, for a local Session.
+//! A File Peeker server running inside this process, for a local connection.
 //!
 //! The client reaches it exactly the way it reaches a remote one — an
-//! authenticated gRPC channel to a loopback port — so a local Session differs
-//! from a remote Session only in where the server runs and how the connector
+//! authenticated gRPC channel to a loopback port — so a local connection differs
+//! from a remote one only in where the server runs and how the connector
 //! gets to it.
 
 use std::io;

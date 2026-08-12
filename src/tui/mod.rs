@@ -1,5 +1,5 @@
 //! The `file-peeker` binary: a Ratatui frontend over
-//! [`Client`](crate::Client) and [`Session`](crate::Session).
+//! [`Client`](crate::Client) and its connections.
 
 use std::{error::Error, io, time::Duration};
 
@@ -29,7 +29,7 @@ struct Cli {
 ///
 /// # Errors
 ///
-/// Returns an error if the initial Session fails to start, the terminal cannot
+/// Returns an error if the initial connection fails to open, the terminal cannot
 /// be initialized, or the event loop or shutdown fails.
 ///
 /// # Panics
@@ -79,16 +79,16 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 KeyAction::NextContext => app.switch_context(true),
                 KeyAction::NewBrowser => app.open_new_browser_for_active(),
                 KeyAction::CloseContext => app.close_active_context(),
-                KeyAction::OpenSessions => app.open_session_manager(),
+                KeyAction::OpenConnections => app.open_connection_manager(),
                 KeyAction::DismissOverlay => app.dismiss_overlay(),
-                KeyAction::MoveSessionDown => app.move_session_selection(true),
-                KeyAction::MoveSessionUp => app.move_session_selection(false),
-                KeyAction::ActivateSession => app.activate_selected_session(),
-                KeyAction::NewBrowserForSession => {
-                    app.open_new_browser_for_selected_session();
+                KeyAction::MoveConnectionDown => app.move_connection_selection(true),
+                KeyAction::MoveConnectionUp => app.move_connection_selection(false),
+                KeyAction::ActivateConnection => app.activate_selected_connection(),
+                KeyAction::NewBrowserForConnection => {
+                    app.open_new_browser_for_selected_connection();
                 }
-                KeyAction::AddSession => app.open_add_session(),
-                KeyAction::DeleteSession => app.delete_selected_session(),
+                KeyAction::AddConnection => app.open_add_connection(),
+                KeyAction::DeleteConnection => app.delete_selected_connection(),
                 KeyAction::MoveTargetDown => app.move_target_selection(true),
                 KeyAction::MoveTargetUp => app.move_target_selection(false),
                 KeyAction::SubmitTarget => app.submit_target_choice(),
@@ -96,7 +96,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 KeyAction::Backspace => app.input_backspace(),
                 KeyAction::Input(character) => app.input_character(character),
                 KeyAction::CancelDialog => app.cancel_dialog(),
-                KeyAction::ConfirmSessionClose => app.confirm_session_close(),
+                KeyAction::ConfirmConnectionClose => app.confirm_connection_close(),
                 KeyAction::Yank => app.yank_active_selection(),
                 KeyAction::Paste => app.paste_into_active_context(),
                 KeyAction::ConfirmTransferOverwrite => app.confirm_transfer_overwrite(),
@@ -121,14 +121,14 @@ enum KeyAction {
     NextContext,
     NewBrowser,
     CloseContext,
-    OpenSessions,
+    OpenConnections,
     DismissOverlay,
-    MoveSessionDown,
-    MoveSessionUp,
-    ActivateSession,
-    NewBrowserForSession,
-    AddSession,
-    DeleteSession,
+    MoveConnectionDown,
+    MoveConnectionUp,
+    ActivateConnection,
+    NewBrowserForConnection,
+    AddConnection,
+    DeleteConnection,
     MoveTargetDown,
     MoveTargetUp,
     SubmitTarget,
@@ -136,7 +136,7 @@ enum KeyAction {
     Backspace,
     Input(char),
     CancelDialog,
-    ConfirmSessionClose,
+    ConfirmConnectionClose,
     Yank,
     Paste,
     ConfirmTransferOverwrite,
@@ -145,9 +145,9 @@ enum KeyAction {
 
 fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAction {
     match mode {
-        InputMode::SessionCloseConfirmation => {
+        InputMode::ConnectionCloseConfirmation => {
             return match code {
-                KeyCode::Enter | KeyCode::Char('y') => KeyAction::ConfirmSessionClose,
+                KeyCode::Enter | KeyCode::Char('y') => KeyAction::ConfirmConnectionClose,
                 KeyCode::Char('q') | KeyCode::Esc => KeyAction::CancelDialog,
                 _ => KeyAction::Ignore,
             };
@@ -187,15 +187,15 @@ fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAct
                 _ => KeyAction::Ignore,
             };
         }
-        InputMode::SessionManager => {
+        InputMode::ConnectionManager => {
             return match code {
                 KeyCode::Char('q' | 'S') | KeyCode::Esc => KeyAction::DismissOverlay,
-                KeyCode::Down | KeyCode::Char('j') => KeyAction::MoveSessionDown,
-                KeyCode::Up | KeyCode::Char('k') => KeyAction::MoveSessionUp,
-                KeyCode::Enter => KeyAction::ActivateSession,
-                KeyCode::Char('n') => KeyAction::NewBrowserForSession,
-                KeyCode::Char('a') => KeyAction::AddSession,
-                KeyCode::Char('d') => KeyAction::DeleteSession,
+                KeyCode::Down | KeyCode::Char('j') => KeyAction::MoveConnectionDown,
+                KeyCode::Up | KeyCode::Char('k') => KeyAction::MoveConnectionUp,
+                KeyCode::Enter => KeyAction::ActivateConnection,
+                KeyCode::Char('n') => KeyAction::NewBrowserForConnection,
+                KeyCode::Char('a') => KeyAction::AddConnection,
+                KeyCode::Char('d') => KeyAction::DeleteConnection,
                 _ => KeyAction::Ignore,
             };
         }
@@ -220,7 +220,7 @@ fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAct
         KeyCode::Char(']') => KeyAction::NextContext,
         KeyCode::Char('n') => KeyAction::NewBrowser,
         KeyCode::Char('x') => KeyAction::CloseContext,
-        KeyCode::Char('S') => KeyAction::OpenSessions,
+        KeyCode::Char('S') => KeyAction::OpenConnections,
         KeyCode::Char('y') => KeyAction::Yank,
         KeyCode::Char('p') => KeyAction::Paste,
         _ => KeyAction::Ignore,
@@ -262,7 +262,7 @@ mod tests {
             key_action(
                 KeyCode::Esc,
                 KeyModifiers::NONE,
-                InputMode::SessionCloseConfirmation
+                InputMode::ConnectionCloseConfirmation
             ),
             KeyAction::CancelDialog
         );
@@ -270,7 +270,7 @@ mod tests {
             key_action(
                 KeyCode::Char('q'),
                 KeyModifiers::NONE,
-                InputMode::SessionCloseConfirmation
+                InputMode::ConnectionCloseConfirmation
             ),
             KeyAction::CancelDialog
         );
@@ -278,15 +278,15 @@ mod tests {
             key_action(
                 KeyCode::Char('y'),
                 KeyModifiers::NONE,
-                InputMode::SessionCloseConfirmation
+                InputMode::ConnectionCloseConfirmation
             ),
-            KeyAction::ConfirmSessionClose
+            KeyAction::ConfirmConnectionClose
         );
         assert_eq!(
             key_action(
                 KeyCode::Char('j'),
                 KeyModifiers::NONE,
-                InputMode::SessionCloseConfirmation
+                InputMode::ConnectionCloseConfirmation
             ),
             KeyAction::Ignore
         );
@@ -294,7 +294,7 @@ mod tests {
             key_action(
                 KeyCode::Char('d'),
                 KeyModifiers::CONTROL,
-                InputMode::SessionCloseConfirmation
+                InputMode::ConnectionCloseConfirmation
             ),
             KeyAction::Ignore
         );
@@ -374,7 +374,7 @@ mod tests {
             key_action(
                 KeyCode::Char('q'),
                 KeyModifiers::NONE,
-                InputMode::SessionManager
+                InputMode::ConnectionManager
             ),
             KeyAction::DismissOverlay
         );
@@ -382,7 +382,7 @@ mod tests {
             key_action(
                 KeyCode::Char('x'),
                 KeyModifiers::NONE,
-                InputMode::SessionManager
+                InputMode::ConnectionManager
             ),
             KeyAction::Ignore
         );
@@ -398,7 +398,7 @@ mod tests {
             key_action(
                 KeyCode::Char('q'),
                 KeyModifiers::NONE,
-                InputMode::SessionCloseConfirmation
+                InputMode::ConnectionCloseConfirmation
             ),
             KeyAction::CancelDialog
         );

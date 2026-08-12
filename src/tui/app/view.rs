@@ -7,7 +7,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use super::{App, BrowserTab, NewBrowserDialog, Overlay, SessionRecordId, session::SessionStatus};
+use super::{
+    App, BrowserTab, ConnectionRecordId, NewBrowserDialog, Overlay, connection::ConnectionStatus,
+};
 use crate::tui::browser_context::{BrowserRow, ExpansionStatus, ListingStatus};
 
 impl App {
@@ -22,7 +24,7 @@ impl App {
 
         let header_text = self.active_context_id.and_then(|id| {
             let tab = self.contexts.get(&id)?;
-            let label = &self.sessions.get(&tab.session_id)?.label;
+            let label = &self.connections.get(&tab.connection_id)?.label;
             Some(format!("{label}  {}", tab.context.root_path()))
         });
         frame.render_widget(
@@ -49,7 +51,7 @@ impl App {
             context.set_viewport(viewport_offset, viewport_height);
         } else {
             frame.render_widget(
-                Paragraph::new("No browser contexts\n\nS: sessions  q/Esc: quit")
+                Paragraph::new("No browser contexts\n\nS: connections  q/Esc: quit")
                     .alignment(Alignment::Center)
                     .block(Block::default().title(" Files ").borders(Borders::ALL)),
                 body,
@@ -69,8 +71,8 @@ impl App {
             .iter()
             .filter_map(|id| {
                 let tab = self.contexts.get(id)?;
-                let session = self.sessions.get(&tab.session_id)?;
-                Some((*id, tab_label(&session.label, tab)))
+                let connection = self.connections.get(&tab.connection_id)?;
+                Some((*id, tab_label(&connection.label, tab)))
             })
             .collect();
         if labels.is_empty() {
@@ -120,19 +122,21 @@ impl App {
     fn footer_text(&self) -> String {
         let controls = match self.input_mode() {
             super::InputMode::Main if self.active_context_id.is_none() => {
-                "S: sessions  q/Esc: quit"
+                "S: connections  q/Esc: quit"
             }
             super::InputMode::Main => {
-                "y: copy  p: paste  [: previous  ]: next  n: new browser  x: close  S: sessions  q/Esc: quit"
+                "y: copy  p: paste  [: previous  ]: next  n: new browser  x: close  S: connections  q/Esc: quit"
             }
-            super::InputMode::SessionManager => {
+            super::InputMode::ConnectionManager => {
                 "j/k: select  Enter: activate  n: new browser  a: add  d: close  q/Esc: dismiss"
             }
             super::InputMode::TargetChooser => "j/k: select  Enter: choose  Esc: cancel",
             super::InputMode::RemoteInput | super::InputMode::NewBrowser => {
                 "Enter: submit  Backspace: edit  Esc: cancel"
             }
-            super::InputMode::SessionCloseConfirmation => "Enter/y: close Session  q/Esc: cancel",
+            super::InputMode::ConnectionCloseConfirmation => {
+                "Enter/y: close connection  q/Esc: cancel"
+            }
             super::InputMode::TransferOverwriteConfirmation => "Enter/y: overwrite  q/Esc: cancel",
         };
         let browser_status = self.active_context().map_or_else(
@@ -160,21 +164,21 @@ impl App {
     fn render_overlay(&self, frame: &mut Frame<'_>) {
         match &self.overlay {
             Overlay::None => {}
-            Overlay::SessionManager => self.render_session_manager(frame),
+            Overlay::ConnectionManager => self.render_connection_manager(frame),
             Overlay::TargetChooser { selected_ssh } => {
                 render_choice(frame, *selected_ssh);
             }
             Overlay::RemoteInput { input } => render_text_dialog(
                 frame,
-                " Add SSH Session ",
+                " Add SSH Connection ",
                 &[
                     Line::from("SSH destination:"),
                     Line::styled(input, input_style()),
                 ],
             ),
             Overlay::NewBrowser(dialog) => self.render_new_browser(frame, dialog),
-            Overlay::CloseConfirmation { session_id } => {
-                self.render_close_confirmation(frame, *session_id);
+            Overlay::CloseConfirmation { connection_id } => {
+                self.render_close_confirmation(frame, *connection_id);
             }
             Overlay::TransferOverwriteConfirmation(request) => {
                 self.render_transfer_overwrite_confirmation(frame, request);
@@ -182,36 +186,36 @@ impl App {
         }
     }
 
-    fn render_session_manager(&self, frame: &mut Frame<'_>) {
+    fn render_connection_manager(&self, frame: &mut Frame<'_>) {
         let area = popup_area(frame.area(), 76, 18);
         frame.render_widget(Clear, area);
         let block = Block::default()
-            .title(" Session Manager ")
+            .title(" Connection Manager ")
             .borders(Borders::ALL);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        if self.session_order.is_empty() {
+        if self.connection_order.is_empty() {
             frame.render_widget(
-                Paragraph::new("No Sessions\n\na: add session").alignment(Alignment::Center),
+                Paragraph::new("No connections\n\na: add connection").alignment(Alignment::Center),
                 inner,
             );
             return;
         }
         let [list_area, detail_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(inner);
-        let items = self.session_order.iter().filter_map(|id| {
-            let record = self.sessions.get(id)?;
+        let items = self.connection_order.iter().filter_map(|id| {
+            let record = self.connections.get(id)?;
             debug_assert_eq!(record.id, *id);
             let count = self
                 .contexts
                 .values()
-                .filter(|tab| tab.session_id == *id)
+                .filter(|tab| tab.connection_id == *id)
                 .count();
             let status = match &record.status {
-                SessionStatus::Starting => "Starting".into(),
-                SessionStatus::Ready => "Ready".into(),
-                SessionStatus::Failed(error) => format!("Failed: {error}"),
-                SessionStatus::Closing => "Closing".into(),
+                ConnectionStatus::Starting => "Starting".into(),
+                ConnectionStatus::Ready => "Ready".into(),
+                ConnectionStatus::Failed(error) => format!("Failed: {error}"),
+                ConnectionStatus::Closing => "Closing".into(),
             };
             Some(ListItem::new(format!(
                 "{}  {}  {status}  {count} browser(s)",
@@ -219,8 +223,8 @@ impl App {
                 record.target_summary()
             )))
         });
-        let selected = self.selected_session_id.and_then(|id| {
-            self.session_order
+        let selected = self.selected_connection_id.and_then(|id| {
+            self.connection_order
                 .iter()
                 .position(|candidate| *candidate == id)
         });
@@ -233,10 +237,10 @@ impl App {
             &mut state,
         );
         if let Some(error) = self
-            .selected_session_id
-            .and_then(|id| self.sessions.get(&id))
+            .selected_connection_id
+            .and_then(|id| self.connections.get(&id))
             .and_then(|record| match &record.status {
-                SessionStatus::Failed(error) => Some(error.as_str()),
+                ConnectionStatus::Failed(error) => Some(error.as_str()),
                 _ => None,
             })
         {
@@ -251,11 +255,11 @@ impl App {
 
     fn render_new_browser(&self, frame: &mut Frame<'_>, dialog: &NewBrowserDialog) {
         let label = self
-            .sessions
-            .get(&dialog.session_id)
+            .connections
+            .get(&dialog.connection_id)
             .map_or("Unknown", |record| record.label.as_str());
         let mut lines = vec![
-            Line::from(format!("Session: {label}")),
+            Line::from(format!("Connection: {label}")),
             Line::from("Path:"),
             Line::styled(dialog.input.as_str(), input_style()),
         ];
@@ -273,20 +277,20 @@ impl App {
         render_text_dialog(frame, " New Browser ", &lines);
     }
 
-    fn render_close_confirmation(&self, frame: &mut Frame<'_>, id: SessionRecordId) {
-        let Some(record) = self.sessions.get(&id) else {
+    fn render_close_confirmation(&self, frame: &mut Frame<'_>, id: ConnectionRecordId) {
+        let Some(record) = self.connections.get(&id) else {
             return;
         };
         let count = self
             .contexts
             .values()
-            .filter(|tab| tab.session_id == id)
+            .filter(|tab| tab.connection_id == id)
             .count();
         render_text_dialog(
             frame,
-            " Close Session ",
+            " Close Connection ",
             &[
-                Line::from(format!("Close Session \"{}\"?", record.label)),
+                Line::from(format!("Close connection \"{}\"?", record.label)),
                 Line::from(format!("{count} browser context(s) will close.")),
                 Line::from(""),
                 Line::from("Press Enter or y to confirm."),
@@ -300,15 +304,15 @@ impl App {
         request: &super::TransferRequest,
     ) {
         let label = self
-            .sessions
-            .get(&request.destination_session_id)
+            .connections
+            .get(&request.destination_connection_id)
             .map_or("Unknown", |record| record.label.as_str());
         render_text_dialog(
             frame,
             " Replace Existing File ",
             &[
                 Line::from(format!(
-                    "\"{}\" already exists in Session \"{label}\".",
+                    "\"{}\" already exists in connection \"{label}\".",
                     request.source_name
                 )),
                 Line::from(format!("Destination: {}", request.destination_root)),
@@ -319,7 +323,7 @@ impl App {
     }
 }
 
-fn tab_label(session_label: &str, tab: &BrowserTab) -> String {
+fn tab_label(connection_label: &str, tab: &BrowserTab) -> String {
     let path = tab.context.root_path();
     let compact = if path == "/" {
         "/"
@@ -329,7 +333,7 @@ fn tab_label(session_label: &str, tab: &BrowserTab) -> String {
             .find(|part| !part.is_empty())
             .unwrap_or(path)
     };
-    format!("{session_label}:{compact}")
+    format!("{connection_label}:{compact}")
 }
 
 fn render_file_list<'a>(
@@ -392,7 +396,7 @@ fn render_choice(frame: &mut Frame<'_>, selected_ssh: bool) {
     let area = popup_area(frame.area(), 34, 8);
     frame.render_widget(Clear, area);
     let block = Block::default()
-        .title(" Add Session ")
+        .title(" Add Connection ")
         .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -456,11 +460,11 @@ mod tests {
     }
 
     #[test]
-    fn sessionless_startup_has_actionable_manager_and_shell() {
+    fn connectionless_startup_has_actionable_manager_and_shell() {
         let mut app = App::new();
         let output = rendered(&mut app, 80, 24);
-        assert!(output.contains("Session Manager"));
-        assert!(output.contains("a: add session"));
+        assert!(output.contains("Connection Manager"));
+        assert!(output.contains("a: add connection"));
         assert!(output.contains("File Peeker"));
     }
 

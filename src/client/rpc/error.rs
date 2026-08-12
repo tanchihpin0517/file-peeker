@@ -52,7 +52,7 @@ mod tests {
             (Code::PermissionDenied, io::ErrorKind::PermissionDenied),
             // FsErrorKind::NotDirectory
             (Code::FailedPrecondition, io::ErrorKind::NotADirectory),
-            // FsErrorKind::Cancelled, which is what a closing session produces
+            // FsErrorKind::Cancelled, which is what a closing connection produces
             (Code::Cancelled, io::ErrorKind::Interrupted),
             // FsErrorKind::Internal
             (Code::Internal, io::ErrorKind::Other),

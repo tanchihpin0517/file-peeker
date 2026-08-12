@@ -1,20 +1,25 @@
 # Copy File
 
-`Session::op_copy_file_from` copies one regular file between any two Sessions.
-It is destination-oriented: the receiving Session joins and validates the
+`Client::op_copy_file` copies one regular file between any two connections. It
+is destination-oriented: the receiving connection joins and validates the
 destination directory and filename on its own selected host.
 
 ```rust
-destination
-    .op_copy_file_from(
+client
+    .op_copy_file(
         &source,
         source_path,
+        &destination,
         destination_directory,
         destination_name,
         CopyConflict::FailIfExists,
     )
     .await
 ```
+
+Each ID sits beside the paths it owns. `source` and `destination` may name one
+connection: the source lock is released before the destination lock is taken,
+so a within-connection copy neither deadlocks nor needs a second server.
 
 The same workflow covers every route:
 
@@ -25,10 +30,9 @@ The same workflow covers every route:
 | Remote | Local | Download |
 | Remote | Remote | Relay through the client |
 
-The source Session resolves and opens the source at copy time, then releases
-its backend lock before consuming bytes. The destination backend similarly
-returns an owned write future, so neither Session close is blocked by a long
-transfer. Data remains streaming and bounded; remote frames contain at most
+The source connection resolves and opens the source at copy time, then releases
+its lock before consuming bytes. The destination similarly returns an owned
+write future, so neither connection's close is blocked by a long transfer. Data remains streaming and bounded; remote frames contain at most
 64 KiB.
 
 The destination core writes a unique hidden partial file beside the final

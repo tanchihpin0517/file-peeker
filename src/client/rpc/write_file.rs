@@ -18,7 +18,7 @@ use bytes::Bytes;
 use futures::{FutureExt as _, StreamExt as _, stream};
 
 use super::error::operation_status_error;
-use crate::session::{
+use crate::client::{
     connection::ServerConnection,
     rpc::{ReadStream, WriteConflict, WriteFuture, WriteResult},
 };

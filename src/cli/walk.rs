@@ -4,36 +4,35 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{Client, Session, SessionTarget, WalkStream};
+use crate::{Client, ConnectionId, ServerLocation, WalkStream};
 use futures::TryStreamExt as _;
 
 const OUTPUT_FLUSH_INTERVAL: u64 = 1024;
 
 pub(crate) async fn run(path: &str, remote: Option<&str>) -> io::Result<()> {
     tracing::debug!("---------------- walk ----------------");
-    let target = match remote {
-        Some(destination) => SessionTarget::Remote {
+    let location = match remote {
+        Some(destination) => ServerLocation::Ssh {
             destination: destination.to_owned(),
+            force_install: false,
         },
-        None => SessionTarget::Local,
+        None => ServerLocation::Embedded,
     };
     let client = Client::new();
-    let session = client
-        .start_session(target)
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let result = run_with_session(&session, path).await;
-    let shutdown = client
-        .close_all()
-        .await
-        .map_err(|error| io::Error::other(error.to_string()));
+    let connection = client.open(location).await?;
+    let result = run_with_connection(&client, &connection, path).await;
+    let shutdown = client.close_all().await;
     result?;
     shutdown
 }
 
-async fn run_with_session(session: &Session, path: &str) -> io::Result<()> {
+async fn run_with_connection(
+    client: &Client,
+    connection: &ConnectionId,
+    path: &str,
+) -> io::Result<()> {
     let started = Instant::now();
-    let mut entries = session.op_walk_dir(path).await?;
+    let mut entries = client.op_walk_dir(connection, path).await?;
     let mut output = io::stdout().lock();
     let stats = write_walk(Path::new(path), &mut entries, &mut output).await?;
     output.flush()?;

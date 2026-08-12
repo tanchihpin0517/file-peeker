@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, path::Path, sync::Arc};
 
-use crate::{DirectoryEntry, EntryKind, Session};
+use crate::{Client, ConnectionId, DirectoryEntry, EntryKind};
 use futures::TryStreamExt as _;
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
@@ -90,7 +90,8 @@ pub(crate) struct BrowserContext {
     directory_listing_tasks: HashMap<u64, JoinHandle<()>>,
     generation: u64,
     next_request_id: u64,
-    session: Arc<Session>,
+    client: Arc<Client>,
+    connection: ConnectionId,
     events: mpsc::Sender<BrowserContextEvent>,
 }
 
@@ -112,7 +113,8 @@ impl fmt::Debug for BrowserContext {
 
 impl BrowserContext {
     pub(crate) fn new(
-        session: Arc<Session>,
+        client: Arc<Client>,
+        connection: ConnectionId,
         root_path: String,
         events: mpsc::Sender<BrowserContextEvent>,
     ) -> Self {
@@ -128,7 +130,8 @@ impl BrowserContext {
             directory_listing_tasks: HashMap::new(),
             generation: 0,
             next_request_id: 0,
-            session,
+            client,
+            connection,
             events,
         };
         context.start_root_listing();
@@ -298,13 +301,15 @@ impl BrowserContext {
         self.generation = self.generation.wrapping_add(1);
         self.rows.clear();
         self.status = ListingStatus::Loading;
-        let session = Arc::clone(&self.session);
+        let client = Arc::clone(&self.client);
+        let connection = self.connection;
         let root_path = self.root_path.clone();
         let context_id = self.id;
         let generation = self.generation;
         let events = self.events.clone();
         self.root_listing_task = Some(tokio::spawn(run_listing(
-            session,
+            client,
+            connection,
             root_path,
             context_id,
             generation,
@@ -324,7 +329,8 @@ impl BrowserContext {
         let request_id = self.next_request_id();
         let path = self.rows[index].path.clone();
         self.rows[index].expansion = ExpansionStatus::Loading { request_id };
-        let session = Arc::clone(&self.session);
+        let client = Arc::clone(&self.client);
+        let connection = self.connection;
         let context_id = self.id;
         let generation = self.generation;
         let target = ListingTarget::Directory {
@@ -333,7 +339,7 @@ impl BrowserContext {
         };
         let events = self.events.clone();
         let task = tokio::spawn(run_listing(
-            session, path, context_id, generation, target, events,
+            client, connection, path, context_id, generation, target, events,
         ));
         self.directory_listing_tasks.insert(request_id, task);
     }
@@ -498,14 +504,15 @@ enum ListingResult {
 }
 
 async fn run_listing(
-    session: Arc<Session>,
+    client: Arc<Client>,
+    connection: ConnectionId,
     path: String,
     context_id: BrowserContextId,
     generation: u64,
     target: ListingTarget,
     events: mpsc::Sender<BrowserContextEvent>,
 ) {
-    let result = match session.op_list_dir(&path).await {
+    let result = match client.op_list_dir(&connection, &path).await {
         Ok(mut listing) => loop {
             match listing.try_next().await {
                 Ok(Some(entry)) => {
@@ -558,29 +565,31 @@ mod tests {
     use std::{io, sync::Arc, time::Duration};
 
     use crate::{
-        DirectoryEntry, EntryKind, Session,
+        Client, ConnectionId, DirectoryEntry, EntryKind,
         test_support::{Listing, ScriptedServer},
     };
     use tokio::sync::mpsc;
 
     use super::{BrowserContext, BrowserContextEvent, ExpansionStatus, ListingStatus};
 
-    /// A Session whose server replays scripted listings.
+    /// A Client whose one connection replays scripted listings.
     ///
-    /// Requests travel the real `Session` path *and* the real wire path, so a
+    /// Requests travel the real `Client` path *and* the real wire path, so a
     /// scripted listing arrives having been batched, flattened and validated
     /// exactly as a production one is.
-    struct ScriptedSession {
-        session: Arc<Session>,
+    struct ScriptedClient {
+        client: Arc<Client>,
+        connection: ConnectionId,
         server: ScriptedServer,
     }
 
-    impl ScriptedSession {
+    impl ScriptedClient {
         async fn new(listings: impl IntoIterator<Item = Listing>) -> Arc<Self> {
             let server = ScriptedServer::new(listings);
-            let connection = server.connect().await;
+            let (client, connection) = Client::with_connection_for_test(server.connect().await);
             Arc::new(Self {
-                session: Session::with_connection_for_test("scripted", Some(connection)),
+                client,
+                connection,
                 server,
             })
         }
@@ -628,12 +637,17 @@ mod tests {
     }
 
     fn context(
-        source: &Arc<ScriptedSession>,
+        source: &Arc<ScriptedClient>,
         capacity: usize,
     ) -> (BrowserContext, mpsc::Receiver<BrowserContextEvent>) {
         let (events, receiver) = mpsc::channel(capacity);
         (
-            BrowserContext::new(Arc::clone(&source.session), "/home".into(), events),
+            BrowserContext::new(
+                Arc::clone(&source.client),
+                source.connection,
+                "/home".into(),
+                events,
+            ),
             receiver,
         )
     }
@@ -648,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn creation_starts_and_completes_a_listing() {
-        let source = ScriptedSession::new([listing([Ok(entry("one"))])]).await;
+        let source = ScriptedClient::new([listing([Ok(entry("one"))])]).await;
         let (mut context, mut receiver) = context(&source, 4);
 
         assert_eq!(context.status(), &ListingStatus::Loading);
@@ -662,7 +676,7 @@ mod tests {
 
     #[tokio::test]
     async fn half_page_scroll_moves_selection_and_viewport_and_clamps_at_boundaries() {
-        let source = ScriptedSession::new([listing(
+        let source = ScriptedClient::new([listing(
             (0..12).map(|index| Ok(entry(&format!("item-{index}")))),
         )])
         .await;
@@ -698,7 +712,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_failure_preserves_partial_entries() {
-        let source = ScriptedSession::new([listing([
+        let source = ScriptedClient::new([listing([
             Ok(entry("kept")),
             Err(io::Error::other("failed")),
         ])])
@@ -714,7 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_clears_entries_and_rejects_queued_stale_results() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(entry("stale"))]),
             listing([Ok(entry("current"))]),
         ])
@@ -739,7 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_preserves_then_clamps_selection() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(entry("a")), Ok(entry("b")), Ok(entry("c"))]),
             listing([Ok(entry("new-a")), Ok(entry("new-b"))]),
         ])
@@ -764,7 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn entering_selected_directory_changes_path_and_rejects_stale_results() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(directory("reports"))]),
             listing([Ok(entry("current"))]),
         ])
@@ -791,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn entering_non_navigable_entry_does_nothing() {
-        let source = ScriptedSession::new([listing([Ok(entry("report.txt"))])]).await;
+        let source = ScriptedClient::new([listing([Ok(entry("report.txt"))])]).await;
         let (mut context, mut receiver) = context(&source, 4);
         apply_next(&mut context, &mut receiver).await;
 
@@ -804,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn leaving_changes_to_parent_and_does_nothing_at_root() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(entry("initial"))]),
             listing([Ok(entry("parent"))]),
         ])
@@ -829,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_navigation_keeps_attempted_path() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(directory("missing"))]),
             Listing::Rejected(io::Error::new(io::ErrorKind::NotFound, "missing directory")),
         ])
@@ -853,7 +867,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_events_backpressure_the_listing() {
-        let source = ScriptedSession::new([listing([Ok(entry("one")), Ok(entry("two"))])]).await;
+        let source = ScriptedClient::new([listing([Ok(entry("one")), Ok(entry("two"))])]).await;
         let (mut context, mut receiver) = context(&source, 1);
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -874,7 +888,7 @@ mod tests {
 
     #[tokio::test]
     async fn toggling_directory_expands_inline_without_changing_root_and_reloads_after_collapse() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(directory("reports"))]),
             listing([Ok(entry("first.txt"))]),
             listing([Ok(entry("second.txt"))]),
@@ -921,7 +935,7 @@ mod tests {
 
     #[tokio::test]
     async fn nested_expansion_inserts_children_before_the_next_sibling() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(directory("reports")), Ok(entry("root.txt"))]),
             listing([Ok(directory("year")), Ok(entry("summary.txt"))]),
             listing([Ok(entry("january.txt"))]),
@@ -958,7 +972,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_children_do_not_move_selection_off_an_existing_row() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(directory("reports")), Ok(entry("root.txt"))]),
             listing([Ok(entry("child.txt"))]),
         ])
@@ -985,7 +999,7 @@ mod tests {
 
     #[tokio::test]
     async fn collapsing_rejects_already_queued_child_events() {
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(directory("reports"))]),
             listing([Ok(entry("stale.txt"))]),
             listing([Ok(entry("current.txt"))]),
@@ -1011,7 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn activating_files_and_non_directory_symlinks_does_nothing() {
-        let source = ScriptedSession::new([listing([
+        let source = ScriptedClient::new([listing([
             Ok(entry("report.txt")),
             Ok(symlink("latest", false)),
         ])])
@@ -1036,7 +1050,7 @@ mod tests {
             kind: EntryKind::Other,
             navigable: false,
         };
-        let source = ScriptedSession::new([
+        let source = ScriptedClient::new([
             listing([Ok(symlink("linked-directory", true)), Ok(special)]),
             listing([Ok(entry("child.txt"))]),
         ])
@@ -1060,7 +1074,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_a_context_cancels_its_listing() {
-        let source = ScriptedSession::new([Listing::Pending]).await;
+        let source = ScriptedClient::new([Listing::Pending]).await;
         let (context, _receiver) = context(&source, 1);
         let task = context.root_listing_task.as_ref().unwrap().abort_handle();
 

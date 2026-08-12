@@ -9,7 +9,7 @@ documentation.
 
 1. [Architecture](architecture.md) explains the runtime model, terminology and
    responsibility boundaries.
-2. [Session lifecycle](session-lifecycle.md) covers local and remote startup,
+2. [Connection lifecycle](connection-lifecycle.md) covers local and remote startup,
    reconnection, cancellation and shutdown.
 3. [Remote protocol](protocol.md) defines the gRPC wire contract.
 
@@ -36,10 +36,10 @@ and link to that owner rather than duplicate implementation details.
 | --- | --- |
 | [Architecture](architecture.md) | System vocabulary, component boundaries and high-level data flow |
 | [Code structure](code-structure.md) | Current module placement, dependency direction, binary targets and features, growth rules and implemented placement examples |
-| [Session lifecycle](session-lifecycle.md) | Startup, reconnection, cancellation and shutdown |
+| [Connection lifecycle](connection-lifecycle.md) | Startup, reconnection, cancellation and shutdown |
 | [Remote protocol](protocol.md) | RPCs, protobuf shapes, wire limits and gRPC status mapping |
 | [Client API](api.md) | Caller-visible Rust surface |
-| [Copy file](operations/copy-file.md) | Session-to-Session routes, streaming, conflicts, atomic publication and cancellation |
+| [Copy file](operations/copy-file.md) | Connection-to-connection routes, streaming, conflicts, atomic publication and cancellation |
 | [TUI implementation](tui.md) | TUI state, tasks, events, input and rendering behavior |
 | [State ownership](state-ownership.md) | Cross-client and cross-UI ownership comparison |
 | [Client test CLI](client-cli.md) | Test CLI commands and output behavior |

@@ -1,22 +1,22 @@
-# Session Lifecycle
+# Connection Lifecycle
 
-This document owns local and remote Session startup, transport recovery,
+This document owns local and remote connection startup, transport recovery,
 cancellation and shutdown behavior. See [Architecture](architecture.md) for
 component responsibilities and [Remote Protocol](protocol.md) for the wire
 contract.
 
-Every `Session` owns one managed server and one authenticated channel to it.
+Every connection owns one managed server and one authenticated channel to it.
 The two targets differ only in the middle of that line.
 
 ```text
-Local:  Session -> 127.0.0.1:SERVER_PORT -> embedded server
-Remote: Session -> SOCKS 127.0.0.1:PROXY -> SSH -> remote loopback server
+Local:  Client -> 127.0.0.1:SERVER_PORT -> embedded server
+Remote: Client -> SOCKS 127.0.0.1:PROXY -> SSH -> remote loopback server
 ```
 
-The TUI can start either target interactively. It creates a stable UI row in
-`Starting`, records the Client Session ID as soon as allocation succeeds, and
-then transitions the row to `Ready` or `Failed`. `Ready` means startup
-succeeded; the protocol has no heartbeat-backed connected state.
+The TUI can open either target interactively. It creates a stable UI row in
+`Starting`, records the connection ID as soon as `Client.open` returns, and then
+transitions the row to `Ready` or `Failed`. `Ready` means startup succeeded; the
+protocol has no heartbeat-backed connected state.
 
 Startup is one shared sequence: start a server somewhere, learn its loopback
 port and bearer token, connect a tonic channel through the matching connector,
@@ -31,7 +31,7 @@ differ; a failure at any step stops the server that was just started.
    `127.0.0.1:SERVER_PORT`.
 
 The loopback port is reachable by any process on the client host for the
-Session's lifetime; the 256-bit bearer token is what keeps it private.
+connection's lifetime; the 256-bit bearer token is what keeps it private.
 
 ## Remote startup
 
@@ -49,29 +49,33 @@ are never automatically replayed or resumed.
 
 ## Shutdown
 
-`Client.close_session` removes the retained Session, and `Client.close_all`
-drains the registry; both succeed for unknown or already closed IDs.
-`Session.close` is idempotent without unregistering it. Closing any Session
+`Client.close` removes the named connection, and `Client.close_all` drains the
+registry; both succeed for unknown or already closed IDs. Closing a connection
 stops its server, which cancels that server's `FsService` and with it every
 active listing, walk, file-read, and file-write stream. Cancellation happens
 before the server stops accepting, so an interrupted stream reports cancellation
 rather than a transport failure. Incomplete writes remove their sibling partial
 files.
 
-A local Session cancels its serving task and joins it. A remote Session drops
-the channel and the stdin lease; server EOF drives tonic graceful shutdown on
-the far side. Either way the client waits up to five seconds, then kills and
+Close is terminal in two steps: the registry entry is removed, and then the
+connection slot behind it is emptied. Emptying the slot is what rejects a
+request that had already reached the slot, so a caller holding a stale ID gets
+`connection is closed` rather than a server that is going away.
+
+A local connection cancels its serving task and joins it. A remote connection
+drops the channel and the stdin lease; server EOF drives tonic graceful shutdown
+on the far side. Either way the client waits up to five seconds, then kills and
 reaps while returning a shutdown timeout. Drop uses best-effort non-blocking
 cleanup.
 
-In the TUI, confirmed Session close first marks the row `Closing` and drops all
-of its Browser Contexts. It clears a clipboard sourced from that Session,
-dismisses a related overwrite prompt, and aborts and joins any transfer using
-the Session before running `Client.close_session` in a tracked task.
-The row is removed when close finishes. A close failure is shown as a persistent
-UI error rather than a retryable Session because the Client registry entry has
-already been consumed. Application shutdown calls `Client.close_all`, which
-attempts every remaining close even when one fails and reports the first error.
+In the TUI, a confirmed close first marks the row `Closing` and drops all of its
+Browser Contexts. It clears a clipboard sourced from that connection, dismisses
+a related overwrite prompt, and aborts and joins any transfer using the
+connection before running `Client.close` in a tracked task. The row is removed
+when close finishes. A close failure is shown as a persistent UI error rather
+than a retryable row because the Client registry entry has already been
+consumed. Application shutdown calls `Client.close_all`, which attempts every
+remaining close even when one fails and reports the first error.
 
 The protobuf API has no custom Hello, Heartbeat, or Shutdown RPC. Authentication
 is sensitive `authorization: Bearer TOKEN` metadata on both FilePeeker and

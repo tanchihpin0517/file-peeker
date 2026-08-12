@@ -2,12 +2,12 @@ use std::io;
 
 use futures::stream::BoxStream;
 
-use crate::session::{Session, rpc};
+use crate::client::{Client, ConnectionId, rpc};
 
 pub(crate) type WalkEntry = crate::fs::WalkEntry;
 pub(crate) type WalkStream = BoxStream<'static, io::Result<WalkEntry>>;
 
-impl Session {
+impl Client {
     /// Starts a native, pull-based recursive traversal on the selected host.
     ///
     /// The root is excluded, direct children have depth 1, traversal is
@@ -15,10 +15,14 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Returns an I/O error when the Session is closed or the selected-host
+    /// Returns an I/O error when the connection is closed or the selected-host
     /// traversal cannot be started. Later errors are terminal stream items.
-    pub(crate) async fn op_walk_dir(&self, path: &str) -> io::Result<WalkStream> {
-        let connection = self.connection().await?;
+    pub(crate) async fn op_walk_dir(
+        &self,
+        id: &ConnectionId,
+        path: &str,
+    ) -> io::Result<WalkStream> {
+        let connection = self.connection(id).await?;
         rpc::walk_dir(&connection, path).await
     }
 }
@@ -29,22 +33,25 @@ mod tests {
 
     use crate::fs::{DirectoryEntry, EntryKind};
 
-    use super::{Session, WalkEntry};
-    use crate::SessionTarget;
+    use super::WalkEntry;
+    use crate::client::{Client, connection::ServerLocation};
 
     #[tokio::test]
-    async fn rejects_closed_sessions() {
-        let error = Session::closed_for_test("walk-test")
-            .op_walk_dir("/fixture")
+    async fn rejects_closed_connections() {
+        let (client, id) = Client::closed_for_test();
+
+        let error = client
+            .op_walk_dir(&id, "/fixture")
             .await
             .err()
-            .expect("closed Session should reject walking");
+            .expect("a closed connection should reject walking");
+
         assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
     }
 
     /// `op_walk_dir` hands back an owned `'static` stream, so the connection
     /// read lock is released before the caller sees it. Holding one open must
-    /// therefore never delay shutdown.
+    /// therefore never delay close.
     #[tokio::test]
     async fn close_is_not_blocked_by_an_outstanding_walk_stream() {
         let fixture = tempfile::tempdir().unwrap();
@@ -53,15 +60,14 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let session = Session::start("walk-test".into(), SessionTarget::Local)
-            .await
-            .unwrap();
-        let _walk = session
-            .op_walk_dir(fixture.path().to_str().unwrap())
+        let client = Client::new();
+        let id = client.open(ServerLocation::Embedded).await.unwrap();
+        let _walk = client
+            .op_walk_dir(&id, fixture.path().to_str().unwrap())
             .await
             .unwrap();
 
-        tokio::time::timeout(Duration::from_secs(5), session.close())
+        tokio::time::timeout(Duration::from_secs(5), client.close(&id))
             .await
             .expect("close must not wait on an outstanding walk stream")
             .unwrap();

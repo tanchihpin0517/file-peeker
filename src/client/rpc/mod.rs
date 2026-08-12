@@ -1,9 +1,7 @@
 //! The calling side of the File Peeker protocol.
 //!
-//! The calling side of the File Peeker protocol.
-//!
-//! Each module turns one Session operation into a request against a
-//! [`ServerConnection`](crate::session::connection::ServerConnection) and
+//! Each module turns one Client operation into a request against a
+//! [`ServerConnection`](crate::client::connection::ServerConnection) and
 //! validates the response. The handling side lives in [`crate::server`];
 //! nothing here performs filesystem work.
 
@@ -30,7 +28,7 @@ use futures::{future::BoxFuture, stream::BoxStream};
 pub(crate) type ReadStream = BoxStream<'static, io::Result<Bytes>>;
 
 /// A Write request in flight. Built while the connection lock is held, awaited
-/// after it is released, so a long transfer never blocks a session close.
+/// after it is released, so a long transfer never blocks a close.
 pub(crate) type WriteFuture = BoxFuture<'static, io::Result<WriteResult>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,7 +51,7 @@ mod tests {
     use futures::{StreamExt as _, TryStreamExt as _, stream};
 
     use super::{WriteConflict, list_dir, read_file, resolve_path, walk_dir, write_file};
-    use crate::session::connection::{ServerConnection, ServerLocation};
+    use crate::client::connection::{ServerConnection, ServerLocation};
 
     async fn embedded() -> ServerConnection {
         ServerConnection::open(ServerLocation::Embedded)
@@ -188,8 +186,8 @@ mod tests {
         assert!(stream.next().await.is_none());
     }
 
-    /// Each Session owns its own server, so two connections never share a port,
-    /// a token, or a cancellation.
+    /// Each connection owns its own server, so two never share a port, a token,
+    /// or a cancellation.
     #[tokio::test]
     async fn embedded_connections_are_independent() {
         let first = embedded().await;

@@ -1,15 +1,13 @@
-mod session;
+mod connection;
 mod view;
 
 use std::{collections::HashMap, error::Error, io, sync::Arc};
 
-use crate::{
-    Client, CopyConflict, CopyResult, EntryKind, Session, SessionShutdownError, SessionTarget,
-};
+use crate::{Client, ConnectionId, CopyConflict, CopyResult, EntryKind, ServerLocation};
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
-use self::session::{SessionRecord, SessionRecordId, SessionStatus};
+use self::connection::{ConnectionRecord, ConnectionRecordId, ConnectionStatus};
 use super::{
     EVENT_CHANNEL_CAPACITY,
     browser_context::{BrowserContext, BrowserContextEvent, BrowserContextId},
@@ -18,23 +16,23 @@ use super::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputMode {
     Main,
-    SessionManager,
+    ConnectionManager,
     TargetChooser,
     RemoteInput,
     NewBrowser,
-    SessionCloseConfirmation,
+    ConnectionCloseConfirmation,
     TransferOverwriteConfirmation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReturnMode {
     Main,
-    SessionManager,
+    ConnectionManager,
 }
 
 #[derive(Debug)]
 struct NewBrowserDialog {
-    session_id: SessionRecordId,
+    connection_id: ConnectionRecordId,
     input: String,
     request_id: Option<Uuid>,
     error: Option<String>,
@@ -44,33 +42,33 @@ struct NewBrowserDialog {
 #[derive(Debug)]
 enum Overlay {
     None,
-    SessionManager,
+    ConnectionManager,
     TargetChooser { selected_ssh: bool },
     RemoteInput { input: String },
     NewBrowser(NewBrowserDialog),
-    CloseConfirmation { session_id: SessionRecordId },
+    CloseConfirmation { connection_id: ConnectionRecordId },
     TransferOverwriteConfirmation(TransferRequest),
 }
 
 #[derive(Debug)]
 struct BrowserTab {
-    session_id: SessionRecordId,
+    connection_id: ConnectionRecordId,
     context: BrowserContext,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TransferSelection {
-    session_id: SessionRecordId,
+    connection_id: ConnectionRecordId,
     path: String,
     name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TransferRequest {
-    source_session_id: SessionRecordId,
+    source_connection_id: ConnectionRecordId,
     source_path: String,
     source_name: String,
-    destination_session_id: SessionRecordId,
+    destination_connection_id: ConnectionRecordId,
     destination_context_id: BrowserContextId,
     destination_root: String,
 }
@@ -84,22 +82,22 @@ struct TransferTask {
 
 #[derive(Debug)]
 enum LifecycleEvent {
-    SessionReady {
-        record_id: SessionRecordId,
-        session: Arc<Session>,
+    ConnectionReady {
+        record_id: ConnectionRecordId,
+        connection: ConnectionId,
     },
-    SessionFailed {
-        record_id: SessionRecordId,
+    ConnectionFailed {
+        record_id: ConnectionRecordId,
         error: String,
     },
     PathResolved {
-        record_id: SessionRecordId,
+        record_id: ConnectionRecordId,
         request_id: Uuid,
         result: Result<String, String>,
     },
-    SessionClosed {
-        record_id: SessionRecordId,
-        result: Result<(), SessionShutdownError>,
+    ConnectionClosed {
+        record_id: ConnectionRecordId,
+        result: io::Result<()>,
     },
     TransferCompleted {
         transfer_id: Uuid,
@@ -112,10 +110,10 @@ enum LifecycleEvent {
 #[derive(Debug)]
 pub(crate) struct App {
     client: Arc<Client>,
-    sessions: HashMap<SessionRecordId, SessionRecord>,
-    session_order: Vec<SessionRecordId>,
+    connections: HashMap<ConnectionRecordId, ConnectionRecord>,
+    connection_order: Vec<ConnectionRecordId>,
     label_counts: HashMap<String, usize>,
-    selected_session_id: Option<SessionRecordId>,
+    selected_connection_id: Option<ConnectionRecordId>,
     contexts: HashMap<BrowserContextId, BrowserTab>,
     context_order: Vec<BrowserContextId>,
     active_context_id: Option<BrowserContextId>,
@@ -124,9 +122,9 @@ pub(crate) struct App {
     event_receiver: mpsc::Receiver<BrowserContextEvent>,
     lifecycle_sender: mpsc::UnboundedSender<LifecycleEvent>,
     lifecycle_receiver: mpsc::UnboundedReceiver<LifecycleEvent>,
-    start_tasks: HashMap<SessionRecordId, JoinHandle<()>>,
+    start_tasks: HashMap<ConnectionRecordId, JoinHandle<()>>,
     path_tasks: HashMap<Uuid, JoinHandle<()>>,
-    close_tasks: HashMap<SessionRecordId, JoinHandle<()>>,
+    close_tasks: HashMap<ConnectionRecordId, JoinHandle<()>>,
     transfer_selection: Option<TransferSelection>,
     transfer_task: Option<TransferTask>,
     status_message: Option<String>,
@@ -139,14 +137,14 @@ impl App {
         let (lifecycle_sender, lifecycle_receiver) = mpsc::unbounded_channel();
         Self {
             client: Client::new(),
-            sessions: HashMap::new(),
-            session_order: Vec::new(),
+            connections: HashMap::new(),
+            connection_order: Vec::new(),
             label_counts: HashMap::new(),
-            selected_session_id: None,
+            selected_connection_id: None,
             contexts: HashMap::new(),
             context_order: Vec::new(),
             active_context_id: None,
-            overlay: Overlay::SessionManager,
+            overlay: Overlay::ConnectionManager,
             events,
             event_receiver,
             lifecycle_sender,
@@ -163,30 +161,31 @@ impl App {
 
     pub(crate) async fn start(&mut self, path: Option<&str>) -> Result<(), Box<dyn Error>> {
         let Some(path) = path else {
-            self.overlay = Overlay::SessionManager;
+            self.overlay = Overlay::ConnectionManager;
             return Ok(());
         };
-        let record_id = self.insert_session_record(SessionTarget::Local, SessionStatus::Starting);
-        let session = self.client.start_session(SessionTarget::Local).await?;
-        if let Some(record) = self.sessions.get_mut(&record_id) {
-            record.session = Some(Arc::clone(&session));
-            record.status = SessionStatus::Ready;
+        let record_id =
+            self.insert_connection_record(ServerLocation::Embedded, ConnectionStatus::Starting);
+        let connection = self.client.open(ServerLocation::Embedded).await?;
+        if let Some(record) = self.connections.get_mut(&record_id) {
+            record.connection = Some(connection);
+            record.status = ConnectionStatus::Ready;
         }
-        let root_path = session.op_resolve_path(path).await?;
-        let context_id = self.add_context(record_id, session, root_path);
+        let root_path = self.client.op_resolve_path(&connection, path).await?;
+        let context_id = self.add_context(record_id, connection, root_path);
         self.activate_context(context_id);
         self.overlay = Overlay::None;
         Ok(())
     }
 
-    fn insert_session_record(
+    fn insert_connection_record(
         &mut self,
-        target: SessionTarget,
-        status: SessionStatus,
-    ) -> SessionRecordId {
+        target: ServerLocation,
+        status: ConnectionStatus,
+    ) -> ConnectionRecordId {
         let base = match &target {
-            SessionTarget::Local => "Local".to_owned(),
-            SessionTarget::Remote { destination } => destination.clone(),
+            ServerLocation::Embedded => "Local".to_owned(),
+            ServerLocation::Ssh { destination, .. } => destination.clone(),
         };
         let count = self.label_counts.entry(base.clone()).or_default();
         *count += 1;
@@ -195,37 +194,42 @@ impl App {
         } else {
             format!("{base}#{count}")
         };
-        let id = SessionRecordId::new();
-        self.sessions.insert(
+        let id = ConnectionRecordId::new();
+        self.connections.insert(
             id,
-            SessionRecord {
+            ConnectionRecord {
                 id,
                 target,
                 label,
                 status,
-                session: None,
+                connection: None,
                 last_active_context_id: None,
             },
         );
-        self.session_order.push(id);
-        if self.selected_session_id.is_none() {
-            self.selected_session_id = Some(id);
+        self.connection_order.push(id);
+        if self.selected_connection_id.is_none() {
+            self.selected_connection_id = Some(id);
         }
         id
     }
 
     fn add_context(
         &mut self,
-        session_id: SessionRecordId,
-        session: Arc<Session>,
+        connection_id: ConnectionRecordId,
+        connection: ConnectionId,
         root_path: String,
     ) -> BrowserContextId {
-        let context = BrowserContext::new(session, root_path, self.events.clone());
+        let context = BrowserContext::new(
+            Arc::clone(&self.client),
+            connection,
+            root_path,
+            self.events.clone(),
+        );
         let id = context.id();
         self.contexts.insert(
             id,
             BrowserTab {
-                session_id,
+                connection_id,
                 context,
             },
         );
@@ -238,8 +242,8 @@ impl App {
             return;
         };
         self.active_context_id = Some(id);
-        if let Some(session) = self.sessions.get_mut(&tab.session_id) {
-            session.last_active_context_id = Some(id);
+        if let Some(connection) = self.connections.get_mut(&tab.connection_id) {
+            connection.last_active_context_id = Some(id);
         }
     }
 
@@ -259,23 +263,26 @@ impl App {
 
     fn apply_lifecycle_event(&mut self, event: LifecycleEvent) {
         match event {
-            LifecycleEvent::SessionReady { record_id, session } => {
+            LifecycleEvent::ConnectionReady {
+                record_id,
+                connection,
+            } => {
                 self.start_tasks.remove(&record_id);
-                let Some(record) = self.sessions.get_mut(&record_id) else {
+                let Some(record) = self.connections.get_mut(&record_id) else {
                     return;
                 };
-                if !matches!(record.status, SessionStatus::Starting) {
+                if !matches!(record.status, ConnectionStatus::Starting) {
                     return;
                 }
-                record.session = Some(session);
-                record.status = SessionStatus::Ready;
+                record.connection = Some(connection);
+                record.status = ConnectionStatus::Ready;
             }
-            LifecycleEvent::SessionFailed { record_id, error } => {
+            LifecycleEvent::ConnectionFailed { record_id, error } => {
                 self.start_tasks.remove(&record_id);
-                if let Some(record) = self.sessions.get_mut(&record_id)
-                    && matches!(record.status, SessionStatus::Starting)
+                if let Some(record) = self.connections.get_mut(&record_id)
+                    && matches!(record.status, ConnectionStatus::Starting)
                 {
-                    record.status = SessionStatus::Failed(error);
+                    record.status = ConnectionStatus::Failed(error);
                 }
             }
             LifecycleEvent::PathResolved {
@@ -287,7 +294,7 @@ impl App {
                 let current = matches!(
                     &self.overlay,
                     Overlay::NewBrowser(dialog)
-                        if dialog.session_id == record_id
+                        if dialog.connection_id == record_id
                             && dialog.request_id == Some(request_id)
                 );
                 if !current {
@@ -295,12 +302,12 @@ impl App {
                 }
                 match result {
                     Ok(path) => {
-                        let session = self
-                            .sessions
+                        let connection = self
+                            .connections
                             .get(&record_id)
-                            .and_then(|record| record.session.clone());
-                        if let Some(session) = session {
-                            let context_id = self.add_context(record_id, session, path);
+                            .and_then(|record| record.connection);
+                        if let Some(connection) = connection {
+                            let context_id = self.add_context(record_id, connection, path);
                             self.activate_context(context_id);
                             self.overlay = Overlay::None;
                         }
@@ -313,11 +320,11 @@ impl App {
                     }
                 }
             }
-            LifecycleEvent::SessionClosed { record_id, result } => {
+            LifecycleEvent::ConnectionClosed { record_id, result } => {
                 self.close_tasks.remove(&record_id);
-                self.remove_session_record(record_id);
+                self.remove_connection_record(record_id);
                 if let Err(error) = result {
-                    self.status_error = Some(format!("Error closing Session: {error}"));
+                    self.status_error = Some(format!("Error closing connection: {error}"));
                 }
             }
             LifecycleEvent::TransferCompleted {
@@ -352,7 +359,7 @@ impl App {
                     result.bytes_copied, result.destination_path
                 ));
                 if let Some(tab) = self.contexts.get_mut(&request.destination_context_id)
-                    && tab.session_id == request.destination_session_id
+                    && tab.connection_id == request.destination_connection_id
                     && tab.context.root_path() == request.destination_root
                 {
                     tab.context.refresh();
@@ -374,25 +381,25 @@ impl App {
     pub(crate) fn input_mode(&self) -> InputMode {
         match self.overlay {
             Overlay::None => InputMode::Main,
-            Overlay::SessionManager => InputMode::SessionManager,
+            Overlay::ConnectionManager => InputMode::ConnectionManager,
             Overlay::TargetChooser { .. } => InputMode::TargetChooser,
             Overlay::RemoteInput { .. } => InputMode::RemoteInput,
             Overlay::NewBrowser(_) => InputMode::NewBrowser,
-            Overlay::CloseConfirmation { .. } => InputMode::SessionCloseConfirmation,
+            Overlay::CloseConfirmation { .. } => InputMode::ConnectionCloseConfirmation,
             Overlay::TransferOverwriteConfirmation(_) => InputMode::TransferOverwriteConfirmation,
         }
     }
 
-    pub(crate) fn open_session_manager(&mut self) {
-        self.overlay = Overlay::SessionManager;
-        self.repair_session_selection();
+    pub(crate) fn open_connection_manager(&mut self) {
+        self.overlay = Overlay::ConnectionManager;
+        self.repair_connection_selection();
     }
 
     pub(crate) fn dismiss_overlay(&mut self) {
         self.overlay = Overlay::None;
     }
 
-    pub(crate) fn open_add_session(&mut self) {
+    pub(crate) fn open_add_connection(&mut self) {
         self.overlay = Overlay::TargetChooser {
             selected_ssh: false,
         };
@@ -413,32 +420,32 @@ impl App {
                 input: String::new(),
             };
         } else {
-            self.overlay = Overlay::SessionManager;
-            self.start_session(SessionTarget::Local);
+            self.overlay = Overlay::ConnectionManager;
+            self.start_connection(ServerLocation::Embedded);
         }
     }
 
-    fn start_session(&mut self, target: SessionTarget) {
-        let record_id = self.insert_session_record(target.clone(), SessionStatus::Starting);
+    fn start_connection(&mut self, target: ServerLocation) {
+        let record_id = self.insert_connection_record(target.clone(), ConnectionStatus::Starting);
         let client = Arc::clone(&self.client);
         let sender = self.lifecycle_sender.clone();
         self.start_tasks.insert(
             record_id,
             tokio::spawn(async move {
-                match client.start_session(target).await {
-                    Ok(session) => {
+                match client.open(target).await {
+                    Ok(connection) => {
                         if sender
-                            .send(LifecycleEvent::SessionReady {
+                            .send(LifecycleEvent::ConnectionReady {
                                 record_id,
-                                session: Arc::clone(&session),
+                                connection,
                             })
                             .is_err()
                         {
-                            let _ = client.close_session(&session.id()).await;
+                            let _ = client.close(&connection).await;
                         }
                     }
                     Err(error) => {
-                        let _ = sender.send(LifecycleEvent::SessionFailed {
+                        let _ = sender.send(LifecycleEvent::ConnectionFailed {
                             record_id,
                             error: error.to_string(),
                         });
@@ -476,8 +483,11 @@ impl App {
         match &self.overlay {
             Overlay::RemoteInput { input } if !input.trim().is_empty() => {
                 let destination = input.clone();
-                self.overlay = Overlay::SessionManager;
-                self.start_session(SessionTarget::Remote { destination });
+                self.overlay = Overlay::ConnectionManager;
+                self.start_connection(ServerLocation::Ssh {
+                    destination,
+                    force_install: false,
+                });
             }
             Overlay::NewBrowser(dialog)
                 if dialog.request_id.is_none() && !dialog.input.trim().is_empty() =>
@@ -498,13 +508,13 @@ impl App {
                 }
                 self.overlay = match dialog.return_mode {
                     ReturnMode::Main => Overlay::None,
-                    ReturnMode::SessionManager => Overlay::SessionManager,
+                    ReturnMode::ConnectionManager => Overlay::ConnectionManager,
                 };
             }
             Overlay::TargetChooser { .. } | Overlay::RemoteInput { .. } => {
-                self.overlay = Overlay::SessionManager;
+                self.overlay = Overlay::ConnectionManager;
             }
-            Overlay::CloseConfirmation { .. } => self.overlay = Overlay::SessionManager,
+            Overlay::CloseConfirmation { .. } => self.overlay = Overlay::ConnectionManager,
             _ => self.overlay = Overlay::None,
         }
     }
@@ -517,7 +527,7 @@ impl App {
             return;
         };
         self.overlay = Overlay::NewBrowser(NewBrowserDialog {
-            session_id: tab.session_id,
+            connection_id: tab.connection_id,
             input: tab.context.root_path().to_owned(),
             request_id: None,
             error: None,
@@ -525,19 +535,19 @@ impl App {
         });
     }
 
-    fn open_new_browser_for_session(
+    fn open_new_browser_for_connection(
         &mut self,
-        session_id: SessionRecordId,
+        connection_id: ConnectionRecordId,
         return_mode: ReturnMode,
     ) {
         let default_path = self
-            .sessions
-            .get(&session_id)
+            .connections
+            .get(&connection_id)
             .and_then(|record| record.last_active_context_id)
             .and_then(|id| self.contexts.get(&id))
             .map_or_else(|| "~".into(), |tab| tab.context.root_path().to_owned());
         self.overlay = Overlay::NewBrowser(NewBrowserDialog {
-            session_id,
+            connection_id,
             input: default_path,
             request_id: None,
             error: None,
@@ -545,16 +555,16 @@ impl App {
         });
     }
 
-    pub(crate) fn open_new_browser_for_selected_session(&mut self) {
-        let Some(session_id) = self.selected_session_id else {
+    pub(crate) fn open_new_browser_for_selected_connection(&mut self) {
+        let Some(connection_id) = self.selected_connection_id else {
             return;
         };
         if self
-            .sessions
-            .get(&session_id)
-            .is_some_and(|record| matches!(record.status, SessionStatus::Ready))
+            .connections
+            .get(&connection_id)
+            .is_some_and(|record| matches!(record.status, ConnectionStatus::Ready))
         {
-            self.open_new_browser_for_session(session_id, ReturnMode::SessionManager);
+            self.open_new_browser_for_connection(connection_id, ReturnMode::ConnectionManager);
         }
     }
 
@@ -562,25 +572,26 @@ impl App {
         let Overlay::NewBrowser(dialog) = &mut self.overlay else {
             return;
         };
-        let Some(session) = self
-            .sessions
-            .get(&dialog.session_id)
-            .and_then(|record| record.session.clone())
+        let Some(connection) = self
+            .connections
+            .get(&dialog.connection_id)
+            .and_then(|record| record.connection)
         else {
-            dialog.error = Some("Session is not ready".into());
+            dialog.error = Some("Connection is not ready".into());
             return;
         };
         let request_id = Uuid::new_v4();
         dialog.request_id = Some(request_id);
         dialog.error = None;
-        let record_id = dialog.session_id;
+        let record_id = dialog.connection_id;
         let path = dialog.input.clone();
+        let client = Arc::clone(&self.client);
         let sender = self.lifecycle_sender.clone();
         self.path_tasks.insert(
             request_id,
             tokio::spawn(async move {
-                let result = session
-                    .op_resolve_path(&path)
+                let result = client
+                    .op_resolve_path(&connection, &path)
                     .await
                     .map_err(|error| error.to_string());
                 let _ = sender.send(LifecycleEvent::PathResolved {
@@ -592,127 +603,127 @@ impl App {
         );
     }
 
-    pub(crate) fn move_session_selection(&mut self, down: bool) {
-        if self.session_order.is_empty() {
-            self.selected_session_id = None;
+    pub(crate) fn move_connection_selection(&mut self, down: bool) {
+        if self.connection_order.is_empty() {
+            self.selected_connection_id = None;
             return;
         }
         let index = self
-            .selected_session_id
+            .selected_connection_id
             .and_then(|id| {
-                self.session_order
+                self.connection_order
                     .iter()
                     .position(|candidate| *candidate == id)
             })
             .unwrap_or(0);
         let next = if down {
-            (index + 1).min(self.session_order.len() - 1)
+            (index + 1).min(self.connection_order.len() - 1)
         } else {
             index.saturating_sub(1)
         };
-        self.selected_session_id = Some(self.session_order[next]);
+        self.selected_connection_id = Some(self.connection_order[next]);
     }
 
-    pub(crate) fn activate_selected_session(&mut self) {
-        let Some(session_id) = self.selected_session_id else {
+    pub(crate) fn activate_selected_connection(&mut self) {
+        let Some(connection_id) = self.selected_connection_id else {
             return;
         };
-        let Some(record) = self.sessions.get(&session_id) else {
+        let Some(record) = self.connections.get(&connection_id) else {
             return;
         };
-        if !matches!(record.status, SessionStatus::Ready) {
+        if !matches!(record.status, ConnectionStatus::Ready) {
             return;
         }
         if let Some(context_id) = record.last_active_context_id {
             self.activate_context(context_id);
             self.overlay = Overlay::None;
         } else {
-            self.open_new_browser_for_session(session_id, ReturnMode::SessionManager);
+            self.open_new_browser_for_connection(connection_id, ReturnMode::ConnectionManager);
         }
     }
 
-    pub(crate) fn delete_selected_session(&mut self) {
-        let Some(session_id) = self.selected_session_id else {
+    pub(crate) fn delete_selected_connection(&mut self) {
+        let Some(connection_id) = self.selected_connection_id else {
             return;
         };
-        let Some(record) = self.sessions.get(&session_id) else {
+        let Some(record) = self.connections.get(&connection_id) else {
             return;
         };
         match record.status {
-            SessionStatus::Failed(_) if record.session.is_none() => {
-                self.remove_session_record(session_id);
+            ConnectionStatus::Failed(_) if record.connection.is_none() => {
+                self.remove_connection_record(connection_id);
             }
-            SessionStatus::Ready => {
-                self.overlay = Overlay::CloseConfirmation { session_id };
+            ConnectionStatus::Ready => {
+                self.overlay = Overlay::CloseConfirmation { connection_id };
             }
             _ => {}
         }
     }
 
-    pub(crate) fn confirm_session_close(&mut self) {
-        let Overlay::CloseConfirmation { session_id } = self.overlay else {
+    pub(crate) fn confirm_connection_close(&mut self) {
+        let Overlay::CloseConfirmation { connection_id } = self.overlay else {
             return;
         };
-        let session = {
-            let Some(record) = self.sessions.get_mut(&session_id) else {
-                self.overlay = Overlay::SessionManager;
+        let connection = {
+            let Some(record) = self.connections.get_mut(&connection_id) else {
+                self.overlay = Overlay::ConnectionManager;
                 return;
             };
-            record.status = SessionStatus::Closing;
-            record.session.take()
+            record.status = ConnectionStatus::Closing;
+            record.connection.take()
         };
-        self.remove_contexts_for_session(session_id);
-        self.clear_transfer_state_for_session(session_id);
-        self.overlay = Overlay::SessionManager;
-        let Some(session) = session else {
-            self.remove_session_record(session_id);
+        self.remove_contexts_for_connection(connection_id);
+        self.clear_transfer_state_for_connection(connection_id);
+        self.overlay = Overlay::ConnectionManager;
+        let Some(connection) = connection else {
+            self.remove_connection_record(connection_id);
             return;
         };
         let client = Arc::clone(&self.client);
         let sender = self.lifecycle_sender.clone();
-        let transfer = self.take_transfer_for_session(session_id);
+        let transfer = self.take_transfer_for_connection(connection_id);
         self.close_tasks.insert(
-            session_id,
+            connection_id,
             tokio::spawn(async move {
                 if let Some(task) = transfer {
                     task.handle.abort();
                     let _ = task.handle.await;
                 }
-                let result = client.close_session(&session.id()).await;
-                let _ = sender.send(LifecycleEvent::SessionClosed {
-                    record_id: session_id,
+                let result = client.close(&connection).await;
+                let _ = sender.send(LifecycleEvent::ConnectionClosed {
+                    record_id: connection_id,
                     result,
                 });
             }),
         );
     }
 
-    fn remove_session_record(&mut self, id: SessionRecordId) {
-        self.clear_transfer_state_for_session(id);
+    fn remove_connection_record(&mut self, id: ConnectionRecordId) {
+        self.clear_transfer_state_for_connection(id);
         let old_index = self
-            .session_order
+            .connection_order
             .iter()
             .position(|candidate| *candidate == id);
-        self.sessions.remove(&id);
-        self.session_order.retain(|candidate| *candidate != id);
-        if self.selected_session_id == Some(id) {
-            self.selected_session_id = old_index.and_then(|index| {
-                self.session_order
-                    .get(index.min(self.session_order.len().saturating_sub(1)))
+        self.connections.remove(&id);
+        self.connection_order.retain(|candidate| *candidate != id);
+        if self.selected_connection_id == Some(id) {
+            self.selected_connection_id = old_index.and_then(|index| {
+                self.connection_order
+                    .get(index.min(self.connection_order.len().saturating_sub(1)))
                     .copied()
             });
         }
-        self.repair_session_selection();
+        self.repair_connection_selection();
     }
 
-    fn repair_session_selection(&mut self) {
+    fn repair_connection_selection(&mut self) {
         if self
-            .selected_session_id
-            .is_some_and(|id| self.sessions.contains_key(&id))
+            .selected_connection_id
+            .is_some_and(|id| self.connections.contains_key(&id))
         {
             return;
         }
-        self.selected_session_id = self.session_order.first().copied();
+        self.selected_connection_id = self.connection_order.first().copied();
     }
 
     pub(crate) fn switch_context(&mut self, next: bool) {
@@ -755,7 +766,7 @@ impl App {
             return;
         };
         self.context_order.remove(index);
-        self.repair_last_active(tab.session_id);
+        self.repair_last_active(tab.connection_id);
         if self.active_context_id == Some(id) {
             self.active_context_id = self
                 .context_order
@@ -767,7 +778,7 @@ impl App {
         }
     }
 
-    fn remove_contexts_for_session(&mut self, session_id: SessionRecordId) {
+    fn remove_contexts_for_connection(&mut self, connection_id: ConnectionRecordId) {
         let ids: Vec<_> = self
             .context_order
             .iter()
@@ -775,7 +786,7 @@ impl App {
             .filter(|id| {
                 self.contexts
                     .get(id)
-                    .is_some_and(|tab| tab.session_id == session_id)
+                    .is_some_and(|tab| tab.connection_id == connection_id)
             })
             .collect();
         for id in ids {
@@ -783,13 +794,13 @@ impl App {
         }
     }
 
-    fn repair_last_active(&mut self, session_id: SessionRecordId) {
+    fn repair_last_active(&mut self, connection_id: ConnectionRecordId) {
         let replacement = self.context_order.iter().rev().copied().find(|id| {
             self.contexts
                 .get(id)
-                .is_some_and(|tab| tab.session_id == session_id)
+                .is_some_and(|tab| tab.connection_id == connection_id)
         });
-        if let Some(record) = self.sessions.get_mut(&session_id) {
+        if let Some(record) = self.connections.get_mut(&connection_id) {
             record.last_active_context_id = replacement;
         }
     }
@@ -809,13 +820,13 @@ impl App {
             self.status_message = Some("No active browser to copy from".into());
             return;
         };
-        let session_id = tab.session_id;
-        let Some(record) = self.sessions.get(&session_id) else {
-            self.status_message = Some("Source Session is unavailable".into());
+        let connection_id = tab.connection_id;
+        let Some(record) = self.connections.get(&connection_id) else {
+            self.status_message = Some("Source connection is unavailable".into());
             return;
         };
-        if !matches!(record.status, SessionStatus::Ready) || record.session.is_none() {
-            self.status_message = Some("Source Session is not ready".into());
+        if !matches!(record.status, ConnectionStatus::Ready) || record.connection.is_none() {
+            self.status_message = Some("Source connection is not ready".into());
             return;
         }
         let Some(selection) = tab.context.selected_entry() else {
@@ -836,7 +847,7 @@ impl App {
         }
         let label = record.label.clone();
         self.transfer_selection = Some(TransferSelection {
-            session_id,
+            connection_id,
             path: selection.path,
             name: selection.name.clone(),
         });
@@ -858,10 +869,10 @@ impl App {
             return;
         };
         let request = TransferRequest {
-            source_session_id: selection.session_id,
+            source_connection_id: selection.connection_id,
             source_path: selection.path,
             source_name: selection.name,
-            destination_session_id: tab.session_id,
+            destination_connection_id: tab.connection_id,
             destination_context_id: context_id,
             destination_root: tab.context.root_path().to_owned(),
         };
@@ -874,30 +885,32 @@ impl App {
             return;
         }
         let source = self
-            .sessions
-            .get(&request.source_session_id)
-            .filter(|record| matches!(record.status, SessionStatus::Ready))
-            .and_then(|record| record.session.clone());
+            .connections
+            .get(&request.source_connection_id)
+            .filter(|record| matches!(record.status, ConnectionStatus::Ready))
+            .and_then(|record| record.connection);
         let destination = self
-            .sessions
-            .get(&request.destination_session_id)
-            .filter(|record| matches!(record.status, SessionStatus::Ready))
-            .and_then(|record| record.session.clone());
+            .connections
+            .get(&request.destination_connection_id)
+            .filter(|record| matches!(record.status, ConnectionStatus::Ready))
+            .and_then(|record| record.connection);
         let (Some(source), Some(destination)) = (source, destination) else {
-            self.status_message = Some("Source or destination Session is not ready".into());
+            self.status_message = Some("Source or destination connection is not ready".into());
             return;
         };
         let transfer_id = Uuid::new_v4();
+        let client = Arc::clone(&self.client);
         let sender = self.lifecycle_sender.clone();
         let event_request = request.clone();
         let source_path = request.source_path.clone();
         let destination_root = request.destination_root.clone();
         let source_name = request.source_name.clone();
         let handle = tokio::spawn(async move {
-            let result = destination
-                .op_copy_file_from(
+            let result = client
+                .op_copy_file(
                     &source,
                     &source_path,
+                    &destination,
                     &destination_root,
                     &source_name,
                     conflict,
@@ -928,30 +941,33 @@ impl App {
         self.start_transfer(request, CopyConflict::Replace);
     }
 
-    fn clear_transfer_state_for_session(&mut self, session_id: SessionRecordId) {
+    fn clear_transfer_state_for_connection(&mut self, connection_id: ConnectionRecordId) {
         if self
             .transfer_selection
             .as_ref()
-            .is_some_and(|selection| selection.session_id == session_id)
+            .is_some_and(|selection| selection.connection_id == connection_id)
         {
             self.transfer_selection = None;
         }
         if matches!(
             &self.overlay,
             Overlay::TransferOverwriteConfirmation(request)
-                if request.source_session_id == session_id
-                    || request.destination_session_id == session_id
+                if request.source_connection_id == connection_id
+                    || request.destination_connection_id == connection_id
         ) {
             self.overlay = Overlay::None;
         }
     }
 
-    fn take_transfer_for_session(&mut self, session_id: SessionRecordId) -> Option<TransferTask> {
-        let uses_session = self.transfer_task.as_ref().is_some_and(|task| {
-            task.request.source_session_id == session_id
-                || task.request.destination_session_id == session_id
+    fn take_transfer_for_connection(
+        &mut self,
+        connection_id: ConnectionRecordId,
+    ) -> Option<TransferTask> {
+        let uses_connection = self.transfer_task.as_ref().is_some_and(|task| {
+            task.request.source_connection_id == connection_id
+                || task.request.destination_connection_id == connection_id
         });
-        uses_session.then(|| self.transfer_task.take()).flatten()
+        uses_connection.then(|| self.transfer_task.take()).flatten()
     }
 
     pub(crate) fn move_active_selection(&mut self, down: bool) {
@@ -996,7 +1012,7 @@ impl App {
             .map(|tab| &mut tab.context)
     }
 
-    pub(crate) async fn shutdown(&mut self) -> Result<(), SessionShutdownError> {
+    pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
         if let Some(task) = self.transfer_task.take() {
             task.handle.abort();
             let _ = task.handle.await;
@@ -1036,28 +1052,30 @@ impl App {
 mod tests {
     use std::time::Duration;
 
-    use crate::SessionTarget;
+    use crate::ServerLocation;
 
-    use super::{App, InputMode, SessionStatus};
+    use super::{App, ConnectionStatus, InputMode};
     use crate::tui::browser_context::ListingStatus;
 
     #[test]
     fn duplicate_labels_are_stable_and_ordered() {
         let mut app = App::new();
-        let first = app.insert_session_record(SessionTarget::Local, SessionStatus::Starting);
-        let second = app.insert_session_record(SessionTarget::Local, SessionStatus::Starting);
-        assert_eq!(app.sessions[&first].label, "Local");
-        assert_eq!(app.sessions[&second].label, "Local#2");
-        app.remove_session_record(first);
-        assert_eq!(app.sessions[&second].label, "Local#2");
+        let first =
+            app.insert_connection_record(ServerLocation::Embedded, ConnectionStatus::Starting);
+        let second =
+            app.insert_connection_record(ServerLocation::Embedded, ConnectionStatus::Starting);
+        assert_eq!(app.connections[&first].label, "Local");
+        assert_eq!(app.connections[&second].label, "Local#2");
+        app.remove_connection_record(first);
+        assert_eq!(app.connections[&second].label, "Local#2");
     }
 
     #[tokio::test]
-    async fn starting_without_a_path_opens_session_manager() {
+    async fn starting_without_a_path_opens_connection_manager() {
         let mut app = App::new();
         app.start(None).await.unwrap();
-        assert_eq!(app.input_mode(), InputMode::SessionManager);
-        assert!(app.sessions.is_empty());
+        assert_eq!(app.input_mode(), InputMode::ConnectionManager);
+        assert!(app.connections.is_empty());
         assert!(app.contexts.is_empty());
     }
 
@@ -1073,12 +1091,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_wraps_and_closing_a_context_leaves_its_session() {
+    async fn switching_wraps_and_closing_a_context_leaves_its_connection() {
         let mut app = App::new();
         app.start(Some(".")).await.unwrap();
-        let session_id = app.session_order[0];
-        let session = app.sessions[&session_id].session.clone().unwrap();
-        let second = app.add_context(session_id, session, "/".into());
+        let connection_id = app.connection_order[0];
+        let connection = app.connections[&connection_id].connection.unwrap();
+        let second = app.add_context(connection_id, connection, "/".into());
         app.activate_context(second);
         let first = app.context_order[0];
         app.switch_context(true);
@@ -1087,12 +1105,12 @@ mod tests {
         assert_eq!(app.active_context_id, Some(second));
         app.close_active_context();
         assert_eq!(app.active_context_id, Some(first));
-        assert!(app.sessions.contains_key(&session_id));
+        assert!(app.connections.contains_key(&connection_id));
         app.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn shutdown_without_a_session_is_harmless() {
+    async fn shutdown_without_a_connection_is_harmless() {
         App::new().shutdown().await.unwrap();
     }
 
@@ -1130,11 +1148,11 @@ mod tests {
             Some("payload.txt")
         );
         let source_context_id = app.active_context_id.unwrap();
-        let session_id = app.contexts[&source_context_id].session_id;
-        let session = app.sessions[&session_id].session.clone().unwrap();
+        let connection_id = app.contexts[&source_context_id].connection_id;
+        let connection = app.connections[&connection_id].connection.unwrap();
         let destination_context_id = app.add_context(
-            session_id,
-            session,
+            connection_id,
+            connection,
             destination_dir.path().to_str().unwrap().into(),
         );
         app.activate_context(destination_context_id);
