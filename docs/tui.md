@@ -57,9 +57,27 @@ aborts the task and late events are ignored.
 Browser listing events remain on a bounded channel to preserve
 filesystem/network backpressure. Connection lifecycle events use a separate
 unbounded channel because they are low-volume and must not strand an opened
-connection while waiting to report its ID. App pumps a bounded number of
-browser events and all available lifecycle events once per 50 ms terminal-loop
-iteration.
+connection while waiting to report its ID.
+
+The terminal loop draws and then waits, with no fixed-interval poll: it selects
+over the terminal event channel and both event channels, so an idle browser costs
+no redraws and an arriving listing waits on no timer. The first event to arrive
+wakes the loop, which then keeps collecting for one frame budget before drawing,
+so a listing costs one redraw per frame rather than one per entry. Each wake
+applies every queued event rather than a fixed count per iteration; metering
+events out per iteration used to make a listing fill in a chunk at a time,
+capping the UI far below what the server streams. The listing channel bound is
+correspondingly deep enough for a listing task to run a frame ahead of the
+renderer while still bounding a producer that outruns it.
+
+Terminal events arrive over their own channel, filled by a task that owns the
+Ratatui event stream. That stream registers a wake task on its first `Pending`
+and suppresses later registrations until it fires, so polling it from a `select!`
+arm that loses the race can strand a wake-up and freeze the UI; one task awaiting
+it to completion cannot. The channel is also what makes a burst coalescable: the
+loop applies the waking event and every one queued behind it before it redraws,
+because a held scroll key delivers presses faster than a frame draws and drawing
+per press makes the screen chase the backlog after the key is up.
 
 ## Browser Contexts and tabs
 
@@ -83,6 +101,12 @@ sidebar. With no tabs, the shell explains `S: connections` and `q/Esc: quit`.
 
 Within a browser, `j`/`k` or arrows move selection, `Ctrl-D`/`Ctrl-U` scroll,
 `h`/`l` navigate, `o` expands or collapses a navigable row, and `R` refreshes.
+A Browser Context owns its own scroll offset rather than leaving it to the list
+widget, and hands the renderer just the rows one frame shows, with the selection
+placed relative to them. That is what keeps a keystroke costing what is on screen
+rather than what the tree holds: the renderer builds one list item per row it is
+given, so building them for every row made scrolling in a large directory cost
+time proportional to its size.
 Activating a non-navigable row does nothing. Expansion, navigation, streaming,
 and stale-event rejection are owned by `browser_context.rs`.
 

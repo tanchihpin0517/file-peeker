@@ -1,7 +1,7 @@
 mod connection;
 mod view;
 
-use std::{collections::HashMap, error::Error, io, sync::Arc};
+use std::{collections::HashMap, error::Error, io, sync::Arc, time::Duration};
 
 use crate::{Client, ConnectionId, CopyConflict, CopyResult, EntryKind, ServerLocation};
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -247,17 +247,42 @@ impl App {
         }
     }
 
-    pub(crate) fn pump_events(&mut self, limit: usize) {
-        for _ in 0..limit {
-            let Ok(event) = self.event_receiver.try_recv() else {
-                break;
-            };
-            if let Some(tab) = self.contexts.get_mut(&event.context_id()) {
-                tab.context.apply(event);
-            }
+    /// Applies every event already queued, without waiting for more.
+    pub(crate) fn pump_events(&mut self) {
+        while let Ok(event) = self.event_receiver.try_recv() {
+            self.apply_browser_event(event);
         }
         while let Ok(event) = self.lifecycle_receiver.try_recv() {
             self.apply_lifecycle_event(event);
+        }
+    }
+
+    /// Waits for the next event, then keeps collecting for `budget` before
+    /// returning, so one redraw covers a frame's worth of a streaming listing
+    /// instead of one redraw per entry.
+    ///
+    /// Cancel safe: an event this returns early from is applied, and any event
+    /// still queued stays queued for the next call.
+    pub(crate) async fn next_events(&mut self, budget: Duration) {
+        tokio::select! {
+            event = self.event_receiver.recv() => {
+                if let Some(event) = event {
+                    self.apply_browser_event(event);
+                }
+            }
+            event = self.lifecycle_receiver.recv() => {
+                if let Some(event) = event {
+                    self.apply_lifecycle_event(event);
+                }
+            }
+        }
+        tokio::time::sleep(budget).await;
+        self.pump_events();
+    }
+
+    fn apply_browser_event(&mut self, event: BrowserContextEvent) {
+        if let Some(tab) = self.contexts.get_mut(&event.context_id()) {
+            tab.context.apply(event);
         }
     }
 
@@ -1000,7 +1025,7 @@ impl App {
         }
     }
 
-    fn active_context(&self) -> Option<&BrowserContext> {
+    pub(crate) fn active_context(&self) -> Option<&BrowserContext> {
         self.active_context_id
             .and_then(|id| self.contexts.get(&id))
             .map(|tab| &tab.context)
@@ -1127,7 +1152,7 @@ mod tests {
             .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                app.pump_events(super::EVENT_CHANNEL_CAPACITY);
+                app.pump_events();
                 if app
                     .active_context()
                     .is_some_and(|context| context.status() == &ListingStatus::Complete)
@@ -1177,10 +1202,48 @@ mod tests {
         app.shutdown().await.unwrap();
     }
 
+    /// A directory the server streams faster than a frame must land in a couple
+    /// of redraws, not one per handful of entries. With events metered out at a
+    /// fixed count per loop iteration this needed `entries / limit` wakes, which
+    /// is what made a listing visibly fill in a chunk at a time.
+    #[tokio::test]
+    async fn a_whole_directory_lands_within_a_few_redraws() {
+        const ENTRIES: usize = 500;
+
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..ENTRIES {
+            tokio::fs::write(directory.path().join(format!("entry-{index}")), b"")
+                .await
+                .unwrap();
+        }
+        let mut app = App::new();
+        app.start(Some(directory.path().to_str().unwrap()))
+            .await
+            .unwrap();
+
+        let mut wakes = 0_usize;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while app
+                .active_context()
+                .is_some_and(|context| context.status() != &ListingStatus::Complete)
+            {
+                app.next_events(super::super::FRAME_BUDGET).await;
+                wakes += 1;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(app.active_context().unwrap().rows().len(), ENTRIES);
+        assert!(wakes <= 4, "{ENTRIES} entries took {wakes} redraws to land");
+
+        app.shutdown().await.unwrap();
+    }
+
     async fn wait_for_transfer(app: &mut App) {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                app.pump_events(super::EVENT_CHANNEL_CAPACITY);
+                app.pump_events();
                 if app.transfer_task.is_none() {
                     break;
                 }
@@ -1189,6 +1252,6 @@ mod tests {
         })
         .await
         .unwrap();
-        app.pump_events(super::EVENT_CHANNEL_CAPACITY);
+        app.pump_events();
     }
 }

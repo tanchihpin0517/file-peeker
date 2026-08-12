@@ -4,15 +4,30 @@
 use std::{error::Error, io, time::Duration};
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::StreamExt as _;
 use ratatui::DefaultTerminal;
+use tokio::{sync::mpsc, task::JoinHandle};
 
 mod app;
 mod browser_context;
 
 use self::app::{App, InputMode};
 
-const EVENT_CHANNEL_CAPACITY: usize = 8;
+/// Browser listing events stay on a bounded channel to preserve
+/// filesystem/network backpressure, but the bound is deep enough for a listing
+/// task to run a frame ahead of the renderer. A directory the server can stream
+/// faster than the terminal repaints then arrives in one redraw instead of being
+/// metered out over many.
+const EVENT_CHANNEL_CAPACITY: usize = 4096;
+
+/// How long the loop keeps collecting events after the first one wakes it, so a
+/// streaming listing costs one redraw per frame rather than one per entry.
+const FRAME_BUDGET: Duration = Duration::from_millis(16);
+
+/// Deep enough to hold the auto-repeat burst of a held scroll key, so the loop
+/// applies the whole burst before it redraws.
+const TERMINAL_EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug, Eq, Parser, PartialEq)]
 #[command(
@@ -50,60 +65,140 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             return Err(error.into());
         }
     };
-    let run_result = event_loop(&mut terminal, &mut app);
+    let run_result = event_loop(&mut terminal, &mut app).await;
     ratatui::restore();
     let shutdown_result = app.shutdown().await;
     run_result?;
     shutdown_result.map_err(Into::into)
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
-    loop {
-        app.pump_events(EVENT_CHANNEL_CAPACITY);
-        terminal.draw(|frame| app.render(frame))?;
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match key_action(key.code, key.modifiers, app.input_mode()) {
-                KeyAction::Quit => return Ok(()),
-                KeyAction::Refresh => app.refresh_active_context(),
-                KeyAction::MoveDown => app.move_active_selection(true),
-                KeyAction::MoveUp => app.move_active_selection(false),
-                KeyAction::HalfPageDown => app.scroll_active_half_page(true),
-                KeyAction::HalfPageUp => app.scroll_active_half_page(false),
-                KeyAction::LeaveDirectory => app.leave_active_directory(),
-                KeyAction::EnterSelection => app.enter_active_selection(),
-                KeyAction::ActivateSelection => app.activate_active_selection(),
-                KeyAction::PreviousContext => app.switch_context(false),
-                KeyAction::NextContext => app.switch_context(true),
-                KeyAction::NewBrowser => app.open_new_browser_for_active(),
-                KeyAction::CloseContext => app.close_active_context(),
-                KeyAction::OpenConnections => app.open_connection_manager(),
-                KeyAction::DismissOverlay => app.dismiss_overlay(),
-                KeyAction::MoveConnectionDown => app.move_connection_selection(true),
-                KeyAction::MoveConnectionUp => app.move_connection_selection(false),
-                KeyAction::ActivateConnection => app.activate_selected_connection(),
-                KeyAction::NewBrowserForConnection => {
-                    app.open_new_browser_for_selected_connection();
-                }
-                KeyAction::AddConnection => app.open_add_connection(),
-                KeyAction::DeleteConnection => app.delete_selected_connection(),
-                KeyAction::MoveTargetDown => app.move_target_selection(true),
-                KeyAction::MoveTargetUp => app.move_target_selection(false),
-                KeyAction::SubmitTarget => app.submit_target_choice(),
-                KeyAction::SubmitText => app.submit_text_input(),
-                KeyAction::Backspace => app.input_backspace(),
-                KeyAction::Input(character) => app.input_character(character),
-                KeyAction::CancelDialog => app.cancel_dialog(),
-                KeyAction::ConfirmConnectionClose => app.confirm_connection_close(),
-                KeyAction::Yank => app.yank_active_selection(),
-                KeyAction::Paste => app.paste_into_active_context(),
-                KeyAction::ConfirmTransferOverwrite => app.confirm_transfer_overwrite(),
-                KeyAction::Ignore => {}
+async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
+    let (mut terminal_events, reader) = spawn_terminal_reader();
+    let result = draw_loop(terminal, app, &mut terminal_events).await;
+    // Aborting drops the EventStream, which is what shuts down its reader thread.
+    reader.abort();
+    let _ = reader.await;
+    result
+}
+
+/// Reads terminal events in their own task, forwarding them over a channel.
+///
+/// One task owns the stream and only ever awaits it to completion, which is
+/// deliberate. [`EventStream`] registers a wake task on its first `Pending` and
+/// suppresses further registrations until that one fires, so polling it from a
+/// `select!` arm that loses the race -- or peeking at it with `now_or_never` --
+/// can strand the wake-up on a waker that is already gone and leave the UI
+/// frozen. A channel is something the loop can drain without that hazard.
+fn spawn_terminal_reader() -> (mpsc::Receiver<io::Result<Event>>, JoinHandle<()>) {
+    let (sender, receiver) = mpsc::channel(TERMINAL_EVENT_CAPACITY);
+    let reader = tokio::spawn(async move {
+        let mut events = EventStream::new();
+        while let Some(event) = events.next().await {
+            if sender.send(event).await.is_err() {
+                break;
             }
         }
+    });
+    (receiver, reader)
+}
+
+/// Draws, then sleeps until something actually happens: a terminal event, or a
+/// browser or lifecycle event. Nothing polls on a fixed interval, so an idle
+/// browser costs no redraws and an arriving listing waits on no timer.
+async fn draw_loop(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    terminal_events: &mut mpsc::Receiver<io::Result<Event>>,
+) -> io::Result<()> {
+    loop {
+        terminal.draw(|frame| app.render(frame))?;
+        let next_event = tokio::select! {
+            // Both branches are cancel safe: a dropped `recv` leaves the message
+            // it did not take queued for the next call.
+            terminal_event = terminal_events.recv() => terminal_event,
+            () = app.next_events(FRAME_BUDGET) => continue,
+        };
+        // The terminal event stream ends when stdin closes, which leaves no way
+        // to quit.
+        let Some(next_event) = next_event else {
+            return Ok(());
+        };
+        if apply_terminal_events(app, next_event, terminal_events)? == Flow::Quit {
+            return Ok(());
+        }
     }
+}
+
+/// Applies one terminal event and every one already queued behind it, so the
+/// caller redraws once for the batch.
+///
+/// A held scroll key can deliver a clump of presses between two frames. Drawing
+/// per press makes the screen chase the backlog for as long as the key is down,
+/// which reads as scrolling that lags the finger and overshoots on release.
+fn apply_terminal_events(
+    app: &mut App,
+    first: io::Result<Event>,
+    terminal_events: &mut mpsc::Receiver<io::Result<Event>>,
+) -> io::Result<Flow> {
+    let mut pending = Some(first);
+    while let Some(terminal_event) = pending {
+        if let Event::Key(key) = terminal_event?
+            && key.kind == KeyEventKind::Press
+            && apply_key(app, key) == Flow::Quit
+        {
+            return Ok(Flow::Quit);
+        }
+        pending = terminal_events.try_recv().ok();
+    }
+    Ok(Flow::Continue)
+}
+
+/// Applies one key press, reporting whether the loop should keep running.
+fn apply_key(app: &mut App, key: KeyEvent) -> Flow {
+    match key_action(key.code, key.modifiers, app.input_mode()) {
+        KeyAction::Quit => return Flow::Quit,
+        KeyAction::Refresh => app.refresh_active_context(),
+        KeyAction::MoveDown => app.move_active_selection(true),
+        KeyAction::MoveUp => app.move_active_selection(false),
+        KeyAction::HalfPageDown => app.scroll_active_half_page(true),
+        KeyAction::HalfPageUp => app.scroll_active_half_page(false),
+        KeyAction::LeaveDirectory => app.leave_active_directory(),
+        KeyAction::EnterSelection => app.enter_active_selection(),
+        KeyAction::ActivateSelection => app.activate_active_selection(),
+        KeyAction::PreviousContext => app.switch_context(false),
+        KeyAction::NextContext => app.switch_context(true),
+        KeyAction::NewBrowser => app.open_new_browser_for_active(),
+        KeyAction::CloseContext => app.close_active_context(),
+        KeyAction::OpenConnections => app.open_connection_manager(),
+        KeyAction::DismissOverlay => app.dismiss_overlay(),
+        KeyAction::MoveConnectionDown => app.move_connection_selection(true),
+        KeyAction::MoveConnectionUp => app.move_connection_selection(false),
+        KeyAction::ActivateConnection => app.activate_selected_connection(),
+        KeyAction::NewBrowserForConnection => {
+            app.open_new_browser_for_selected_connection();
+        }
+        KeyAction::AddConnection => app.open_add_connection(),
+        KeyAction::DeleteConnection => app.delete_selected_connection(),
+        KeyAction::MoveTargetDown => app.move_target_selection(true),
+        KeyAction::MoveTargetUp => app.move_target_selection(false),
+        KeyAction::SubmitTarget => app.submit_target_choice(),
+        KeyAction::SubmitText => app.submit_text_input(),
+        KeyAction::Backspace => app.input_backspace(),
+        KeyAction::Input(character) => app.input_character(character),
+        KeyAction::CancelDialog => app.cancel_dialog(),
+        KeyAction::ConfirmConnectionClose => app.confirm_connection_close(),
+        KeyAction::Yank => app.yank_active_selection(),
+        KeyAction::Paste => app.paste_into_active_context(),
+        KeyAction::ConfirmTransferOverwrite => app.confirm_transfer_overwrite(),
+        KeyAction::Ignore => {}
+    }
+    Flow::Continue
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flow {
+    Continue,
+    Quit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,9 +325,79 @@ fn key_action(code: KeyCode, modifiers: KeyModifiers, mode: InputMode) -> KeyAct
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use tokio::sync::mpsc;
 
-    use super::{Cli, InputMode, KeyAction, key_action};
+    use super::{
+        App, Cli, FRAME_BUDGET, Flow, InputMode, KeyAction, TERMINAL_EVENT_CAPACITY,
+        apply_terminal_events, key_action,
+    };
+    use crate::tui::browser_context::ListingStatus;
+
+    /// One draw covers one call to [`apply_terminal_events`], so a burst that
+    /// arrives between two frames has to be applied in a single call. Applying one
+    /// press per draw makes the screen chase the backlog for as long as the key is
+    /// down, which reads as scrolling that lags and then overshoots.
+    #[tokio::test]
+    async fn a_burst_of_scroll_keys_is_applied_before_the_next_draw() {
+        const PRESSES: usize = 60;
+
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..200 {
+            tokio::fs::write(directory.path().join(format!("entry-{index:03}")), b"")
+                .await
+                .unwrap();
+        }
+        let mut app = App::new();
+        app.start(Some(directory.path().to_str().unwrap()))
+            .await
+            .unwrap();
+        while app
+            .active_context()
+            .is_some_and(|context| context.status() != &ListingStatus::Complete)
+        {
+            app.next_events(FRAME_BUDGET).await;
+        }
+
+        let (sender, mut terminal_events) = mpsc::channel(TERMINAL_EVENT_CAPACITY);
+        for _ in 0..PRESSES {
+            sender.send(Ok(press(KeyCode::Char('j')))).await.unwrap();
+        }
+
+        let first = terminal_events.recv().await.unwrap();
+        let flow = apply_terminal_events(&mut app, first, &mut terminal_events).unwrap();
+
+        assert_eq!(flow, Flow::Continue);
+        assert_eq!(
+            app.active_context().unwrap().effective_selection(),
+            Some(PRESSES),
+            "one call should apply every press already queued"
+        );
+        assert!(
+            terminal_events.try_recv().is_err(),
+            "the burst should be drained, leaving nothing for the next frame"
+        );
+
+        // Quitting mid-burst reports back rather than applying the rest.
+        sender.send(Ok(press(KeyCode::Char('q')))).await.unwrap();
+        sender.send(Ok(press(KeyCode::Char('j')))).await.unwrap();
+        let first = terminal_events.recv().await.unwrap();
+        assert_eq!(
+            apply_terminal_events(&mut app, first, &mut terminal_events).unwrap(),
+            Flow::Quit
+        );
+        assert_eq!(
+            app.active_context().unwrap().effective_selection(),
+            Some(PRESSES),
+            "the press behind the quit should not have moved the selection"
+        );
+
+        app.shutdown().await.unwrap();
+    }
+
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
 
     #[test]
     fn parses_an_optional_startup_path() {

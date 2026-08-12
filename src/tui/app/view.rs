@@ -38,17 +38,21 @@ impl App {
         self.render_tabs(frame, tabs);
 
         if self.active_context().is_some() {
+            let block = file_list_block();
+            let height = usize::from(block.inner(body).height);
             let context = self
                 .active_context_mut()
                 .expect("active context was checked before rendering");
-            let (viewport_offset, viewport_height) = render_file_list(
+            // Only the visible rows become list items, so the frame costs what is
+            // on screen rather than what the tree holds.
+            let viewport = context.viewport(height);
+            render_file_list(
                 frame,
                 body,
-                context.rows().iter().map(row_list_item),
-                context.effective_selection(),
-                context.viewport_offset(),
+                block,
+                viewport.rows.iter().map(row_list_item),
+                viewport.selected,
             );
-            context.set_viewport(viewport_offset, viewport_height);
         } else {
             frame.render_widget(
                 Paragraph::new("No browser contexts\n\nS: connections  q/Esc: quit")
@@ -336,28 +340,32 @@ fn tab_label(connection_label: &str, tab: &BrowserTab) -> String {
     format!("{connection_label}:{compact}")
 }
 
+fn file_list_block() -> Block<'static> {
+    Block::default().title(" Files ").borders(Borders::ALL)
+}
+
+/// Renders exactly the rows it is given, at offset zero.
+///
+/// Scrolling lives in [`BrowserContext::viewport`](crate::tui::browser_context::BrowserContext::viewport)
+/// rather than in `ListState`: the widget cannot scroll a window it can only see
+/// one screenful of, and computing the offset there is what lets the caller pass
+/// a window at all.
 fn render_file_list<'a>(
     frame: &mut Frame<'_>,
     area: Rect,
+    block: Block<'static>,
     entries: impl IntoIterator<Item = ListItem<'a>>,
     selected: Option<usize>,
-    viewport_offset: usize,
-) -> (usize, usize) {
-    let block = Block::default().title(" Files ").borders(Borders::ALL);
-    let viewport_height = usize::from(block.inner(area).height);
-    let mut state = ListState::default()
-        .with_offset(viewport_offset)
-        .with_selected(selected);
+) {
+    let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
         List::new(entries)
             .block(block)
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("> ")
-            .scroll_padding(1),
+            .highlight_symbol("> "),
         area,
         &mut state,
     );
-    (state.offset(), viewport_height)
 }
 
 fn row_list_item(row: &BrowserRow) -> ListItem<'static> {

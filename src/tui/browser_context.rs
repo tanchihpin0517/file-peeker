@@ -5,6 +5,10 @@ use futures::TryStreamExt as _;
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
+/// Rows of context kept past the selection when the viewport scrolls to follow
+/// it.
+const SCROLL_PADDING: usize = 1;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct BrowserContextId(Uuid);
 
@@ -46,6 +50,13 @@ pub(crate) struct BrowserRow {
     depth: usize,
     entry: DirectoryEntry,
     expansion: ExpansionStatus,
+}
+
+/// The rows one frame displays, and where the selection sits inside them.
+#[derive(Debug)]
+pub(crate) struct Viewport<'a> {
+    pub(crate) rows: &'a [BrowserRow],
+    pub(crate) selected: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -184,13 +195,54 @@ impl BrowserContext {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn viewport_offset(&self) -> usize {
         self.viewport_offset
     }
 
+    #[cfg(test)]
     pub(crate) fn set_viewport(&mut self, offset: usize, height: usize) {
         self.viewport_offset = offset;
         self.viewport_height = height;
+    }
+
+    /// Fits the viewport to `height` rows and returns the visible slice, with the
+    /// selection expressed relative to that slice.
+    ///
+    /// The renderer calls this once per frame, because the height is only known
+    /// at render time and the offset this settles on is what the next half-page
+    /// scroll moves from. Handing back a window rather than the whole tree is
+    /// what keeps a frame's cost proportional to what is on screen: the renderer
+    /// builds one list item per row it is given, so a scroll through a directory
+    /// of any size costs the same as a scroll through a small one.
+    pub(crate) fn viewport(&mut self, height: usize) -> Viewport<'_> {
+        self.viewport_height = height;
+        let Some(selected) = self.effective_selection().filter(|_| height > 0) else {
+            return Viewport {
+                rows: &[],
+                selected: None,
+            };
+        };
+
+        // Keep a row of context past the selection wherever the list allows it,
+        // so moving off the edge of the viewport scrolls before it has to.
+        let padding = SCROLL_PADDING.min(height.saturating_sub(1) / 2);
+        let max_offset = self.rows.len().saturating_sub(height);
+        let mut offset = self
+            .viewport_offset
+            .min(max_offset)
+            .min(selected.saturating_sub(padding));
+        let bottom = (selected + padding).min(self.rows.len() - 1);
+        if bottom >= offset + height {
+            offset = bottom + 1 - height;
+        }
+        self.viewport_offset = offset;
+
+        let end = (offset + height).min(self.rows.len());
+        Viewport {
+            rows: &self.rows[offset..end],
+            selected: Some(selected - offset),
+        }
     }
 
     pub(crate) fn move_selection(&mut self, down: bool) {
@@ -672,6 +724,93 @@ mod tests {
         assert_eq!(context.entries(), [entry("one")]);
         assert_eq!(context.status(), &ListingStatus::Complete);
         assert_eq!(context.effective_selection(), Some(0));
+    }
+
+    /// A context whose listing has been fully applied.
+    async fn scrolled(entries: usize, source: &Arc<ScriptedClient>) -> BrowserContext {
+        let (mut context, mut receiver) = context(source, entries + 4);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+        context
+    }
+
+    /// The renderer builds one list item per row it is handed, so a frame must be
+    /// handed only the rows it can show. Handing over the whole tree is what made
+    /// a keystroke in a large directory cost time proportional to its size.
+    #[tokio::test]
+    async fn the_viewport_yields_only_visible_rows_and_follows_the_selection() {
+        let source = ScriptedClient::new([listing(
+            (0..12).map(|index| Ok(entry(&format!("item-{index}")))),
+        )])
+        .await;
+        let mut context = scrolled(12, &source).await;
+
+        let viewport = context.viewport(6);
+        assert_eq!(viewport.rows.len(), 6);
+        assert_eq!(viewport.selected, Some(0));
+        assert_eq!(viewport.rows[0].entry.name, "item-0");
+
+        // Moving inside the window does not scroll it.
+        for _ in 0..4 {
+            context.move_selection(true);
+        }
+        let viewport = context.viewport(6);
+        assert_eq!(viewport.selected, Some(4));
+        assert_eq!(context.viewport_offset(), 0);
+
+        // Reaching the edge scrolls, keeping a row of context past the selection.
+        context.move_selection(true);
+        let viewport = context.viewport(6);
+        assert_eq!(viewport.rows.len(), 6);
+        assert_eq!(viewport.rows[0].entry.name, "item-1");
+        assert_eq!(viewport.selected, Some(4));
+        assert_eq!(context.viewport_offset(), 1);
+
+        // The window stops at the end of the list instead of running past it.
+        while context.effective_selection() != Some(11) {
+            context.move_selection(true);
+        }
+        let viewport = context.viewport(6);
+        assert_eq!(viewport.rows.len(), 6);
+        assert_eq!(viewport.rows[5].entry.name, "item-11");
+        assert_eq!(viewport.selected, Some(5));
+        assert_eq!(context.viewport_offset(), 6);
+
+        // Moving back up scrolls the other way, again keeping a row of context.
+        for _ in 0..5 {
+            context.move_selection(false);
+        }
+        let viewport = context.viewport(6);
+        assert_eq!(viewport.rows[0].entry.name, "item-5");
+        assert_eq!(viewport.selected, Some(1));
+    }
+
+    #[tokio::test]
+    async fn the_viewport_handles_lists_shorter_than_the_frame_and_no_frame_at_all() {
+        let source = ScriptedClient::new([listing(
+            (0..3).map(|index| Ok(entry(&format!("item-{index}")))),
+        )])
+        .await;
+        let mut context = scrolled(3, &source).await;
+
+        // A short list fills what it can and no more.
+        let viewport = context.viewport(20);
+        assert_eq!(viewport.rows.len(), 3);
+        assert_eq!(viewport.selected, Some(0));
+
+        // A zero-height body has nothing to show and no selection to place.
+        let viewport = context.viewport(0);
+        assert!(viewport.rows.is_empty());
+        assert_eq!(viewport.selected, None);
+
+        // A single-row body still tracks the selection.
+        context.move_selection(true);
+        context.move_selection(true);
+        let viewport = context.viewport(1);
+        assert_eq!(viewport.rows.len(), 1);
+        assert_eq!(viewport.rows[0].entry.name, "item-2");
+        assert_eq!(viewport.selected, Some(0));
     }
 
     #[tokio::test]
