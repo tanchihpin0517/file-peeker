@@ -59,6 +59,20 @@ filesystem/network backpressure. Connection lifecycle events use a separate
 unbounded channel because they are low-volume and must not strand an opened
 connection while waiting to report its ID.
 
+A listing event carries a group of entries rather than a single entry, and a group
+is whatever the stream already had ready. Placing entries is what makes this
+matter: appending a group under a row means finding that row and making room after
+its existing children, both passes over the tree, so paying them per entry makes
+opening a directory cost time quadratic in its size -- a 16k-entry directory spent
+around 380ms of the loop placing rows, and a larger one proportionally more, which
+is what a stall while a preview loads is made of. Per group it is a pass per few
+hundred entries instead, and the same code carries every listing, so a root
+listing, an expansion, and anything later built on them all stay off that curve.
+Grouping by readiness rather than by count is what keeps it from costing latency:
+a server that trickles still delivers entry by entry, while a directory sitting in
+the page cache arrives in a handful of groups. The channel bound counts groups, so
+its bound in entries is that multiplied by the group size.
+
 The terminal loop draws and then waits, with no fixed-interval poll: it selects
 over the terminal event channel and both event channels, so an idle browser costs
 no redraws and an arriving listing waits on no timer. The first event to arrive

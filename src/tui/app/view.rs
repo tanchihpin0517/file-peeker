@@ -43,8 +43,10 @@ impl App {
             header,
         );
         self.render_tabs(frame, tabs);
-        self.render_filter_prompt(frame, prompt);
 
+        // The list is drawn before the prompt above it, because placing the window
+        // is also what counts the matches the prompt reports.
+        let mut matches = None;
         if self.active_context().is_some() {
             let block = file_list_block();
             let height = usize::from(block.inner(body).height);
@@ -54,6 +56,7 @@ impl App {
             // Only the visible rows become list items, so the frame costs what is
             // on screen rather than what the tree holds.
             let viewport = context.viewport(height);
+            matches = viewport.matches;
             render_file_list(
                 frame,
                 body,
@@ -70,6 +73,7 @@ impl App {
             );
         }
 
+        self.render_filter_prompt(frame, prompt, matches);
         frame.render_widget(Paragraph::new(self.footer_text()), footer);
         self.render_overlay(frame);
     }
@@ -77,8 +81,8 @@ impl App {
     /// Draws the filter query above the list, with what it matched beside it.
     ///
     /// `area` is empty unless a prompt is open, so this draws nothing the rest of
-    /// the time.
-    fn render_filter_prompt(&self, frame: &mut Frame<'_>, area: Rect) {
+    /// the time. `matches` comes from the viewport the list was drawn from.
+    fn render_filter_prompt(&self, frame: &mut Frame<'_>, area: Rect, matches: Option<usize>) {
         if area.height == 0 {
             return;
         }
@@ -95,7 +99,7 @@ impl App {
             .map_or_else(|| "/".to_owned(), |scope| format!("/{scope}/"));
         // What the last `/` refused to do outranks the count, since it is the answer
         // to the key just pressed.
-        let matches = context.filter_matches();
+        let matches = matches.filter(|_| context.filter_counts_matches());
         let warning = context.filter_warning();
         let summary = match (warning, matches) {
             (Some(warning), _) => format!("  {warning}"),

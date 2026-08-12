@@ -19,7 +19,11 @@ use self::app::{App, InputMode};
 /// task to run a frame ahead of the renderer. A directory the server can stream
 /// faster than the terminal repaints then arrives in one redraw instead of being
 /// metered out over many.
-const EVENT_CHANNEL_CAPACITY: usize = 4096;
+///
+/// A slot carries a group of entries rather than a single one, so this is a far
+/// larger number of entries than it looks: the bound in entries is this multiplied
+/// by the group size.
+const EVENT_CHANNEL_CAPACITY: usize = 64;
 
 /// How long the loop keeps collecting events after the first one wakes it, so a
 /// streaming listing costs one redraw per frame rather than one per entry.

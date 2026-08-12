@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt, path::Path, sync::Arc};
 
 use crate::{Client, ConnectionId, DirectoryEntry, EntryKind};
-use futures::TryStreamExt as _;
+use futures::StreamExt as _;
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
@@ -60,6 +60,9 @@ pub(crate) struct BrowserRow {
 pub(crate) struct Viewport<'a> {
     pub(crate) rows: Vec<&'a BrowserRow>,
     pub(crate) selected: Option<usize>,
+    /// How many rows the query matched, from the same pass that placed the window.
+    /// Asking separately would walk the whole tree a second time per frame.
+    pub(crate) matches: Option<usize>,
 }
 
 /// A live filter over the rows, the directory it has stepped into, and the
@@ -390,6 +393,7 @@ impl BrowserContext {
     pub(crate) fn viewport(&mut self, height: usize) -> Viewport<'_> {
         self.viewport_height = height;
         let visible = self.visible_rows();
+        let matches = visible.matches();
         let Some(selected) = self
             .effective_selection()
             .filter(|_| height > 0)
@@ -398,6 +402,7 @@ impl BrowserContext {
             return Viewport {
                 rows: Vec::new(),
                 selected: None,
+                matches,
             };
         };
 
@@ -422,6 +427,7 @@ impl BrowserContext {
                 .filter_map(|row| self.rows.get(row))
                 .collect(),
             selected: Some(selected - offset),
+            matches,
         }
     }
 
@@ -553,12 +559,19 @@ impl BrowserContext {
         self.filter.as_ref()?.warning
     }
 
-    /// How many rows the query matches. `None` when there is no query to report on,
-    /// including the empty one a `/` leaves behind.
-    pub(crate) fn filter_matches(&self) -> Option<usize> {
+    /// Whether the query is worth reporting a match count for. The empty one a `/`
+    /// leaves behind narrows to a whole directory, which the prompt already says.
+    pub(crate) fn filter_counts_matches(&self) -> bool {
         self.filter
             .as_ref()
-            .filter(|filter| !filter.query.is_empty())?;
+            .is_some_and(|filter| !filter.query.is_empty())
+    }
+
+    /// How many rows the query matches. The renderer takes this from the viewport it
+    /// already computed; asking here walks the tree again.
+    #[cfg(test)]
+    fn filter_matches(&self) -> Option<usize> {
+        self.filter_counts_matches().then_some(())?;
         self.visible_rows().matches()
     }
 
@@ -975,10 +988,12 @@ impl BrowserContext {
 
     fn apply_root_listing(&mut self, result: ListingResult) {
         match result {
-            ListingResult::Entry(entry) => {
-                let path = child_path(&self.root_path, &entry.name);
-                self.rows.push(BrowserRow::new(path, 0, entry));
-                if self.selected_index.is_none() {
+            ListingResult::Entries(entries) => {
+                self.rows.extend(entries.into_iter().map(|entry| {
+                    let path = child_path(&self.root_path, &entry.name);
+                    BrowserRow::new(path, 0, entry)
+                }));
+                if self.selected_index.is_none() && !self.rows.is_empty() {
                     self.selected_index = Some(0);
                 }
             }
@@ -1007,17 +1022,19 @@ impl BrowserContext {
             return;
         };
         match result {
-            ListingResult::Entry(entry) => {
+            ListingResult::Entries(entries) => {
                 let depth = self.rows[index].depth + 1;
-                let path = child_path(parent_path, &entry.name);
                 let insertion_index = self.subtree_end(index);
                 if let Some(selected_index) = self.selected_index
                     && insertion_index <= selected_index
                 {
-                    self.selected_index = Some(selected_index + 1);
+                    self.selected_index = Some(selected_index + entries.len());
                 }
-                self.rows
-                    .insert(insertion_index, BrowserRow::new(path, depth, entry));
+                let rows = entries.into_iter().map(|entry| {
+                    let path = child_path(parent_path, &entry.name);
+                    BrowserRow::new(path, depth, entry)
+                });
+                self.rows.splice(insertion_index..insertion_index, rows);
             }
             ListingResult::Finished => {
                 self.directory_listing_tasks.remove(&request_id);
@@ -1093,10 +1110,21 @@ enum ListingTarget {
 
 #[derive(Debug)]
 enum ListingResult {
-    Entry(DirectoryEntry),
+    Entries(Vec<DirectoryEntry>),
     Finished,
     Failed(String),
 }
+
+/// How many entries one listing event may carry.
+///
+/// Entries are coalesced into an event per group that is *already there* rather
+/// than per entry, which is what keeps placing them off the critical path: finding
+/// a parent row and making room for its children each cost a pass over the tree, so
+/// paying that per entry is quadratic in the size of the directory. A group is
+/// whatever the stream has ready, so a server that trickles still arrives entry by
+/// entry and a directory that is sitting in the page cache arrives in a handful of
+/// groups.
+const LISTING_GROUP: usize = 512;
 
 async fn run_listing(
     client: Arc<Client>,
@@ -1108,26 +1136,45 @@ async fn run_listing(
     events: mpsc::Sender<BrowserContextEvent>,
 ) {
     let result = match client.op_list_dir(&connection, &path).await {
-        Ok(mut listing) => loop {
-            match listing.try_next().await {
-                Ok(Some(entry)) => {
-                    if send_listing_result(
-                        &events,
-                        context_id,
-                        generation,
-                        target.clone(),
-                        ListingResult::Entry(entry),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return;
+        Ok(listing) => {
+            let mut groups = listing.ready_chunks(LISTING_GROUP);
+            loop {
+                match groups.next().await {
+                    Some(group) => {
+                        // A group ends at its first error, which is terminal for the
+                        // whole listing, so the entries ahead of it still land.
+                        let mut entries = Vec::with_capacity(group.len());
+                        let mut failure = None;
+                        for entry in group {
+                            match entry {
+                                Ok(entry) => entries.push(entry),
+                                Err(error) => {
+                                    failure = Some(error.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                        if !entries.is_empty()
+                            && send_listing_result(
+                                &events,
+                                context_id,
+                                generation,
+                                target.clone(),
+                                ListingResult::Entries(entries),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if let Some(error) = failure {
+                            break ListingResult::Failed(error);
+                        }
                     }
+                    None => break ListingResult::Finished,
                 }
-                Ok(None) => break ListingResult::Finished,
-                Err(error) => break ListingResult::Failed(error.to_string()),
             }
-        },
+        }
         Err(error) => ListingResult::Failed(error.to_string()),
     };
     let _ = send_listing_result(&events, context_id, generation, target, result).await;
@@ -1161,6 +1208,8 @@ fn child_path(parent: &str, name: &str) -> String {
 /// Substring rather than a fuzzy subsequence, because completion has to have
 /// something to complete to: a subsequence match shares no prefix with what was
 /// typed, so `Tab` would have nothing to agree on.
+///
+/// The needle arrives already lowercased.
 fn matches_needle(name: &str, needle: &str) -> bool {
     name.to_lowercase().contains(needle)
 }
@@ -1286,6 +1335,32 @@ mod tests {
         assert_eq!(context.entries(), [entry("one")]);
         assert_eq!(context.status(), &ListingStatus::Complete);
         assert_eq!(context.effective_selection(), Some(0));
+    }
+
+    /// Placing entries costs a pass over the tree -- finding the parent row, making
+    /// room for its children -- so paying that per entry is quadratic in the size of
+    /// the directory, which a large one feels as the loop stalling. Entries have to
+    /// reach the context in groups for that cost to be paid per group instead.
+    #[tokio::test]
+    async fn a_large_listing_arrives_in_groups_rather_than_one_entry_at_a_time() {
+        const ENTRIES: usize = 500;
+
+        let source = ScriptedClient::new([listing(
+            (0..ENTRIES).map(|index| Ok(entry(&format!("entry-{index:03}")))),
+        )])
+        .await;
+        let (mut context, mut receiver) = context(&source, ENTRIES + 4);
+        let mut events = 0;
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+            events += 1;
+        }
+
+        assert_eq!(context.rows().len(), ENTRIES);
+        assert!(
+            events <= ENTRIES / 8,
+            "{ENTRIES} entries arrived in {events} events"
+        );
     }
 
     /// A context whose listing has been fully applied.
@@ -1468,13 +1543,28 @@ mod tests {
 
         context.refresh();
         assert!(context.entries().is_empty());
-        assert_eq!(context.selected_index, Some(2));
-        apply_next(&mut context, &mut receiver).await;
-        assert_eq!(context.effective_selection(), Some(0));
-        apply_next(&mut context, &mut receiver).await;
-        assert_eq!(context.effective_selection(), Some(1));
-        apply_next(&mut context, &mut receiver).await;
-        assert_eq!(context.selected_index, Some(1));
+        assert_eq!(
+            context.selected_index,
+            Some(2),
+            "the index outlives the rows"
+        );
+
+        // How many entries share an event is up to what the stream had ready, so the
+        // invariant is checked per event rather than per row: the index may still
+        // point past what has arrived, but what is shown never does.
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+            assert!(
+                context
+                    .effective_selection()
+                    .is_none_or(|index| index < context.rows().len())
+            );
+        }
+        assert_eq!(
+            context.selected_index,
+            Some(1),
+            "finishing clamps it into the shorter listing"
+        );
     }
 
     #[tokio::test]
@@ -1578,13 +1668,18 @@ mod tests {
         })
         .await
         .expect("first bounded event timeout");
-        assert_eq!(receiver.len(), 1);
-        apply_next(&mut context, &mut receiver).await;
-        apply_next(&mut context, &mut receiver).await;
-        apply_next(&mut context, &mut receiver).await;
+        assert_eq!(
+            receiver.len(),
+            1,
+            "the listing task waits rather than running ahead of a full channel"
+        );
 
+        // Drained by condition, not by count: how many entries share an event is up
+        // to what the stream had ready.
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
         assert_eq!(context.entries(), [entry("one"), entry("two")]);
-        assert_eq!(context.status(), &ListingStatus::Complete);
     }
 
     #[tokio::test]
