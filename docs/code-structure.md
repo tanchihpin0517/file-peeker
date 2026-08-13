@@ -28,6 +28,7 @@ failure policy and resource lifetime.
 | `client/rpc` modules | One gRPC request/response adapter per Client operation | Public workflow policy |
 | `crate::server` | Listener and serving lifecycle, plus RPC validation, protobuf conversion, transport batching and delegation to `fs` | Client workflows and UI state |
 | `crate::tui` | Application state, input routing, rendering and task ownership | Filesystem and transport semantics |
+| `crate::gui` | The same, for the desktop front end: an egui/eframe workspace whose layout `egui_dock` owns, and a Tokio bridge that turns listings into per-frame updates | Filesystem and transport semantics; it holds no behavior the TUI does not also need |
 | `crate::cli` | A test-only command surface that drives `Client` workflows one at a time, and remote server provisioning over SSH | Behavior of its own; it composes existing workflows and prints results |
 | `test_support` | Scripted server fixtures | Production behavior; it is compiled under `cfg(test)` only |
 

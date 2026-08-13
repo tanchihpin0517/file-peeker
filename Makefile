@@ -11,6 +11,8 @@ fmt:
 
 lint:
 	cargo clippy --all-targets
+# The desktop front end is outside `default`, so it needs naming to be linted.
+	cargo clippy --features gui --all-targets
 
 # Targets whose `required-features` are unmet are silently skipped unless named
 # explicitly, so the slim build the remote installer uses needs its own check.
@@ -21,6 +23,7 @@ slim-server:
 
 test:
 	cargo test
+	cargo test --features gui gui::
 
 docs-check:
 	bash scripts/check-docs.sh

@@ -10,8 +10,10 @@
 //! `--no-default-features --features server`:
 //!
 //! - `client` (implied by `cli` and `tui`) adds `Client` and its connections.
-//! - `cli`, `server`, and `tui` each add one binary's logic, exposed as a single
-//!   `run` entry point that the matching `src/bin` shim calls.
+//! - `cli`, `server`, `tui`, and `gui` each add one binary's logic, exposed as a
+//!   single `run` entry point that the matching `src/bin` shim calls. `gui` is
+//!   the only one left out of `default`, because eframe brings a window system
+//!   and a GPU backend with it.
 
 #[cfg(feature = "client")]
 mod client;
@@ -22,6 +24,8 @@ mod test_support;
 
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "gui")]
+pub mod gui;
 #[cfg(feature = "server-core")]
 pub mod server;
 #[cfg(feature = "tui")]

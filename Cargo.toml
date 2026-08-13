@@ -22,6 +22,10 @@ default = ["cli", "server", "tui"]
 cli = ["client", "dep:tracing-subscriber"]
 server = ["server-core"]
 tui = ["client", "dep:crossterm", "dep:ratatui"]
+# The desktop front end. Left out of `default` because eframe pulls in a window
+# system, a GPU backend and their dependency trees; `make lint` still compiles it
+# so it cannot rot. Run it with `cargo run --features gui --bin file-peeker-gui`.
+gui = ["client", "dep:eframe", "dep:egui_dock", "dep:egui_extras"]
 # Internal: the Client layer the two front ends share. Enable it through `cli`
 # or `tui` rather than directly. It pulls in `server-core` because a local
 # connection runs its own server in-process.
@@ -43,6 +47,9 @@ async-trait = { version = "0.1.91", optional = true }
 bytes = "1.12.1"
 clap = { version = "4.6.2", features = ["derive"] }
 crossterm = { version = "0.29.0", features = ["event-stream"], optional = true }
+eframe = { version = "0.36.1", optional = true }
+egui_dock = { version = "0.21.1", optional = true }
+egui_extras = { version = "0.36.1", optional = true }
 getrandom = "0.3.3"
 futures = "0.3.33"
 hyper-util = { version = "0.1.17", features = ["tokio"], optional = true }
@@ -86,6 +93,11 @@ tempfile = "3.27.0"
 name = "file-peeker"
 path = "src/bin/file-peeker.rs"
 required-features = ["tui"]
+
+[[bin]]
+name = "file-peeker-gui"
+path = "src/bin/file-peeker-gui.rs"
+required-features = ["gui"]
 
 [[bin]]
 name = "file-peeker-client"
