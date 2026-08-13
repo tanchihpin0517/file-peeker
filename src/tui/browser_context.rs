@@ -214,6 +214,37 @@ fn start_of(rows: &[VisibleRow], row: usize) -> usize {
     rows.partition_point(|visible| visible.row < row)
 }
 
+/// One directory expansion still streaming: the task listing it, and where the
+/// next group of its children goes.
+#[derive(Debug)]
+struct DirectoryListing {
+    task: JoinHandle<()>,
+    placement: Placement,
+}
+
+/// Where a still-loading expansion's next group of children lands.
+///
+/// Children always land at the end of their own subtree, so the position is
+/// carried forward from group to group rather than searched for again.
+/// Recomputing it meant walking the children already placed, once per group,
+/// which is quadratic in the size of the directory -- the stall a large
+/// expansion showed while a change of directory of the same size did not, since
+/// a root listing only ever appends.
+///
+/// Row indices, so every insertion and removal elsewhere in the tree has to
+/// shift them. That is what [`BrowserContext::placements_after_insertion`] and
+/// [`BrowserContext::placements_after_removal`] are for, and they are the reason
+/// those are the only two places rows may move.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Placement {
+    /// The row being expanded.
+    parent: usize,
+    /// The depth its children sit at.
+    depth: usize,
+    /// The row index the next group is inserted at.
+    insertion: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SelectedEntry {
     pub(crate) path: String,
@@ -256,7 +287,7 @@ pub(crate) struct BrowserContext {
     viewport_height: usize,
     status: ListingStatus,
     root_listing_task: Option<JoinHandle<()>>,
-    directory_listing_tasks: HashMap<u64, JoinHandle<()>>,
+    directory_listings: HashMap<u64, DirectoryListing>,
     generation: u64,
     next_request_id: u64,
     client: Arc<Client>,
@@ -298,7 +329,7 @@ impl BrowserContext {
             viewport_height: 0,
             status: ListingStatus::Loading,
             root_listing_task: None,
-            directory_listing_tasks: HashMap::new(),
+            directory_listings: HashMap::new(),
             generation: 0,
             next_request_id: 0,
             client,
@@ -990,7 +1021,19 @@ impl BrowserContext {
         let task = tokio::spawn(run_listing(
             client, connection, path, context_id, generation, target, events,
         ));
-        self.directory_listing_tasks.insert(request_id, task);
+        self.directory_listings.insert(
+            request_id,
+            DirectoryListing {
+                task,
+                // A row is only expanded from collapsed, so it has no children
+                // yet and the first group goes directly beneath it.
+                placement: Placement {
+                    parent: index,
+                    depth: self.rows[index].depth + 1,
+                    insertion: index + 1,
+                },
+            },
+        );
     }
 
     fn collapse_directory(&mut self, index: usize) {
@@ -999,12 +1042,15 @@ impl BrowserContext {
             .iter()
             .filter_map(|row| row.expansion.request_id())
             .collect();
+        // Every expansion inside the subtree goes with it, which is what leaves
+        // the placements still standing all outside the removed rows.
         for request_id in request_ids {
-            if let Some(task) = self.directory_listing_tasks.remove(&request_id) {
-                task.abort();
+            if let Some(listing) = self.directory_listings.remove(&request_id) {
+                listing.task.abort();
             }
         }
         self.rows.drain(index + 1..end);
+        self.placements_after_removal(index + 1, end);
         self.rows[index].expansion = ExpansionStatus::Collapsed;
         self.selected_index = Some(index);
     }
@@ -1030,10 +1076,16 @@ impl BrowserContext {
     fn apply_root_listing(&mut self, result: ListingResult) {
         match result {
             ListingResult::Entries(entries) => {
+                let insertion_index = self.rows.len();
+                let count = entries.len();
                 self.rows.extend(entries.into_iter().map(|entry| {
                     let path = child_path(&self.root_path, &entry.name);
                     BrowserRow::new(path, 0, entry)
                 }));
+                // Root entries land past every expansion's subtree, so this
+                // moves nothing. It is called anyway, so that every insertion
+                // into the tree reports itself.
+                self.placements_after_insertion(insertion_index, count, 0);
                 if self.selected_index.is_none() && !self.rows.is_empty() {
                     self.selected_index = Some(0);
                 }
@@ -1057,35 +1109,89 @@ impl BrowserContext {
         request_id: u64,
         result: ListingResult,
     ) {
-        let Some(index) = self.rows.iter().position(|row| {
-            row.path == parent_path && row.expansion.request_id() == Some(request_id)
-        }) else {
+        // No placement means the expansion is no longer in flight: it was
+        // collapsed, or the tree it belonged to was replaced, and its task was
+        // aborted with an event already on the channel.
+        let Some(placement) = self
+            .directory_listings
+            .get(&request_id)
+            .map(|listing| listing.placement)
+        else {
             return;
         };
+        debug_assert_eq!(
+            self.rows.get(placement.parent).map(|row| row.path.as_str()),
+            Some(parent_path),
+            "a placement should follow the row it is expanding"
+        );
         match result {
             ListingResult::Entries(entries) => {
-                let depth = self.rows[index].depth + 1;
-                let insertion_index = self.subtree_end(index);
+                let count = entries.len();
+                let insertion_index = placement.insertion;
                 if let Some(selected_index) = self.selected_index
                     && insertion_index <= selected_index
                 {
-                    self.selected_index = Some(selected_index + entries.len());
+                    self.selected_index = Some(selected_index + count);
                 }
                 let rows = entries.into_iter().map(|entry| {
                     let path = child_path(parent_path, &entry.name);
-                    BrowserRow::new(path, depth, entry)
+                    BrowserRow::new(path, placement.depth, entry)
                 });
                 self.rows.splice(insertion_index..insertion_index, rows);
+                self.placements_after_insertion(insertion_index, count, placement.depth);
             }
             ListingResult::Finished => {
-                self.directory_listing_tasks.remove(&request_id);
-                self.rows[index].expansion = ExpansionStatus::Expanded { request_id };
+                self.directory_listings.remove(&request_id);
+                self.rows[placement.parent].expansion = ExpansionStatus::Expanded { request_id };
                 self.clamp_selection();
             }
             ListingResult::Failed(error) => {
-                self.directory_listing_tasks.remove(&request_id);
-                self.rows[index].expansion = ExpansionStatus::Failed { request_id, error };
+                self.directory_listings.remove(&request_id);
+                self.rows[placement.parent].expansion =
+                    ExpansionStatus::Failed { request_id, error };
                 self.clamp_selection();
+            }
+        }
+    }
+
+    /// Keeps every in-flight expansion pointing at the rows it was pointing at,
+    /// after `count` rows at depth `depth` land at `insertion_index`.
+    ///
+    /// Rows landing exactly where an expansion's next group goes are the one case
+    /// an index cannot settle on its own: they belong inside that subtree when
+    /// they are a descendant of it, and follow it when they are a sibling of its
+    /// children -- which a still-streaming parent listing inserts at the very
+    /// same index. Depth is what tells the two apart.
+    fn placements_after_insertion(&mut self, insertion_index: usize, count: usize, depth: usize) {
+        for listing in self.directory_listings.values_mut() {
+            let placement = &mut listing.placement;
+            if insertion_index <= placement.parent {
+                placement.parent += count;
+                placement.insertion += count;
+            } else if insertion_index < placement.insertion
+                || (insertion_index == placement.insertion && depth >= placement.depth)
+            {
+                placement.insertion += count;
+            }
+        }
+    }
+
+    /// Keeps every in-flight expansion pointing at the rows it was pointing at,
+    /// after the rows in `start..end` are removed. Expansions inside that range
+    /// are the caller's to drop first.
+    fn placements_after_removal(&mut self, start: usize, end: usize) {
+        let count = end - start;
+        for listing in self.directory_listings.values_mut() {
+            let placement = &mut listing.placement;
+            if placement.parent >= end {
+                placement.parent -= count;
+                placement.insertion -= count;
+            } else if placement.insertion >= end {
+                placement.insertion -= count;
+            } else if placement.insertion > start {
+                // The removed rows were inside this subtree, which now ends
+                // where they began.
+                placement.insertion = start;
             }
         }
     }
@@ -1094,8 +1200,8 @@ impl BrowserContext {
         if let Some(task) = self.root_listing_task.take() {
             task.abort();
         }
-        for (_, task) in self.directory_listing_tasks.drain() {
-            task.abort();
+        for (_, listing) in self.directory_listings.drain() {
+            listing.task.abort();
         }
     }
 
@@ -1159,9 +1265,9 @@ enum ListingResult {
 /// How many entries one listing event may carry.
 ///
 /// Entries are coalesced into an event per group that is *already there* rather
-/// than per entry, which is what keeps placing them off the critical path: finding
-/// a parent row and making room for its children each cost a pass over the tree, so
-/// paying that per entry is quadratic in the size of the directory. A group is
+/// than per entry, which is what keeps placing them off the critical path: making
+/// room for children ahead of the rows that follow them costs a move of everything
+/// after, so paying that per entry is quadratic in the size of the tree. A group is
 /// whatever the stream has ready, so a server that trickles still arrives entry by
 /// entry and a directory that is sitting in the page cache arrives in a handful of
 /// groups.
@@ -1274,7 +1380,9 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{BrowserContext, BrowserContextEvent, ExpansionStatus, ListingStatus};
+    use super::{
+        BrowserContext, BrowserContextEvent, ExpansionStatus, LISTING_GROUP, ListingStatus,
+    };
 
     /// A Client whose one connection replays scripted listings.
     ///
@@ -1787,7 +1895,7 @@ mod tests {
         apply_next(&mut context, &mut receiver).await;
         context.move_selection(true);
         context.activate_selected();
-        while !context.directory_listing_tasks.is_empty() {
+        while !context.directory_listings.is_empty() {
             apply_next(&mut context, &mut receiver).await;
         }
 
@@ -1805,6 +1913,205 @@ mod tests {
                 ("root.txt", 0),
             ]
         );
+    }
+
+    /// A listing long enough to arrive in more than one group, with a directory
+    /// as the last entry of the first group. Expanding that one puts its children
+    /// exactly where the group after it is about to land, which is the one place
+    /// an insertion cannot tell from a row index alone whether it belongs inside
+    /// the subtree or after it.
+    fn grouped_listing(prefix: &str, directory_at_group_end: bool) -> Listing {
+        let last = LISTING_GROUP - 1;
+        listing((0..LISTING_GROUP + 88).map(|index| {
+            Ok(if directory_at_group_end && index == last {
+                directory("nested")
+            } else {
+                entry(&format!("{prefix}-{index:03}"))
+            })
+        }))
+    }
+
+    /// Applies one event and reports that a whole group arrived, which the tests
+    /// below need in order to expand the row a group boundary falls on.
+    async fn apply_group(
+        context: &mut BrowserContext,
+        receiver: &mut mpsc::Receiver<BrowserContextEvent>,
+    ) {
+        let before = context.rows().len();
+        apply_next(context, receiver).await;
+        assert_eq!(
+            context.rows().len() - before,
+            LISTING_GROUP,
+            "a scripted listing should arrive a full group at a time"
+        );
+    }
+
+    /// The rest of a root listing lands after the subtree of a directory expanded
+    /// while it was still streaming, and leaves that subtree's own insertion point
+    /// alone -- both groups want the same row index, and only the deeper one owns
+    /// it.
+    #[tokio::test]
+    async fn a_root_group_lands_after_the_subtree_of_a_directory_expanded_mid_stream() {
+        let source = ScriptedClient::new([
+            grouped_listing("root", true),
+            listing([Ok(entry("child-0")), Ok(entry("child-1"))]),
+        ])
+        .await;
+        let (mut context, mut receiver) = context(&source, 16);
+        apply_group(&mut context, &mut receiver).await;
+
+        // The directory sits at the end of what has arrived, so its children are
+        // due at the same row as the root listing's next group.
+        context.selected_index = Some(LISTING_GROUP - 1);
+        context.activate_selected();
+        while !context.directory_listings.is_empty() || context.status() != &ListingStatus::Complete
+        {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        let rows: Vec<_> = context
+            .rows()
+            .iter()
+            .map(|row| (row.entry.name.as_str(), row.depth))
+            .collect();
+        assert_eq!(rows.len(), LISTING_GROUP + 88 + 2);
+        assert_eq!(
+            &rows[LISTING_GROUP - 1..LISTING_GROUP + 3],
+            [
+                ("nested", 0),
+                ("child-0", 1),
+                ("child-1", 1),
+                ("root-512", 0),
+            ]
+        );
+        assert_eq!(rows[rows.len() - 1], ("root-599", 0));
+    }
+
+    /// A nested expansion's children land under it rather than after everything
+    /// its parent has yet to stream, whichever of the two listings the events
+    /// arrive from first.
+    #[tokio::test]
+    async fn a_nested_expansions_children_land_ahead_of_its_parents_later_groups() {
+        let source = ScriptedClient::new([
+            listing([Ok(directory("outer"))]),
+            grouped_listing("outer", true),
+            listing([Ok(entry("inner-0")), Ok(entry("inner-1"))]),
+        ])
+        .await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.activate_selected();
+        apply_group(&mut context, &mut receiver).await;
+        context.selected_index = Some(LISTING_GROUP);
+        context.activate_selected();
+        while !context.directory_listings.is_empty() {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        let rows: Vec<_> = context
+            .rows()
+            .iter()
+            .map(|row| (row.entry.name.as_str(), row.depth))
+            .collect();
+        assert_eq!(rows.len(), LISTING_GROUP + 88 + 3);
+        assert_eq!(
+            &rows[LISTING_GROUP..LISTING_GROUP + 4],
+            [
+                ("nested", 1),
+                ("inner-0", 2),
+                ("inner-1", 2),
+                ("outer-512", 1),
+            ]
+        );
+        assert_eq!(rows[rows.len() - 1], ("outer-599", 1));
+    }
+
+    /// Two directories streaming at once keep their children apart: the groups of
+    /// the earlier one land ahead of the later one, which the later one's own
+    /// insertion point has to move out of the way of.
+    #[tokio::test]
+    async fn an_earlier_expansions_groups_push_a_later_one_further_down() {
+        let source = ScriptedClient::new([
+            listing([Ok(directory("first")), Ok(directory("second"))]),
+            grouped_listing("first", false),
+            listing([Ok(entry("second-0")), Ok(entry("second-1"))]),
+        ])
+        .await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.activate_selected();
+        apply_group(&mut context, &mut receiver).await;
+        context.selected_index = Some(LISTING_GROUP + 1);
+        context.activate_selected();
+        while !context.directory_listings.is_empty() {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        let rows: Vec<_> = context
+            .rows()
+            .iter()
+            .map(|row| (row.entry.name.as_str(), row.depth))
+            .collect();
+        assert_eq!(rows.len(), LISTING_GROUP + 88 + 4);
+        assert_eq!(
+            &rows[rows.len() - 4..],
+            [
+                ("first-599", 1),
+                ("second", 0),
+                ("second-0", 1),
+                ("second-1", 1),
+            ]
+        );
+    }
+
+    /// Collapsing a subtree while a later directory is still streaming keeps that
+    /// directory's remaining children underneath it, rather than at the row index
+    /// they were bound for before the collapse closed the gap.
+    #[tokio::test]
+    async fn collapsing_an_earlier_subtree_keeps_a_later_expansions_children_under_it() {
+        let source = ScriptedClient::new([
+            listing([Ok(directory("first")), Ok(directory("second"))]),
+            grouped_listing("first", false),
+            listing([Ok(entry("second-0")), Ok(entry("second-1"))]),
+        ])
+        .await;
+        let (mut context, mut receiver) = context(&source, 16);
+        while context.status() != &ListingStatus::Complete {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        context.activate_selected();
+        apply_group(&mut context, &mut receiver).await;
+        context.selected_index = Some(LISTING_GROUP + 1);
+        context.activate_selected();
+        // Collapsing the first directory while it streams takes its children back
+        // out from under the second one's insertion point.
+        context.selected_index = Some(0);
+        context.activate_selected();
+        while !context.directory_listings.is_empty() {
+            apply_next(&mut context, &mut receiver).await;
+        }
+
+        assert_eq!(
+            context
+                .rows()
+                .iter()
+                .map(|row| (row.entry.name.as_str(), row.depth))
+                .collect::<Vec<_>>(),
+            [
+                ("first", 0),
+                ("second", 0),
+                ("second-0", 1),
+                ("second-1", 1),
+            ]
+        );
+        assert_eq!(context.rows[0].expansion, ExpansionStatus::Collapsed);
     }
 
     #[tokio::test]
