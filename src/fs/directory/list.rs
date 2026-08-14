@@ -38,15 +38,18 @@ pub(crate) async fn list_dir(
             };
             match next_entry {
                 Ok(Some(entry)) => {
-                    let result = tokio::select! {
+                    let inspected = tokio::select! {
                         biased;
                         () = cancellation_token.cancelled() => {
                             return Some((Err(service_cancelled_error()), None));
                         }
-                        result = inspect_entry(&entry) => result.map(|inspected| inspected.entry),
+                        inspected = inspect_entry(&entry) => inspected,
                     };
-                    let next_state = result.is_ok().then_some(directory_entries);
-                    Some((result, next_state))
+                    // `inspect_entry` cannot fail: an entry it could not describe is
+                    // reported as a degraded entry instead. So the stream carries on,
+                    // and the two conditions below are the only terminal ones left --
+                    // which is what keeps one bad entry from hiding its siblings.
+                    Some((Ok(inspected.entry), Some(directory_entries)))
                 }
                 Ok(None) => None,
                 Err(error) => Some((Err(FsError::from_io(&error)), None)),

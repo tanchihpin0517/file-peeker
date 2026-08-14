@@ -57,6 +57,7 @@ mod tests {
             name: name.into(),
             kind: kind.into(),
             navigable: kind == ProtocolEntryKind::Directory,
+            defect: String::new(),
         }
     }
 
@@ -71,26 +72,10 @@ mod tests {
             ])
             .unwrap(),
             [
-                DirectoryEntry {
-                    name: "one".into(),
-                    kind: EntryKind::File,
-                    navigable: false,
-                },
-                DirectoryEntry {
-                    name: "two".into(),
-                    kind: EntryKind::Directory,
-                    navigable: true,
-                },
-                DirectoryEntry {
-                    name: "three".into(),
-                    kind: EntryKind::Symlink,
-                    navigable: false,
-                },
-                DirectoryEntry {
-                    name: "four".into(),
-                    kind: EntryKind::Other,
-                    navigable: false,
-                },
+                DirectoryEntry::readable("one".into(), EntryKind::File, false),
+                DirectoryEntry::readable("two".into(), EntryKind::Directory, true),
+                DirectoryEntry::readable("three".into(), EntryKind::Symlink, false),
+                DirectoryEntry::readable("four".into(), EntryKind::Other, false),
             ]
         );
     }
@@ -112,6 +97,7 @@ mod tests {
                 name: "unknown".into(),
                 kind: i32::MAX,
                 navigable: false,
+                defect: String::new(),
             }])
             .unwrap_err()
             .kind(),

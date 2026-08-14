@@ -72,11 +72,11 @@ mod tests {
 
     #[test]
     fn keeps_small_chunks_together() {
-        let batches = convert_chunk(vec![Ok(DirectoryEntry {
-            name: "reports".into(),
-            kind: EntryKind::Directory,
-            navigable: true,
-        })]);
+        let batches = convert_chunk(vec![Ok(DirectoryEntry::readable(
+            "reports".into(),
+            EntryKind::Directory,
+            true,
+        ))]);
         assert_eq!(batches.len(), 1);
         let batch = batches[0].as_ref().unwrap();
         assert_eq!(batch.entries.len(), 1);
@@ -87,13 +87,15 @@ mod tests {
     #[test]
     fn splits_large_chunks_without_reordering() {
         let entries = (0..3)
-            .map(|index| DirectoryEntry {
-                name: HostPath::from_literal(&format!(
-                    "{index}-{}",
-                    "x".repeat(GRPC_BATCH_MAX_BYTES / 2)
-                )),
-                kind: EntryKind::File,
-                navigable: false,
+            .map(|index| {
+                DirectoryEntry::readable(
+                    HostPath::from_literal(&format!(
+                        "{index}-{}",
+                        "x".repeat(GRPC_BATCH_MAX_BYTES / 2)
+                    )),
+                    EntryKind::File,
+                    false,
+                )
             })
             .map(Ok)
             .collect();
@@ -121,11 +123,11 @@ mod tests {
 
     #[test]
     fn rejects_single_entries_larger_than_the_grpc_limit() {
-        let error = convert_chunk(vec![Ok(DirectoryEntry {
-            name: HostPath::from_literal(&"x".repeat(GRPC_BATCH_MAX_BYTES)),
-            kind: EntryKind::File,
-            navigable: false,
-        })])
+        let error = convert_chunk(vec![Ok(DirectoryEntry::readable(
+            HostPath::from_literal(&"x".repeat(GRPC_BATCH_MAX_BYTES)),
+            EntryKind::File,
+            false,
+        ))])
         .pop()
         .unwrap()
         .unwrap_err();
@@ -141,11 +143,11 @@ mod tests {
     #[test]
     fn flushes_entries_before_a_terminal_core_error() {
         let results = convert_chunk(vec![
-            Ok(DirectoryEntry {
-                name: "kept".into(),
-                kind: EntryKind::File,
-                navigable: false,
-            }),
+            Ok(DirectoryEntry::readable(
+                "kept".into(),
+                EntryKind::File,
+                false,
+            )),
             Err(FsError::new(FsErrorKind::PermissionDenied, "denied")),
         ]);
 

@@ -116,11 +116,11 @@ mod tests {
     fn entry(relative_path: &str) -> WalkEntry {
         WalkEntry {
             relative_path: relative_path.into(),
-            entry: DirectoryEntry {
-                name: relative_path.rsplit('/').next().unwrap().into(),
-                kind: EntryKind::File,
-                navigable: false,
-            },
+            entry: DirectoryEntry::readable(
+                relative_path.rsplit('/').next().unwrap().into(),
+                EntryKind::File,
+                false,
+            ),
             depth: relative_path.split('/').count(),
         }
     }

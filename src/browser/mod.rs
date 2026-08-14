@@ -117,14 +117,11 @@ pub(crate) mod fixture {
     /// A named entry, a directory when it is navigable and a plain file when it is
     /// not.
     pub(crate) fn entry(name: &str, navigable: bool) -> DirectoryEntry {
-        DirectoryEntry {
-            name: name.into(),
-            kind: if navigable {
-                EntryKind::Directory
-            } else {
-                EntryKind::File
-            },
-            navigable,
-        }
+        let kind = if navigable {
+            EntryKind::Directory
+        } else {
+            EntryKind::File
+        };
+        DirectoryEntry::readable(name.into(), kind, navigable)
     }
 }

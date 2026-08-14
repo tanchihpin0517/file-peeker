@@ -20,12 +20,12 @@ use futures::{StreamExt as _, stream, stream::BoxStream};
 use tonic::{Request, Response, Status};
 
 use crate::{
-    DirectoryEntry, EntryKind,
+    DirectoryEntry,
     client::connection::ServerConnection,
     protocol::v1::{
-        EntryKind as ProtocolEntryKind, ListBatch, ListRequest, ListingEntry, ReadChunk,
-        ReadRequest, ResolvePathRequest, ResolvePathResponse, WalkBatch, WalkRequest, WriteFrame,
-        WriteResponse, file_peeker_server::FilePeeker,
+        ListBatch, ListRequest, ListingEntry, ReadChunk, ReadRequest, ResolvePathRequest,
+        ResolvePathResponse, WalkBatch, WalkRequest, WriteFrame, WriteResponse,
+        file_peeker_server::FilePeeker,
     },
 };
 
@@ -173,18 +173,10 @@ fn batches(
     .boxed()
 }
 
+/// The server's own conversion rather than a second copy of it, so a scripted entry
+/// carries its defect the way a real one does.
 fn listing_entry(entry: DirectoryEntry) -> ListingEntry {
-    let kind = match entry.kind {
-        EntryKind::File => ProtocolEntryKind::File,
-        EntryKind::Directory => ProtocolEntryKind::Directory,
-        EntryKind::Symlink => ProtocolEntryKind::Symlink,
-        EntryKind::Other => ProtocolEntryKind::Other,
-    };
-    ListingEntry {
-        name: entry.name.into_escaped(),
-        kind: kind.into(),
-        navigable: entry.navigable,
-    }
+    crate::server::ops::convert_entry(entry)
 }
 
 /// Sends a scripted `io::Error` as the status the real server would use, so it

@@ -90,15 +90,14 @@ pub(crate) async fn walk_dir(
                 }
                 Err(error) => return Some((Err(FsError::from_io(&error)), None)),
             };
+            // Infallible: an entry it could not describe is emitted degraded rather
+            // than ending the traversal, and is not descended into.
             let inspected = tokio::select! {
                 biased;
                 () = state.cancellation.cancelled() => {
                     return Some((Err(service_cancelled_error()), None));
                 }
-                result = inspect_entry(&directory_entry) => match result {
-                    Ok(entry) => entry,
-                    Err(error) => return Some((Err(error), None)),
-                },
+                inspected = inspect_entry(&directory_entry) => inspected,
             };
             // Escaped throughout: joining escaped halves is the escape of the joined
             // path, so a descendant whose name is not UTF-8 no longer ends the walk.

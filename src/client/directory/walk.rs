@@ -79,11 +79,7 @@ mod tests {
     fn walk_entry_shape_is_transport_independent() {
         let entry = WalkEntry {
             relative_path: "dir/file".into(),
-            entry: DirectoryEntry {
-                name: "file".into(),
-                kind: EntryKind::File,
-                navigable: false,
-            },
+            entry: DirectoryEntry::readable("file".into(), EntryKind::File, false),
             depth: 2,
         };
         assert_eq!(entry.depth, 2);

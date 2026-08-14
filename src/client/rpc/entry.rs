@@ -41,5 +41,6 @@ pub(super) fn convert_entry(entry: ListingEntry) -> io::Result<DirectoryEntry> {
         name: wire_path(entry.name, "entry name")?,
         kind,
         navigable: entry.navigable,
+        defect: (!entry.defect.is_empty()).then_some(entry.defect),
     })
 }

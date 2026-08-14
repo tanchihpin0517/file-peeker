@@ -107,11 +107,7 @@ mod tests {
     use super::{ListStats, OUTPUT_FLUSH_INTERVAL, child_path, write_listing};
 
     fn entry(name: &str) -> DirectoryEntry {
-        DirectoryEntry {
-            name: name.into(),
-            kind: EntryKind::File,
-            navigable: false,
-        }
+        DirectoryEntry::readable(name.into(), EntryKind::File, false)
     }
 
     fn listing(entries: Vec<io::Result<DirectoryEntry>>) -> EntryStream {

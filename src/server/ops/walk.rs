@@ -89,15 +89,15 @@ mod tests {
 
     fn entry(relative_path: &str, depth: usize) -> CoreWalkEntry {
         CoreWalkEntry {
-            entry: DirectoryEntry {
-                name: relative_path
+            entry: DirectoryEntry::readable(
+                relative_path
                     .rsplit('/')
                     .next()
                     .unwrap_or(relative_path)
                     .into(),
-                kind: EntryKind::File,
-                navigable: false,
-            },
+                EntryKind::File,
+                false,
+            ),
             relative_path: HostPath::from_literal(relative_path),
             depth,
         }

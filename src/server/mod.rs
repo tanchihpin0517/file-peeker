@@ -5,7 +5,12 @@
 //! connection. The `file-peeker-server` binary wraps that same core in a command
 //! line and a stdin lifetime lease.
 
+#[cfg(not(test))]
 mod ops;
+// Reachable from `test_support`, whose scripted server reuses the real core-to-wire
+// entry conversion rather than keeping a second copy of it.
+#[cfg(test)]
+pub(crate) mod ops;
 mod serve;
 
 // Only the client embeds a server; the binary drives `serve` through `command`.

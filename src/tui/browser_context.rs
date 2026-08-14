@@ -216,6 +216,13 @@ impl BrowserContext {
         }
     }
 
+    /// Why the selected entry could not be described, which is a different failure
+    /// from a refused expansion: this one is about the entry, not about opening it.
+    pub(crate) fn selected_entry_defect(&self) -> Option<(&HostPath, &str)> {
+        let row = self.tree.selected_row()?;
+        Some((row.path(), row.entry().defect.as_deref()?))
+    }
+
     pub(crate) fn effective_selection(&self) -> Option<usize> {
         self.tree.effective_selection()
     }
@@ -1076,27 +1083,15 @@ mod tests {
     }
 
     fn entry(name: &str) -> DirectoryEntry {
-        DirectoryEntry {
-            name: name.into(),
-            kind: EntryKind::File,
-            navigable: false,
-        }
+        DirectoryEntry::readable(name.into(), EntryKind::File, false)
     }
 
     fn directory(name: &str) -> DirectoryEntry {
-        DirectoryEntry {
-            name: name.into(),
-            kind: EntryKind::Directory,
-            navigable: true,
-        }
+        DirectoryEntry::readable(name.into(), EntryKind::Directory, true)
     }
 
     fn symlink(name: &str, navigable: bool) -> DirectoryEntry {
-        DirectoryEntry {
-            name: name.into(),
-            kind: EntryKind::Symlink,
-            navigable,
-        }
+        DirectoryEntry::readable(name.into(), EntryKind::Symlink, navigable)
     }
 
     fn context(
@@ -1846,11 +1841,7 @@ mod tests {
 
     #[tokio::test]
     async fn navigable_symlinks_expand_and_special_entries_do_nothing() {
-        let special = DirectoryEntry {
-            name: "socket".into(),
-            kind: EntryKind::Other,
-            navigable: false,
-        };
+        let special = DirectoryEntry::readable("socket".into(), EntryKind::Other, false);
         let source = ScriptedClient::new([
             listing([Ok(symlink("linked-directory", true)), Ok(special)]),
             listing([Ok(entry("child.txt"))]),

@@ -79,6 +79,10 @@ message ListingEntry {
   string name = 1;
   EntryKind kind = 2;
   bool navigable = 3;
+  // Why this one entry is degraded, for a front end to show on the selected row.
+  // Empty when it is not. Never ends the listing: it describes the entry it arrived
+  // with, and the entries behind it still follow.
+  string defect = 4;
 }
 
 enum EntryKind {

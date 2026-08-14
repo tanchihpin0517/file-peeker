@@ -130,6 +130,7 @@ mod tests {
                 name: path.rsplit('/').next().unwrap().into(),
                 kind: ProtocolEntryKind::File.into(),
                 navigable: false,
+                defect: String::new(),
             }),
             depth,
         }
@@ -171,6 +172,7 @@ mod tests {
                     name: "unknown".into(),
                     kind: i32::MAX,
                     navigable: false,
+                    defect: String::new(),
                 }),
                 depth: 1,
             }],
