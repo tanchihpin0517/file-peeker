@@ -1,0 +1,2439 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>File Peeker GUI Hundred</title>
+
+<style>
+  :root {
+    --page: #0b0b0e;
+    --rail: #08080a;
+    --line: #1e1e24;
+    /* Three text tiers, each measured against the two grounds this page uses
+       (#0b0b0e and #08080a): 15:1, 7.4:1, 4.6:1. The gallery's own metadata is
+       small, so it does not also get to be dim. */
+    --ink: #e8e8ec;
+    --muted: #a0a0ac;
+    --faint: #7d7d88;
+    --mark: #ffd166;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Mono", "DejaVu Sans Mono", monospace;
+    --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Noto Sans TC", sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  :focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
+
+  ::selection { background: var(--mark); color: #14100a; }
+
+  /* Four steps and no more: 11 labels, 13 body, 15 subhead, 20 title. A dense
+     comparison document needs a label tier under its body tier; what it does
+     not need is six sizes that all look like an accident. */
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--ui);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    display: grid;
+    grid-template-columns: 292px minmax(0, 1fr);
+    min-height: 100vh;
+  }
+
+  /* ---------- pickers ---------- */
+
+  .rail {
+    background: var(--rail);
+    border-right: 1px solid var(--line);
+    padding: 22px 0 40px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #26262e transparent;
+  }
+
+  .brand { padding: 0 20px 16px; border-bottom: 1px solid var(--line); }
+  .brand b { display: block; font-size: 15px; }
+  .brand span {
+    display: block;
+    margin-top: 6px;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  .railhead {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 16px 20px 6px;
+    font-size: 11px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .railhead em {
+    margin-left: auto;
+    font-style: normal;
+    letter-spacing: 0;
+    text-transform: none;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .pick {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    gap: 0 9px;
+    align-items: center;
+    width: 100%;
+    padding: 7px 20px;
+    background: none;
+    border: 0;
+    border-left: 1px solid transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .pick .no { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .pick .nm { color: var(--ink); }
+  .pick .key {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--faint);
+    letter-spacing: .02em;
+  }
+  .pick:hover { background: #101015; }
+  .pick[aria-current="true"] { border-left-color: var(--mark); background: #121219; }
+  .pick[aria-current="true"] .no,
+  .pick[aria-current="true"] .key { color: var(--mark); }
+
+  .swatch {
+    display: inline-grid;
+    grid-template-columns: repeat(4, 1fr);
+    width: 22px;
+    height: 11px;
+    border-radius: 2px;
+    overflow: hidden;
+    outline: 1px solid rgba(255, 255, 255, .12);
+    outline-offset: -1px;
+  }
+  .swatch i { display: block; }
+
+  /* ---------- main ---------- */
+
+  main { padding: 24px 30px 70px; min-width: 0; }
+
+  .top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px 20px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .top h1 { margin: 0; font-size: 20px; letter-spacing: -.01em; }
+  .top h1 span { color: var(--faint); font-weight: 400; }
+  .top .id {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .06em;
+    color: var(--mark);
+  }
+  .top .spacer { flex: 1 1 auto; }
+
+  .modes { display: flex; gap: 6px; flex-wrap: wrap; }
+  .modes button {
+    padding: 6px 12px;
+    background: #101016;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .modes button:hover { color: var(--ink); border-color: #2c2c35; }
+  .modes button[aria-pressed="true"] {
+    background: var(--mark);
+    border-color: var(--mark);
+    color: #14100a;
+  }
+
+  /* Its own line. Five view buttons beside the two mode buttons is seven
+     controls on one row, which breaks into a ragged second line on a laptop
+     and reads as a mistake rather than as a wrap. */
+  .views { margin: 14px 0 16px; }
+
+  .pair {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1px;
+    margin: 18px 0 22px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .pair section { background: var(--page); padding: 13px 15px; }
+  .pair h2 {
+    margin: 0 0 7px;
+    font-size: 11px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+  }
+  .pair h2 b { color: var(--ink); letter-spacing: 0; text-transform: none; font-size: 13px; }
+  .pair p { margin: 0; font-size: 13px; line-height: 1.65; color: #c9c9d3; }
+  .pair p + p { margin-top: 7px; color: var(--faint); }
+
+  .sizes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1px;
+    margin: 0 0 18px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .sizes button {
+    flex: 1 1 auto;
+    padding: 9px 12px;
+    background: var(--page);
+    border: 0;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    min-width: 140px;
+  }
+  .sizes button b {
+    display: block;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .sizes button i {
+    display: block;
+    font-style: normal;
+    font-size: 11px;
+    color: var(--faint);
+    margin-top: 3px;
+  }
+  .sizes button em {
+    display: inline-block;
+    margin-top: 5px;
+    font-style: normal;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 999px;
+  }
+  .sizes button:hover { background: #101015; }
+  .sizes button[aria-pressed="true"] { background: #16161d; }
+  .sizes button[aria-pressed="true"] b { color: var(--mark); }
+  .rung-full    { background: #123020; color: #7bd88f; }
+  .rung-compact { background: #33290c; color: var(--mark); }
+  .rung-minimal { background: #3a1c1c; color: #ff8f8f; }
+
+  .warn {
+    margin: 0 0 20px;
+    padding: 10px 14px;
+    border-left: 1px solid var(--mark);
+    background: #16140d;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #d9d1bb;
+  }
+
+  /* The stage keeps the page's own ground so a 760pt window reads as a small
+     window rather than as the whole page. */
+  .stage {
+    background: #050507;
+    border: 1px solid var(--line);
+    padding: 16px;
+  }
+  /* The window is drawn at its real point size while the column has room, and
+     scales down with its viewBox once it does not — so it is never cropped. */
+  .win { margin: 0 auto; }
+  .win svg { display: block; }
+
+  /* Wide enough that a 1280pt window survives the reduction as a composition.
+     Labels inside it will not be readable at any card size a contact sheet can
+     afford; that is what the overview and the single view are for. */
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+    gap: 18px;
+    margin-top: 20px;
+  }
+  .card {
+    border: 1px solid var(--line);
+    background: #050507;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    color: inherit;
+    font: inherit;
+    display: block;
+  }
+  .card:hover { border-color: var(--mark); }
+  .card .clip { padding: 8px; }
+  .card .clip svg { display: block; width: 100%; height: auto; }
+  .card figcaption {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    padding: 9px 12px;
+    border-top: 1px solid var(--line);
+    background: var(--page);
+  }
+  .card figcaption .no { font-family: var(--mono); font-size: 11px; color: var(--mark); }
+  .card figcaption b { font-size: 13px; font-weight: 600; }
+  .card figcaption span {
+    font-size: 11px;
+    color: var(--faint);
+    margin-left: auto;
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+  }
+
+  /* The overview: ten layouts down, ten palettes across, all hundred at once.
+     At this scale a window is composition and color only — which is the whole
+     question the grid is asked. Clicking a cell opens it at full size. */
+  .matrix {
+    display: grid;
+    grid-template-columns: 74px repeat(10, minmax(0, 1fr));
+    gap: 3px;
+    align-items: center;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: #26262e transparent;
+  }
+  .matrix > .corner { min-width: 0; }
+  .matrix > .colhead {
+    font-size: 11px;
+    color: var(--faint);
+    text-align: center;
+    padding-bottom: 4px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .matrix > .rowhead {
+    font-size: 11px;
+    color: var(--muted);
+    padding-right: 8px;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .matrix > button {
+    padding: 0;
+    border: 1px solid transparent;
+    background: none;
+    cursor: pointer;
+    display: block;
+    min-width: 0;
+    line-height: 0;
+  }
+  .matrix > button svg { width: 100%; height: auto; }
+  .matrix > button:hover { border-color: var(--mark); }
+  .matrix > button[aria-current="true"] { border-color: var(--mark); }
+  .matrix > button[aria-current="true"] + .rowhead,
+  .matrix > .rowhead.on { color: var(--mark); }
+  .matrix > .colhead.on { color: var(--mark); }
+
+  .hidden { display: none !important; }
+
+  /* ---------- the role table and the config handoff ---------- */
+
+  .handoff {
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+  }
+  .handoff h2 { margin: 0 0 6px; font-size: 15px; }
+  .handoff > p {
+    margin: 0 0 16px;
+    max-width: 76ch;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #b4b4be;
+  }
+  .roles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin: 0 0 22px;
+  }
+  .roles section { background: var(--page); padding: 11px 13px; }
+  .roles h3 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+  }
+  .roles dl { margin: 0; display: grid; grid-template-columns: 16px auto 1fr; gap: 5px 8px; align-items: center; }
+  .roles dt { font-family: var(--mono); font-size: 12px; color: #c8c8d2; }
+  .roles dd { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.45; }
+  .roles .chip { width: 16px; height: 16px; border-radius: 3px; outline: 1px solid rgba(255,255,255,.14); outline-offset: -1px; }
+  .roles .new { color: var(--mark); }
+
+  .handoff .cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+    gap: 18px;
+  }
+  .handoff figure { margin: 0; }
+  .handoff figcaption {
+    font-size: 11px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding-bottom: 7px;
+  }
+  .handoff pre {
+    margin: 0;
+    padding: 13px 15px;
+    background: #08080b;
+    border: 1px solid var(--line);
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.7;
+    color: #ccccd6;
+    scrollbar-width: thin;
+    scrollbar-color: #26262e transparent;
+  }
+  .handoff pre .c { color: var(--faint); }
+  .handoff pre .k { color: var(--mark); }
+  .handoff pre .s { color: #86c9a8; }
+
+  .footnote {
+    margin: 30px 0 0;
+    padding-top: 15px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--muted);
+    max-width: 82ch;
+  }
+  .footnote kbd {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+
+  /* Every track below becomes `minmax(0, 1fr)` rather than keeping a pixel
+     floor: a grid item defaults to a min-content minimum, and one track that
+     refuses to shrink is what pushes a whole page into a sideways scroll. */
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    /* The combination leads; the twenty pickers follow. Scrolling past a rail
+       to reach the thing the page is about is a desktop habit, not a narrow
+       one. */
+    main { order: 1; padding: 20px 16px 60px; min-width: 0; }
+    .rail { order: 2; position: static; height: auto; min-width: 0; border-right: 0; border-top: 1px solid var(--line); }
+    .top h1 { font-size: 15px; }
+    .stage { padding: 10px; }
+    .sizes button { min-width: 0; flex: 1 1 100%; }
+    .pair,
+    .roles,
+    .strip,
+    .handoff .cols { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+</head>
+<body>
+<!--
+  THESIS: the desktop front end's arrangement is a choice, not a given; this page
+  makes ten arrangements and ten palettes selectable side by side, and refuses
+  the screenshot-plus-caption design doc that lets a reader admire one screen
+  without comparing it to its alternatives.
+  OWN-WORLD: the incumbent gallery's chrome — near-black ground, one amber mark,
+  mono metadata, hairline rules — carried unchanged from tui-layouts.html so the
+  two documents read as one pair. Every screen inside it is drawn from egui's
+  own vocabulary: filled rects, one corner radius, 1px hairlines, circles,
+  stroked line segments, two polygons, one offset-plus-blur shadow. Icons are
+  drawn from those primitives the way src/gui/glyph.rs draws them, never typed
+  as font characters.
+  STORY: the reader sees that layout and palette are independent axes, finds the
+  combination they want, and leaves with the TOML and the Rust seam that would
+  make it real.
+  FIRST VIEWPORT: rail of twenty pickers at left; title, mode and view controls
+  across the top; the window rung ladder; then one 1280x800 window at actual
+  size on its own ground. Five views: that one window, either axis as a strip of
+  ten, the rung ladder, and all one hundred at once.
+  FORM: gallery, inherited rather than rolled. No concept seed was run and there
+  is no seed key: the request named the form outright ("like the TUI one"), and
+  docs/design/tui-layouts.html is an established sibling whose world this surface
+  joins. A roll here would have been theatre over a decision already made.
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the
+  finish review, the verdict, and DESIGN.md.
+-->
+<div class="shell">
+  <aside class="rail">
+    <div class="brand">
+      <b>File Peeker · GUI</b>
+      <span>十個排版 × 十套色票 = 一百種組合。畫面上的每個形狀，eframe 的 Painter 都畫得出來：填色矩形、一種圓角、1px 髮絲線、圓、線段、兩個多邊形、一道有位移有模糊的陰影。圖示是畫出來的，不是打出來的字。</span>
+    </div>
+
+    <div class="railhead">排版 · Layout <em>j / k</em></div>
+    <nav id="rail-layout"></nav>
+
+    <div class="railhead">配色 · Palette <em>h / l</em></div>
+    <nav id="rail-palette"></nav>
+  </aside>
+
+  <main>
+    <div class="top">
+      <h1><span id="t-layout">—</span> <span>×</span> <span id="t-palette">—</span></h1>
+      <span class="id" id="t-id"></span>
+      <span class="spacer"></span>
+      <div class="modes">
+        <button id="m-dark" aria-pressed="true">深色</button>
+        <button id="m-light" aria-pressed="false">淺色</button>
+      </div>
+    </div>
+
+    <div class="views modes">
+      <button id="v-one" aria-pressed="true">單張</button>
+      <button id="v-pal" aria-pressed="false">這個排版 × 10 色</button>
+      <button id="v-lay" aria-pressed="false">這套色 × 10 排版</button>
+      <button id="v-size" aria-pressed="false">縮窗階梯</button>
+      <button id="v-all" aria-pressed="false">全部一百</button>
+    </div>
+
+    <div class="sizes" id="sizes"></div>
+
+    <div class="pair">
+      <section>
+        <h2>排版 <b id="d-layout-name"></b></h2>
+        <p id="d-layout"></p>
+        <p id="d-layout-side"></p>
+      </section>
+      <section>
+        <h2>配色 <b id="d-palette-name"></b></h2>
+        <p id="d-palette"></p>
+        <p id="d-palette-from"></p>
+      </section>
+    </div>
+
+    <p class="warn hidden" id="combo-note"></p>
+
+    <div id="view-one">
+      <div class="stage" id="stage"><div class="win" id="win"></div></div>
+    </div>
+
+    <div id="view-strip" class="hidden">
+      <div class="strip" id="strip"></div>
+    </div>
+
+    <div id="view-all" class="hidden">
+      <div class="matrix" id="matrix"></div>
+    </div>
+
+    <section class="handoff">
+      <h2>接進去長什麼樣</h2>
+      <p>
+        一百種組合不是一百份程式碼。排版只決定哪個矩形畫在哪、那個矩形扮演什麼角色；
+        色票只把角色換成顏色。兩邊唯一的接觸面是下面這組角色名 —— 這正是
+        <span style="font-family:var(--mono)">src/gui/theme.rs</span> 已經在做的事
+        （<em>named roles rather than named colours</em>），
+        差別只在多了三個桌面才有的角色，以及排版現在也一起可選。
+      </p>
+      <div class="roles" id="roles"></div>
+      <div class="cols">
+        <figure>
+          <figcaption>設定檔</figcaption>
+          <pre id="cfg-toml"></pre>
+        </figure>
+        <figure>
+          <figcaption>接縫</figcaption>
+          <pre id="cfg-rust"></pre>
+        </figure>
+      </div>
+    </section>
+
+    <p class="footnote">
+      <kbd>j</kbd> <kbd>k</kbd> 換排版，<kbd>h</kbd> <kbd>l</kbd> 換配色，<kbd>d</kbd> 換深淺，<kbd>[</kbd> <kbd>]</kbd> 換視窗尺寸。
+      尺寸單位是 egui 的邏輯點，列高 26、縮排 15、圓角 7、髮絲線 1px，全部取自
+      <span style="font-family:var(--mono)">src/gui/theme.rs</span> 與
+      <span style="font-family:var(--mono)">src/gui/dock.rs</span> 現在的值。
+      內容是真的：連線是 Local 與兩台 SSH（其中一台斷線），檔案是這個 repo，
+      欄位是 Name 與 Status，狀態只有 loading / unreadable / file / link / other，
+      進行中的傳輸是 <span style="font-family:var(--mono)">report.pdf</span>。
+    </p>
+  </main>
+</div>
+
+<script>
+/* ==========================================================================
+   A window — the same model as an eframe frame: a list of shapes in logical
+   points, painted in order. Everything below maps one-to-one onto a call the
+   egui Painter already has.
+
+     rect        -> Painter::rect_filled / rect_stroke
+     hair / vair -> glyph::edge (Stroke 1.0)
+     text        -> Painter::text with a FontId and an Align2
+     circle      -> Painter::circle_filled
+     poly        -> Shape::Path
+     shadow      -> epaint::Shadow { offset, blur }
+     fade        -> Color32::gamma_multiply
+
+   No gradients, no backdrop blur, no per-glyph tricks: if it is not in this
+   list, egui cannot paint it and it does not appear on this page.
+   ========================================================================== */
+
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/* Text is measured, not guessed, so a clipped filename lands where egui would
+   clip it. The ratios are SF at the sizes the app actually uses. */
+function measure(s, size, mono) {
+  const per = mono ? 0.602 : 0.512;
+  let n = 0;
+  for (const ch of String(s)) n += /[　-鿿＀-￯]/.test(ch) ? 2 : 1;
+  return n * size * per;
+}
+function fit(s, maxw, size, mono) {
+  s = String(s);
+  if (measure(s, size, mono) <= maxw) return s;
+  let out = '';
+  for (const ch of s) {
+    if (measure(out + ch + '…', size, mono) > maxw) break;
+    out += ch;
+  }
+  return out + '…';
+}
+
+class Frame {
+  constructor(w, h, P) {
+    this.w = w; this.h = h; this.P = P; this.o = [];
+  }
+  raw(s) { this.o.push(s); return this; }
+
+  /** Painter::rect_filled, plus the optional 1px stroke and the one shadow. */
+  rect(x, y, w, h, fill, opt) {
+    const o = opt || {};
+    if (w <= 0 || h <= 0) return this;
+    const attrs = [
+      `x="${+x.toFixed(2)}" y="${+y.toFixed(2)}"`,
+      `width="${+w.toFixed(2)}" height="${+h.toFixed(2)}"`,
+      o.r ? `rx="${o.r}"` : '',
+      fill ? `fill="${fill}"` : 'fill="none"',
+      o.op !== undefined ? `fill-opacity="${o.op}"` : '',
+      o.stroke ? `stroke="${o.stroke}" stroke-width="${o.sw || 1}"` : '',
+      o.shadow ? `filter="url(#drop)"` : '',
+    ].filter(Boolean).join(' ');
+    return this.raw(`<rect ${attrs}/>`);
+  }
+  /** glyph::edge — the app's only kind of border. */
+  hair(x, y, w, c, op) {
+    return this.raw(`<rect x="${+x.toFixed(2)}" y="${+y.toFixed(2)}" width="${+w.toFixed(2)}" height="1" fill="${c}"${op !== undefined ? ` fill-opacity="${op}"` : ''}/>`);
+  }
+  vair(x, y, h, c, op) {
+    return this.raw(`<rect x="${+x.toFixed(2)}" y="${+y.toFixed(2)}" width="1" height="${+h.toFixed(2)}" fill="${c}"${op !== undefined ? ` fill-opacity="${op}"` : ''}/>`);
+  }
+  circle(cx, cy, r, fill, op) {
+    return this.raw(`<circle cx="${+cx.toFixed(2)}" cy="${+cy.toFixed(2)}" r="${r}" fill="${fill}"${op !== undefined ? ` fill-opacity="${op}"` : ''}/>`);
+  }
+  poly(points, fill, op) {
+    const d = points.map((p) => `${+p[0].toFixed(2)},${+p[1].toFixed(2)}`).join(' ');
+    return this.raw(`<polygon points="${d}" fill="${fill}"${op !== undefined ? ` fill-opacity="${op}"` : ''}/>`);
+  }
+  /** Painter::text. `at` is a centre on y, matching Align2::*_CENTER. */
+  text(x, y, s, opt) {
+    const o = opt || {};
+    const size = o.size || 12;
+    let str = String(s);
+    if (o.max) str = fit(str, o.max, size, o.mono);
+    if (!str) return this;
+    const anchor = o.align === 'right' ? 'end' : o.align === 'center' ? 'middle' : 'start';
+    const attrs = [
+      `x="${+x.toFixed(2)}" y="${+y.toFixed(2)}"`,
+      `font-size="${size}"`,
+      o.mono ? 'font-family="var(--mono)"' : '',
+      o.weight ? `font-weight="${o.weight}"` : '',
+      o.track ? `letter-spacing="${o.track}"` : '',
+      `fill="${o.fill || this.P.text}"`,
+      o.op !== undefined ? `fill-opacity="${o.op}"` : '',
+      anchor !== 'start' ? `text-anchor="${anchor}"` : '',
+      'dominant-baseline="central"',
+    ].filter(Boolean).join(' ');
+    return this.raw(`<text ${attrs}>${esc(str)}</text>`);
+  }
+
+  /* ---- the composites, one per function in src/gui/glyph.rs ---- */
+
+  /** glyph::folder — a 14x13 body with a tab, lighter lid when open. */
+  folder(x, y, tint, open) {
+    const w = 14, h = 13;
+    this.rect(x, y, w * 0.46, 4, tint, { r: 1, op: 0.75 });
+    if (open) {
+      this.rect(x, y + 2.5, w, h - 2.5, tint, { r: 2, op: 0.55 });
+      this.rect(x, y + 2.5, w, 3, tint, { r: 2 });
+    } else {
+      this.rect(x, y + 2.5, w, h - 2.5, tint, { r: 2 });
+    }
+    return this;
+  }
+  /** glyph::file — a sheet with a folded corner. */
+  file(x, y, tint) {
+    const w = 14, h = 13, f = 4.5;
+    this.poly([[x, y], [x + w - f, y], [x + w, y + f], [x + w, y + h], [x, y + h]], tint, 0.85);
+    this.poly([[x + w - f, y], [x + w - f, y + f], [x + w, y + f]], tint, 0.45);
+    return this;
+  }
+  /** glyph::chevron — two 1.5px segments. */
+  chevron(cx, cy, c, open) {
+    const a = 3.2;
+    const pts = open
+      ? [[cx - a, cy - a * 0.55], [cx, cy + a * 0.65], [cx + a, cy - a * 0.55]]
+      : [[cx - a * 0.55, cy - a], [cx + a * 0.65, cy], [cx - a * 0.55, cy + a]];
+    const d = pts.map((p, i) => `${i ? 'L' : 'M'}${+p[0].toFixed(2)} ${+p[1].toFixed(2)}`).join(' ');
+    return this.raw(`<path d="${d}" fill="none" stroke="${c}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`);
+  }
+  /** A close cross, two segments — the same construction as the chevron.
+      glyph.rs draws its icons rather than borrowing font characters, so a
+      typed ✕ here would be the one shape in this page egui does not make. */
+  cross(cx, cy, c, r) {
+    const a = r || 3.4;
+    return this.raw(`<path d="M${(cx - a).toFixed(2)} ${(cy - a).toFixed(2)}L${(cx + a).toFixed(2)} ${(cy + a).toFixed(2)}`
+      + `M${(cx + a).toFixed(2)} ${(cy - a).toFixed(2)}L${(cx - a).toFixed(2)} ${(cy + a).toFixed(2)}" `
+      + `fill="none" stroke="${c}" stroke-width="1.3" stroke-linecap="round"/>`);
+  }
+  /** A direction arrow: one shaft and two barbs. `dir` is 1 right, -1 left. */
+  arrow(cx, cy, c, dir, len) {
+    const h = (len || 16) / 2, b = 4.2;
+    const tip = cx + dir * h;
+    return this.raw(`<path d="M${(cx - dir * h).toFixed(2)} ${cy}L${tip.toFixed(2)} ${cy}`
+      + `M${(tip - dir * b).toFixed(2)} ${(cy - b).toFixed(2)}L${tip.toFixed(2)} ${cy}`
+      + `L${(tip - dir * b).toFixed(2)} ${(cy + b).toFixed(2)}" `
+      + `fill="none" stroke="${c}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`);
+  }
+  /** glyph::status_dot — a dot inside a soft halo. */
+  dot(cx, cy, c) {
+    return this.circle(cx, cy, 5, c, 0.22).circle(cx, cy, 2.6, c);
+  }
+  /** glyph::traffic_lights — drawn because the native titlebar is hidden. */
+  traffic(x, y) {
+    ['#ff5f57', '#febc2e', '#28c840'].forEach((c, i) => this.circle(x + i * 20, y, 6, c));
+    return this;
+  }
+  /**
+   * glyph::indeterminate — a bright segment part-way along its track.
+   *
+   * The track is the accent at low alpha rather than a ground role, so it
+   * separates from whatever it sits on by hue instead of by luminance. Every
+   * ground role tested against `surface` lands under this page's own `SAME`
+   * threshold, which is exactly the failure the palette notes exist to catch;
+   * `dot()` already solves it the same way with its halo.
+   */
+  indeterminate(x, y, w, c) {
+    this.rect(x, y, w, 3, c, { r: 1, op: 0.22 });
+    return this.rect(x + w * 0.34, y, w * 0.28, 3, c, { r: 1 });
+  }
+  /** The scroll thumb egui draws when a list is taller than its viewport. */
+  thumb(x, y, h, frac, at, c) {
+    const th = Math.max(28, h * frac);
+    return this.rect(x, y + (h - th) * at, 5, th, c, { r: 2.5, op: 0.5 });
+  }
+
+  /* Drawn at its real point size when the column is wide enough, scaled down
+     by the viewBox when it is not — so a 1280pt window is never cropped and
+     never pretends to be a different size than the ladder says. */
+  svg(width) {
+    const P = this.P;
+    const w = width || this.w;
+    return `<svg viewBox="0 0 ${this.w} ${this.h}" data-points="${w}" `
+      + `style="display:block;width:100%;height:auto" `
+      + `xmlns="http://www.w3.org/2000/svg" role="img" `
+      + `aria-label="File Peeker 桌面視窗預覽">`
+      + `<defs><filter id="drop" x="-30%" y="-30%" width="160%" height="180%">`
+      + `<feDropShadow dx="0" dy="8" stdDeviation="9" flood-color="${P.shadowC}" flood-opacity="${P.shadowA}"/>`
+      + `</filter></defs>`
+      + this.o.join('')
+      + `</svg>`;
+  }
+}
+
+/* ==========================================================================
+   The palettes — ten desktop-native identities.
+
+   Named roles, never named colours. Fourteen of the seventeen are already in
+   `crate::gui::theme::Palette`; the three marked NEW are what a desktop can
+   hold and a terminal cannot: a selection ground that is a colour rather than
+   an inversion, an explicit error hue beside the warning one, and an elevation
+   whose strength belongs to the palette rather than to the mode.
+   ========================================================================== */
+
+const ROLE_GROUPS = [
+  ['Grounds', [
+    ['base', '視窗本身'], ['sunken', '側欄與狀態列'], ['surface', '內容面'], ['raised', 'hover、欄位、非作用分頁'],
+  ]],
+  ['Selection', [['sel', '選取列的底 · NEW'], ['onSel', '選取列上的字 · NEW']]],
+  ['Rules', [['border', '髮絲線']]],
+  ['Text', [['text', '正文'], ['muted', '次要'], ['faint', '第三層、縮排線']]],
+  ['Identity', [['accent', '「這裡」與「你的」'], ['folder', '目錄']]],
+  ['State', [['good', '正常'], ['warn', '要注意'], ['bad', '壞掉了 · NEW']]],
+  ['Kinds', [['kindDoc', '一般檔案'], ['kindMedia', '符號連結']]],
+  ['Elevation', [['shadowA', '陰影濃度 · NEW']]],
+];
+
+const PALETTES = [
+  {
+    id: 'graphite', name: '石墨', key: 'graphite', family: '系統',
+    note: '把 macOS 自己的中性灰當色票用：灰裡只留一點藍，accent 是系統藍，目錄是比它亮一階的青。十套裡最不主張的一套，也是唯一一套什麼場合都不會錯的。',
+    from: '接近 theme.rs 現在出貨的顏色，往兩端各拉開一階，讓 sunken 和 surface 在淺色下也分得出來。',
+    dark: {
+      base: '#16181c', sunken: '#101216', surface: '#1b1e23', raised: '#24282f', border: '#2b3038',
+      text: '#dee1e6', muted: '#8d949f', faint: '#4c525b',
+      accent: '#4f8cff', folder: '#5ec2f2', warn: '#e2a33c', good: '#57c46a', bad: '#ff5d55',
+      kindDoc: '#99a2ae', kindMedia: '#5fd3c0',
+      sel: '#23324a', onSel: '#eaf1ff', shadowC: '#000000', shadowA: 0.55,
+    },
+    light: {
+      base: '#f4f5f7', sunken: '#eceef1', surface: '#ffffff', raised: '#e6e9ee', border: '#dcdfe5',
+      text: '#1b1e24', muted: '#646c78', faint: '#b6bcc5',
+      accent: '#0a63d6', folder: '#0f7fb0', warn: '#8a5c08', good: '#2f7d2a', bad: '#c33027',
+      kindDoc: '#5a6472', kindMedia: '#0d7a72',
+      sel: '#d6e4fb', onSel: '#0b2a5a', shadowC: '#141820', shadowA: 0.16,
+    },
+  },
+  {
+    id: 'cyanotype', name: '藍曬', key: 'cyanotype', family: '感光',
+    note: '普魯士藍不是背景，是整張圖。深色下藍佔滿畫面六成以上，字是白堊色，accent 換成琥珀 —— 藍上唯一還讀得動的暖色。',
+    from: '曬圖：一張真的藍曬只有兩個值，這裡拉成五階，才夠一個檔案列表分層。',
+    dark: {
+      base: '#0a1c2e', sunken: '#071624', surface: '#0e2438', raised: '#163149', border: '#1e3f5c',
+      text: '#d8e8f4', muted: '#7ea3bf', faint: '#476b86',
+      accent: '#ffc247', folder: '#7fd4ff', warn: '#ffb03a', good: '#6fd6a6', bad: '#ff7b6b',
+      kindDoc: '#9dbdd4', kindMedia: '#63d9d0',
+      sel: '#1c4a6e', onSel: '#eaf6ff', shadowC: '#020c16', shadowA: 0.6,
+    },
+    light: {
+      base: '#e7eff5', sunken: '#dbe6ef', surface: '#f4f8fb', raised: '#d4e3ef', border: '#b9cfe0',
+      text: '#10293d', muted: '#466880', faint: '#9db8cb',
+      accent: '#a05e00', folder: '#06688f', warn: '#8a5000', good: '#2c7358', bad: '#b23a2a',
+      kindDoc: '#47637a', kindMedia: '#0d6f6a',
+      sel: '#c3ddf0', onSel: '#0a2436', shadowC: '#10293d', shadowA: 0.15,
+    },
+  },
+  {
+    id: 'bathymetric', name: '海圖', key: 'bathy', family: '紙',
+    note: '航海圖：米黃紙、墨藍線、朱紅標記。淺色是白天的海圖桌，深色是夜航駕駛台 —— 同一張圖換了照明，accent 從朱紅變成更暖的橘紅。',
+    from: '等深線的分層填色。目錄色取自淺水區的藍，accent 取自圖上的危險標記。',
+    light: {
+      base: '#f2ece0', sunken: '#e9e1d2', surface: '#fbf7ef', raised: '#e5dccb', border: '#d3c8b3',
+      text: '#1e2b38', muted: '#58646e', faint: '#b0a894',
+      accent: '#c3452c', folder: '#1d5f7a', warn: '#98600e', good: '#3d6f4a', bad: '#a52d1c',
+      kindDoc: '#5a6470', kindMedia: '#157a4e',
+      sel: '#dbe7ea', onSel: '#12242f', shadowC: '#322819', shadowA: 0.18,
+    },
+    dark: {
+      base: '#101820', sunken: '#0b1219', surface: '#161f28', raised: '#1f2a34', border: '#2a3742',
+      text: '#dfe4e8', muted: '#8b98a3', faint: '#4d5a65',
+      accent: '#ff6a4d', folder: '#58a8c8', warn: '#e0a13c', good: '#66b884', bad: '#ff5545',
+      kindDoc: '#97a3ad', kindMedia: '#4fc6bd',
+      sel: '#22343f', onSel: '#eaf2f6', shadowC: '#000000', shadowA: 0.6,
+    },
+  },
+  {
+    id: 'safelight', name: '暗房', key: 'safe', family: '感光',
+    note: '暗房安全燈：底幾乎是黑的，但黑裡有紅；accent 是燈本身的橘。深色是它的家，淺色是把照片拿出去看的那一刻 —— 暖白紙加深紅墨。',
+    from: '安全燈只允許一個波段的光。這套色票的紀律也一樣：紅到橘之外只留一個綠當 good。',
+    dark: {
+      base: '#150c0c', sunken: '#0f0808', surface: '#1c1010', raised: '#281818', border: '#35201f',
+      text: '#efdcd8', muted: '#b08a84', faint: '#6b4a46',
+      accent: '#ff8a3d', folder: '#ffb066', warn: '#ffc247', good: '#9fbf6a', bad: '#ff5147',
+      kindDoc: '#bd9a94', kindMedia: '#d9a06a',
+      sel: '#3a1d1a', onSel: '#ffe9dd', shadowC: '#000000', shadowA: 0.7,
+    },
+    light: {
+      base: '#f6efe9', sunken: '#ece2da', surface: '#fffaf6', raised: '#e8dcd2', border: '#dbcabe',
+      text: '#2a1a16', muted: '#7a5e55', faint: '#bda99d',
+      accent: '#b7431a', folder: '#a15a1c', warn: '#8c5809', good: '#4d6b2c', bad: '#a82a20',
+      kindDoc: '#6d5a53', kindMedia: '#8a5a2e',
+      sel: '#f0dccf', onSel: '#35180f', shadowC: '#3c1e14', shadowA: 0.16,
+    },
+  },
+  {
+    id: 'linen', name: '亞麻', key: 'linen', family: '紙',
+    note: '檔案室：亞麻布面、牛血紅的書背標籤、深綠的目錄。淺色是它的家。深色不是把它反過來，是同一個閱覽室關了大燈只留一盞綠罩檯燈。',
+    from: '布面精裝書的三個顏色 —— 布、燙印、蝴蝶頁。目錄色來自蝴蝶頁的綠。',
+    light: {
+      base: '#f3f0e8', sunken: '#eae6db', surface: '#fcfbf6', raised: '#e6e2d5', border: '#d6d1c2',
+      text: '#23241f', muted: '#63655c', faint: '#b2b0a2',
+      accent: '#7d2731', folder: '#2f5d43', warn: '#82590c', good: '#3c6b46', bad: '#93242c',
+      kindDoc: '#6b6a5e', kindMedia: '#2a5878',
+      sel: '#e3ddcb', onSel: '#241a19', shadowC: '#2d2a1e', shadowA: 0.15,
+    },
+    dark: {
+      base: '#171814', sunken: '#111210', surface: '#1d1f1a', raised: '#272923', border: '#33362c',
+      text: '#e6e4d8', muted: '#97998a', faint: '#575a4f',
+      accent: '#d9707a', folder: '#7fb894', warn: '#d8a94a', good: '#86b96a', bad: '#e8615f',
+      kindDoc: '#a3a596', kindMedia: '#7fa6d0',
+      sel: '#2e3128', onSel: '#f2f0e4', shadowC: '#000000', shadowA: 0.6,
+    },
+  },
+  {
+    id: 'anodized', name: '陽極', key: 'anod', family: '金屬',
+    note: '陽極處理過的鋁：灰是冷的、乾淨的、沒有溫度的，accent 是那層氧化膜才做得出來的紫。目錄用它對面的青，兩個都不是自然界的顏色。',
+    from: '機殼與散熱鰭片。這是十套裡唯一一套 accent 完全不出現在自然光下的。',
+    dark: {
+      base: '#1a1a1f', sunken: '#141419', surface: '#202027', raised: '#2a2a33', border: '#34343f',
+      text: '#e2e2e8', muted: '#91919e', faint: '#55555f',
+      accent: '#a97dff', folder: '#6bb8f5', warn: '#e6b158', good: '#77cf8a', bad: '#ff6a72',
+      kindDoc: '#9e9eab', kindMedia: '#64d0c8',
+      sel: '#322a48', onSel: '#f0eaff', shadowC: '#000000', shadowA: 0.55,
+    },
+    light: {
+      base: '#eeeef1', sunken: '#e4e4e9', surface: '#fbfbfd', raised: '#e0e0e7', border: '#d2d2da',
+      text: '#1e1e24', muted: '#63636f', faint: '#b4b4bf',
+      accent: '#6b3fd4', folder: '#0a63aa', warn: '#835a0e', good: '#2f7a45', bad: '#bf2f3e',
+      kindDoc: '#5c5c68', kindMedia: '#0f7570',
+      sel: '#e2daf7', onSel: '#2a1a52', shadowC: '#191923', shadowA: 0.14,
+    },
+  },
+  {
+    id: 'verdigris', name: '銅綠', key: 'verd', family: '金屬',
+    note: '氧化的青銅：底是暗掉的黃銅，目錄是銅綠，accent 是還沒鏽的那面銅。整套只有兩個色相，靠明度撐開七階。',
+    from: '戶外的青銅件。銅綠是它自己長出來的顏色，所以拿來標目錄 —— 目錄也是自己長出來的。',
+    dark: {
+      base: '#16150f', sunken: '#100f0b', surface: '#1d1b14', raised: '#27251b', border: '#343123',
+      text: '#e8e2cf', muted: '#a09983', faint: '#605b49',
+      accent: '#d98a3f', folder: '#62c2a4', warn: '#e0b455', good: '#8fc46a', bad: '#e2635a',
+      kindDoc: '#a8a18c', kindMedia: '#5fbfb4',
+      sel: '#33301f', onSel: '#f8f2df', shadowC: '#000000', shadowA: 0.62,
+    },
+    light: {
+      base: '#f0ece0', sunken: '#e6e0d0', surface: '#fbf8ee', raised: '#e2dccb', border: '#cfc7b1',
+      text: '#26231a', muted: '#676150', faint: '#b4ac96',
+      accent: '#8a4e17', folder: '#1f7a63', warn: '#7d5a0e', good: '#45702f', bad: '#9c3325',
+      kindDoc: '#625d4c', kindMedia: '#1c6f68',
+      sel: '#ddd6c0', onSel: '#2b2617', shadowC: '#322d1e', shadowA: 0.16,
+    },
+  },
+  {
+    id: 'riso', name: '孔版', key: 'riso', family: '印刷',
+    note: '孔版印刷：新聞紙底，兩個油墨 —— 螢光粉和反射藍。沒有中間調，也幾乎沒有陰影（shadowA 0.10），所以層次全靠平塗色塊分。用得起這套的排版必須不依賴浮起來的卡片。',
+    from: '孔版一次只能疊兩三個色版，每個都是不透明平塗。這是十套裡唯一一套刻意讓 elevation 失效的。',
+    light: {
+      base: '#efece4', sunken: '#e5e1d6', surface: '#faf8f2', raised: '#e3dfd2', border: '#cdc7b8',
+      text: '#1a1a1a', muted: '#5d5d5d', faint: '#adaaa0',
+      accent: '#e0004d', folder: '#1642c8', warn: '#a35f00', good: '#00674f', bad: '#c2003f',
+      kindDoc: '#565656', kindMedia: '#00726b',
+      sel: '#ffd9e6', onSel: '#4a0a22', shadowC: '#1a1a1a', shadowA: 0.1,
+    },
+    dark: {
+      base: '#14131a', sunken: '#0e0d13', surface: '#1a1922', raised: '#23222d', border: '#2e2d3a',
+      text: '#ece9f2', muted: '#94909f', faint: '#565360',
+      accent: '#ff5c94', folder: '#6f8dff', warn: '#ffb340', good: '#45d3a8', bad: '#ff4f6d',
+      kindDoc: '#9c98a8', kindMedia: '#4fd0c6',
+      sel: '#3a2036', onSel: '#ffe6f0', shadowC: '#000000', shadowA: 0.12,
+    },
+  },
+  {
+    id: 'oscilloscope', name: '示波', key: 'scope', family: '感光',
+    note: '示波器：底是帶橄欖的黑，字是螢光綠。accent 就是 good —— 儀器上「有訊號」和「正常」本來就是同一個顏色，代價是傳輸中和傳輸完成分不出來。',
+    from: '磷光屏。這套刻意讓兩個角色共用一個顏色，好讓那個代價看得見而不是藏起來。',
+    dark: {
+      base: '#0d1110', sunken: '#080b0a', surface: '#121716', raised: '#1a211f', border: '#242d2a',
+      text: '#d6e2d8', muted: '#7f9186', faint: '#4a5a52',
+      accent: '#4ee08a', folder: '#8fe3b4', warn: '#ffb300', good: '#4ee08a', bad: '#ff4d4d',
+      kindDoc: '#97a89c', kindMedia: '#5ad6cf',
+      sel: '#17322a', onSel: '#ddffe9', shadowC: '#000000', shadowA: 0.65,
+    },
+    light: {
+      base: '#e9eeea', sunken: '#dfe5e0', surface: '#f7faf8', raised: '#dbe3dd', border: '#c6d0c9',
+      text: '#10201a', muted: '#536159', faint: '#a4b0a8',
+      accent: '#05704a', folder: '#0d6b52', warn: '#7d5300', good: '#05704a', bad: '#b32b2b',
+      kindDoc: '#55625a', kindMedia: '#0a6d66',
+      sel: '#cfe3d6', onSel: '#06251a', shadowC: '#0f2319', shadowA: 0.14,
+    },
+  },
+  {
+    id: 'porcelain', name: '青花', key: 'porc', family: '紙',
+    note: '青花瓷：底是釉白，唯一的顏色是鈷藍，從 accent 到目錄到符號連結全部同一個色相不同明度。十套裡最單一的一套，也是唯一一套白得下得了手的。',
+    from: '釉下彩只有一個顏色可以用。這裡照辦：狀態色是必要的例外，其餘一律鈷藍。',
+    light: {
+      base: '#f1f3f5', sunken: '#e6eaef', surface: '#ffffff', raised: '#e2e8ef', border: '#ccd7e2',
+      text: '#14243a', muted: '#56697f', faint: '#a8b8c8',
+      accent: '#1d4ea8', folder: '#2c6fb5', warn: '#7d5f0f', good: '#2c6a52', bad: '#a83030',
+      kindDoc: '#5b6a7c', kindMedia: '#1f6f77',
+      sel: '#d5e2f4', onSel: '#0d244a', shadowC: '#14243a', shadowA: 0.13,
+    },
+    dark: {
+      base: '#101822', sunken: '#0b1119', surface: '#16202c', raised: '#1e2a38', border: '#283544',
+      text: '#dce6f2', muted: '#8699ad', faint: '#4d5f72',
+      accent: '#6fa8ff', folder: '#8ec8ff', warn: '#e5b055', good: '#6fce9e', bad: '#ff6b6b',
+      kindDoc: '#94a4b6', kindMedia: '#58c9c6',
+      sel: '#22354d', onSel: '#e9f2ff', shadowC: '#000000', shadowA: 0.55,
+    },
+  },
+];
+
+/* ==========================================================================
+   The content — one repository, three connections, one transfer in flight.
+   Identical in all one hundred, so only the design varies.
+   ========================================================================== */
+
+const CONNS = [
+  { name: 'Local', detail: 'this machine', state: 'good', tabs: ['workspace'], ms: '—' },
+  { name: 'box-01', detail: 'ssh · 10.0.0.14', state: 'good', tabs: ['/var/log', 'Documents'], ms: '18 ms' },
+  { name: 'vault', detail: 'ssh · vault.lan', state: 'bad', tabs: [], ms: 'refused' },
+];
+
+const PLACES = [
+  ['Home', '~'], ['Documents', '~/Documents'], ['Downloads', '~/Downloads'], ['Root', '/'],
+];
+
+/* d: depth, k: dir | file | link | other, x: expanded | collapsed, s: status */
+const TREE = [
+  { d: 0, n: 'src', k: 'dir', x: 'expanded', z: '412 KB' },
+  { d: 1, n: 'browser', k: 'dir', x: 'expanded', z: '23 KB' },
+  { d: 2, n: 'mod.rs', k: 'file', z: '4.8 KB' },
+  { d: 2, n: 'tree.rs', k: 'file', z: '18.2 KB' },
+  { d: 1, n: 'client', k: 'dir', x: 'collapsed', s: 'loading', z: '—' },
+  { d: 1, n: 'gui', k: 'dir', x: 'expanded', z: '49 KB' },
+  { d: 2, n: 'app.rs', k: 'file', z: '21.4 KB' },
+  { d: 2, n: 'dock.rs', k: 'file', z: '15.7 KB' },
+  { d: 2, n: 'glyph.rs', k: 'file', z: '4.1 KB' },
+  { d: 2, n: 'mod.rs', k: 'file', z: '2.4 KB' },
+  { d: 2, n: 'theme.rs', k: 'file', z: '6.3 KB' },
+  { d: 1, n: 'server', k: 'dir', x: 'collapsed', s: 'unreadable', z: '—' },
+  { d: 1, n: 'tui', k: 'dir', x: 'collapsed', z: '118 KB' },
+  { d: 1, n: 'lib.rs', k: 'file', z: '2.1 KB' },
+  { d: 1, n: 'protocol.rs', k: 'file', z: '1.9 KB' },
+  { d: 0, n: 'docs', k: 'dir', x: 'collapsed', z: '88 KB' },
+  { d: 0, n: 'proto', k: 'dir', x: 'collapsed', z: '6 KB' },
+  { d: 0, n: 'scripts', k: 'dir', x: 'collapsed', z: '9 KB' },
+  { d: 0, n: 'target', k: 'other', s: 'unreadable', z: '—' },
+  { d: 0, n: 'Cargo.toml', k: 'file', z: '3.7 KB' },
+  { d: 0, n: 'Cargo.lock', k: 'file', z: '154 KB' },
+  { d: 0, n: 'Makefile', k: 'file', z: '1.8 KB' },
+  { d: 0, n: 'README.md', k: 'file', z: '2.9 KB' },
+  { d: 0, n: 'latest', k: 'link', z: 'target/debug' },
+  { d: 0, n: '.DS_Store', k: 'other', z: '6.1 KB' },
+];
+
+/* The other host. Only the two-pane layout shows two listings at once, and a
+   remote pane that repeats the local tree would be the one place this page
+   lied about what a second connection is for. */
+const REMOTE = [
+  { d: 0, n: 'apt', k: 'dir', x: 'collapsed', z: '1.4 MB' },
+  { d: 0, n: 'journal', k: 'dir', x: 'expanded', z: '100 MB' },
+  { d: 1, n: 'system.journal', k: 'file', z: '88 MB' },
+  { d: 1, n: 'user-1000.journal', k: 'file', z: '12 MB' },
+  { d: 0, n: 'nginx', k: 'dir', x: 'collapsed', s: 'unreadable', z: '—' },
+  { d: 0, n: 'private', k: 'dir', x: 'collapsed', s: 'unreadable', z: '—' },
+  { d: 0, n: 'alternatives.log', k: 'file', z: '24 KB' },
+  { d: 0, n: 'auth.log', k: 'file', z: '1.2 MB' },
+  { d: 0, n: 'boot.log', k: 'file', z: '18 KB' },
+  { d: 0, n: 'cloud-init.log', k: 'file', z: '240 KB' },
+  { d: 0, n: 'dpkg.log', k: 'file', z: '412 KB' },
+  { d: 0, n: 'kern.log', k: 'file', z: '2.8 MB' },
+  { d: 0, n: 'syslog', k: 'file', z: '6.1 MB' },
+  { d: 0, n: 'syslog.1', k: 'file', z: '9.4 MB' },
+  { d: 0, n: 'btmp', k: 'other', z: '0 B' },
+  { d: 0, n: 'lastlog', k: 'other', z: '292 KB' },
+  { d: 0, n: 'wtmp', k: 'other', z: '84 KB' },
+];
+
+const SEL = 7;                                   /* src/gui/dock.rs */
+const PATH = '/Users/tanch/workspace/file-peeker';
+const CRUMBS = ['Users', 'tanch', 'workspace', 'file-peeker'];
+const XFER = { name: 'report.pdf', route: 'Local → box-01', pct: 62, done: '4.2 MB', total: '6.8 MB' };
+const CLIP = { name: 'report.pdf', from: 'Local · ~/Downloads' };
+
+const LOG = [
+  ['14:02:11', 'list', '/Users/tanch/workspace/file-peeker', 'ok · 25 entries', 'good'],
+  ['14:02:11', 'list', 'src/gui', 'ok · 5 entries', 'good'],
+  ['14:02:12', 'list', 'src/server', 'denied · permission denied', 'warn'],
+  ['14:02:14', 'copy', 'report.pdf → box-01', '62% · 4.2/6.8 MB', 'accent'],
+  ['14:02:15', 'dial', 'vault.lan:7100', 'connection refused', 'bad'],
+];
+
+const KINDS = { dir: 'folder', file: 'kindDoc', link: 'kindMedia', other: 'muted' };
+const STATUS = { loading: 'loading', unreadable: 'unreadable' };
+
+function tint(row, P) { return P[KINDS[row.k]]; }
+function statusOf(row) {
+  if (row.s) return row.s;
+  return row.k === 'dir' ? '' : row.k === 'file' ? 'file' : row.k === 'link' ? 'link' : 'other';
+}
+function statusColour(row, P) {
+  if (row.s === 'unreadable') return P.warn;
+  if (row.s === 'loading') return P.muted;
+  return tint(row, P);
+}
+
+/* ==========================================================================
+   Shared parts. Every layout is assembled from these, which is why ten layouts
+   are ten arrangements rather than ten products.
+   ========================================================================== */
+
+/** The custom titlebar: traffic lights, breadcrumb, one pill. */
+function titlebar(f, h, opt) {
+  const P = f.P, o = opt || {};
+  f.rect(0, 0, f.w, h, o.fill || P.base);
+  f.hair(0, h - 1, f.w, P.border);
+  f.traffic(18, h / 2);
+  let x = o.crumbX || 90;
+  f.text(x, h / 2, '／', { size: 12, fill: P.faint });
+  x += 16;
+  const parts = o.crumbs || CRUMBS;
+  parts.forEach((part, i) => {
+    const last = i === parts.length - 1;
+    const size = last ? 13.5 : 13;
+    f.text(x, h / 2, part, { size, fill: last ? P.text : P.muted, weight: last ? 600 : 400 });
+    x += measure(part, size) + 6;
+    if (!last) { f.text(x, h / 2, '›', { size: 12, fill: P.faint }); x += 11; }
+  });
+  if (o.right !== false) pill(f, f.w - 14 - 62, h / 2 - 13, 62, 'Light');
+  return h;
+}
+
+/** The one button shape the app has: borderless, filled only on hover. */
+function pill(f, x, y, w, label, opt) {
+  const P = f.P, o = opt || {};
+  if (o.on) f.rect(x, y, w, 26, o.fill || P.raised, { r: 7 });
+  f.text(x + w / 2, y + 13, label, { size: 12, fill: o.on ? (o.text || P.text) : P.muted, align: 'center' });
+}
+
+/** A sidebar section heading. */
+function section(f, x, y, label) {
+  f.text(x, y, label, { size: 10.5, fill: f.P.faint, track: '.04em' });
+}
+
+/** One connection row: 38pt tall, a 2.5pt accent marker, a status dot. */
+function connectionRow(f, x, y, w, conn, active) {
+  const P = f.P;
+  f.rect(x, y, w, 38, active ? P.raised : P.surface, { r: 8, op: active ? 1 : 0 });
+  if (active) f.rect(x, y + 8, 2.5, 22, P.accent, { r: 2 });
+  f.dot(x + 18, y + 19, P[conn.state === 'bad' ? 'bad' : 'good']);
+  f.text(x + 32, y + 13, conn.name, { size: 12.5, fill: P.text, weight: 500, max: w - 42 });
+  f.text(x + 32, y + 27, conn.detail, { size: 10.5, fill: P.faint, max: w - 42 });
+}
+
+/** One Places row. */
+function placeRow(f, x, y, w, place, on) {
+  const P = f.P;
+  if (on) f.rect(x, y, w, 28, P.raised, { r: 7 });
+  f.folder(x + 8, y + 7.5, P.folder, false);
+  f.text(x + 30, y + 14, place[0], { size: 12, fill: on ? P.text : P.muted, max: w - 40 });
+}
+
+/** The transfer in flight, as a labelled track. */
+function transfer(f, x, y, w, opt) {
+  const P = f.P, o = opt || {};
+  f.text(x, y, XFER.name, { size: 11.5, fill: P.text, max: w - 40 });
+  f.text(x + w, y, XFER.pct + '%', { size: 10.5, fill: P.accent, align: 'right', mono: true });
+  f.rect(x, y + 10, w, 4, P.raised, { r: 2 });
+  f.rect(x, y + 10, w * XFER.pct / 100, 4, P.accent, { r: 2 });
+  if (o.route !== false) {
+    f.text(x, y + 24, XFER.route, { size: 10.5, fill: P.faint, max: w - 70 });
+    f.text(x + w, y + 24, XFER.done + ' / ' + XFER.total, { size: 10.5, fill: P.faint, align: 'right' });
+  }
+}
+
+/** The bottom status bar. */
+function statusBar(f, opt) {
+  const P = f.P, o = opt || {};
+  const y = f.h - 28;
+  f.rect(0, y, f.w, 28, P.sunken);
+  f.hair(0, y, f.w, P.border);
+  f.text(14, y + 14, o.left || 'Local · this machine', { size: 11, fill: P.muted });
+  f.text(f.w - 14, y + 14, o.right || (TREE.length + ' items'), { size: 11, fill: P.faint, align: 'right' });
+  return y;
+}
+
+/** The dock tab bar. */
+function tabBar(f, x, y, w, tabs, active) {
+  const P = f.P;
+  let tx = x;
+  tabs.forEach((label, i) => {
+    const on = i === active;
+    const tw = measure(label, 12) + 50;
+    f.rect(tx, y, tw, 30, on ? P.surface : P.raised, { r: 7, op: on ? 1 : 0.55 });
+    if (on) f.rect(tx + 10, y + 27, tw - 20, 2, P.accent, { r: 1 });
+    f.text(tx + 13, y + 15, label, { size: 12, fill: on ? P.text : P.muted, max: tw - 40 });
+    f.cross(tx + tw - 15, y + 15, P.faint);
+    tx += tw + 4;
+  });
+  return y + 30;
+}
+
+/** The filter row: a `/`, a borderless field, and the match count. */
+function filterRow(f, x, y, w, opt) {
+  const P = f.P, o = opt || {};
+  f.text(x + 14, y + 20, '/', { size: 13, fill: P.accent, mono: true });
+  const q = o.query !== undefined ? o.query : '';
+  f.text(x + 26, y + 20, q || 'Filter by name…', { size: 13, fill: q ? P.text : P.faint, max: w - 130 });
+  if (q) f.rect(x + 26 + measure(q, 13) + 1, y + 11, 1.5, 17, P.accent);
+  f.text(x + w - 14, y + 20, o.matches || '25 matches', { size: 11.5, fill: P.muted, align: 'right' });
+  f.hair(x, y + 40, w, P.border, 0.6);
+  return y + 40;
+}
+
+/** The width the scroll thumb keeps for itself, in both header and body. */
+const GUTTER = 12;
+
+/** The column header. */
+function columnHeader(f, x, y, w, cols) {
+  const P = f.P;
+  f.text(x + 39, y + 12, 'Name', { size: 10, fill: P.muted, op: 0.75 });
+  let right = x + w - GUTTER;
+  cols.forEach((col) => {
+    f.text(right - 2, y + 12, col.label, { size: 10, fill: P.muted, op: 0.75, align: 'right' });
+    right -= col.w;
+    f.vair(right + 6, y + 6, 12, P.border, 0.5);
+  });
+  return y + 24;
+}
+
+/**
+ * The listing. One background and one click target per row, indent guides, the
+ * expander, the glyph, a clipped name, and the right-hand columns.
+ */
+function listRows(f, x, y, w, opt) {
+  const P = f.P, o = opt || {};
+  const rowH = o.rowH || 26;
+  const cols = o.cols || [{ key: 'status', label: 'Status', w: 88 }];
+  const data = o.data || TREE;
+  const room = Math.floor(o.h / rowH);
+  const start = o.start || 0;
+  const shown = data.slice(start, start + room);
+  const sel = o.sel === undefined ? SEL : o.sel;
+  /* egui's scroll thumb is drawn inside the viewport, so the columns give up
+     the width it needs rather than being painted over by it. Reserved whether
+     or not this listing overflows, so the columns do not jump when it does. */
+  const gutter = GUTTER;
+
+  shown.forEach((row, i) => {
+    const ry = y + i * rowH;
+    const index = start + i;
+    const on = index === sel;
+    const dim = o.dim ? 0.45 : 1;
+    if (on) f.rect(x + 2, ry + 1, w - 4, rowH - 2, P.sel, { r: 6 });
+    else if (o.band && i % 2) f.rect(x, ry, w, rowH, P.raised, { op: 0.35 });
+
+    let cx = x + 10;
+    for (let level = 0; level < row.d; level++) {
+      f.vair(cx + level * 15 + 3, ry + 1, rowH - 2, P.faint, 0.45);
+    }
+    cx += row.d * 15;
+    if (row.k === 'dir') {
+      f.chevron(cx + 5, ry + rowH / 2, on ? P.onSel : P.muted, row.x === 'expanded');
+    }
+    cx += 15;
+    const glyphTint = on ? P.onSel : tint(row, P);
+    if (row.k === 'dir') f.folder(cx, ry + rowH / 2 - 6.5, glyphTint, row.x === 'expanded');
+    else f.file(cx, ry + rowH / 2 - 6.5, glyphTint);
+    cx += 24;
+
+    let budget = w - (cx - x) - 12 - gutter;
+    cols.forEach((c) => { budget -= c.w; });
+    f.text(cx, ry + rowH / 2, row.n, {
+      size: o.nameSize || 12.5,
+      fill: on ? P.onSel : P.text,
+      op: dim,
+      max: Math.max(40, budget),
+      weight: row.k === 'dir' ? 500 : 400,
+    });
+
+    let right = x + w - 2 - gutter;
+    cols.forEach((c) => {
+      const value = c.key === 'status' ? statusOf(row)
+        : c.key === 'size' ? row.z
+        : c.key === 'kind' ? (row.k === 'dir' ? 'folder' : row.k)
+        : c.key === 'modified' ? MODIFIED[index % MODIFIED.length]
+        : c.key === 'path' ? parentOf(data, index)
+        : '';
+      const colour = on ? P.onSel : c.key === 'status' ? statusColour(row, P) : P.faint;
+      f.text(right, ry + rowH / 2, value, {
+        size: c.size || 10.5, fill: colour, align: 'right', op: on ? 0.85 : 1, max: c.w - 8,
+        mono: c.mono,
+      });
+      right -= c.w;
+    });
+  });
+  if (data.length > room) {
+    f.thumb(x + w - 8, y + 2, o.h - 4, room / data.length, start / (data.length - room), P.faint);
+  }
+  return { rows: shown.length, room };
+}
+
+/** The row's parent path, walked back through the flattened tree. */
+function parentOf(data, i) {
+  const row = data[i];
+  if (!row || row.d === 0) return './';
+  const parts = [];
+  let depth = row.d;
+  for (let j = i - 1; j >= 0 && depth > 0; j--) {
+    if (data[j].d === depth - 1) { parts.unshift(data[j].n); depth--; }
+  }
+  return parts.join('/') + '/';
+}
+
+const MODIFIED = ['14:02', 'Aug 12', 'Aug 12', 'Jul 30', '14:02', 'Aug 14', 'Aug 14',
+  'Aug 14', 'Aug 13', 'Aug 09', 'Aug 13', 'Jul 21', 'Aug 11', 'Jul 17', 'Jul 21',
+  'Aug 14', 'Aug 12', 'Aug 14', '14:01', 'Aug 12', 'Aug 12', 'Aug 14', 'Aug 14',
+  'Aug 12', 'Aug 03'];
+
+/** The left rail shared by the layouts that keep one. */
+function railPanel(f, x, y, w, h, opt) {
+  const P = f.P, o = opt || {};
+  f.rect(x, y, w, h, P.sunken);
+  f.vair(x + w - 1, y, h, P.border);
+  let cy = y + 18;
+  section(f, x + 12, cy, 'Connections');
+  cy += 14;
+  CONNS.forEach((conn, i) => {
+    connectionRow(f, x + 8, cy, w - 16, conn, i === 0);
+    cy += 42;
+    if (o.tabs && conn.tabs.length) {
+      conn.tabs.forEach((tab, j) => {
+        const on = i === 0 && j === 0;
+        f.text(x + 34, cy + 9, tab, { size: 11, fill: on ? P.accent : P.faint, max: w - 46 });
+        cy += 20;
+      });
+      cy += 4;
+    }
+  });
+  cy += 8;
+  section(f, x + 12, cy, 'Places');
+  cy += 14;
+  PLACES.forEach((place, i) => { placeRow(f, x + 8, cy, w - 16, place, i === 0); cy += 30; });
+
+  if (o.clipboard && cy + 78 < y + h) {
+    cy += 10;
+    section(f, x + 12, cy, 'Clipboard');
+    cy += 16;
+    f.rect(x + 8, cy, w - 16, 40, P.raised, { r: 8 });
+    f.file(x + 18, cy + 13, P.kindDoc);
+    f.text(x + 40, cy + 14, CLIP.name, { size: 11.5, fill: P.text, max: w - 54 });
+    f.text(x + 40, cy + 28, CLIP.from, { size: 10, fill: P.faint, max: w - 54 });
+    cy += 52;
+  }
+  if (o.transfer && cy + 50 < y + h) {
+    section(f, x + 12, cy, 'Transfer');
+    transfer(f, x + 12, cy + 22, w - 24);
+  }
+  return cy;
+}
+
+/* ==========================================================================
+   The ten layouts
+   ========================================================================== */
+
+/* 1 ── 分頁塢 — what ships today. */
+function dock(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  const top = titlebar(f, 44);
+  const bottom = statusBar(f);
+  railPanel(f, 0, top, 216, bottom - top, { clipboard: true, transfer: true });
+
+  const cx = 216 + 10, cw = f.w - 216 - 20;
+  const tabsY = tabBar(f, cx, top + 10, cw, ['file-peeker', '/var/log', 'Documents'], 0);
+  const panelY = tabsY + 6;
+  const panelH = bottom - 10 - panelY;
+  f.rect(cx, panelY, cw, panelH, P.surface, { r: 10, shadow: true });
+  /* dock.rs:173 passes `palette.surface` as the track onto a panel that is
+     already `surface`, so today the bar has no track at all and the accent
+     segment slides through empty space with no start and no end. Inset by the
+     corner radius, since the panel is round and the bar is not. */
+  f.indeterminate(cx + 10, panelY + 1, cw - 20, P.accent);
+  const fy = filterRow(f, cx, panelY + 3, cw);
+  const hy = columnHeader(f, cx, fy, cw, [{ label: 'Status', w: 88 }]);
+  const listH = panelH - (hy - panelY) - 30;
+  listRows(f, cx, hy, cw, { h: listH });
+  const foot = panelY + panelH - 30;
+  f.hair(cx, foot, cw, P.border);
+  f.text(cx + 14, foot + 15, PATH + '/src/gui/dock.rs', { size: 11.5, fill: P.muted, max: cw - 120 });
+  f.text(cx + cw - 14, foot + 15, '25 rows', { size: 10.5, fill: P.faint, align: 'right', mono: true });
+}
+
+/* 2 ── 側欄 — no tab bar; the browsers become a segmented control. */
+function sidebarLayout(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  f.rect(0, 0, f.w, 52, P.sunken);
+  f.hair(0, 51, f.w, P.border);
+  f.traffic(18, 26);
+  let x = 90;
+  f.text(x, 26, '／', { size: 12, fill: P.faint }); x += 16;
+  CRUMBS.forEach((part, i) => {
+    const last = i === CRUMBS.length - 1;
+    f.text(x, 26, part, { size: 13.5, fill: last ? P.text : P.muted, weight: last ? 600 : 400 });
+    x += measure(part, 13.5) + 6;
+    if (!last) { f.text(x, 26, '›', { size: 12, fill: P.faint }); x += 11; }
+  });
+
+  /* One segmented control replaces the tab strip: fewer pixels, same job. */
+  const segs = ['file-peeker', '/var/log', 'Documents'];
+  let sw = 0;
+  segs.forEach((s) => { sw += measure(s, 11.5) + 26; });
+  const sx = f.w - 300 - sw;
+  f.rect(sx, 13, sw, 26, P.raised, { r: 7 });
+  let gx = sx;
+  segs.forEach((s, i) => {
+    const w = measure(s, 11.5) + 26;
+    if (i === 0) f.rect(gx + 2, 15, w - 4, 22, P.surface, { r: 6 });
+    f.text(gx + w / 2, 26, s, { size: 11.5, fill: i === 0 ? P.text : P.muted, align: 'center' });
+    gx += w;
+  });
+  f.rect(f.w - 286, 13, 200, 26, P.raised, { r: 7 });
+  f.text(f.w - 274, 26, '/', { size: 12, fill: P.accent, mono: true });
+  f.text(f.w - 262, 26, 'Filter by name…', { size: 12, fill: P.faint });
+  pill(f, f.w - 76, 13, 62, 'Light');
+
+  const bottom = statusBar(f, { right: '25 items · 1 selected' });
+  railPanel(f, 0, 52, 240, bottom - 52, { tabs: true, clipboard: true });
+
+  /* Full-bleed content: no card, the hairline under the header is the edge. */
+  const cx = 240, cw = f.w - 240;
+  f.rect(cx, 52, cw, bottom - 52, P.surface);
+  const cols = [
+    { label: 'Modified', w: 96, key: 'modified' },
+    { label: 'Size', w: 92, key: 'size', mono: true },
+    { label: 'Kind', w: 82, key: 'kind' },
+  ];
+  const hy = columnHeader(f, cx, 52, cw, cols);
+  f.hair(cx, hy, cw, P.border);
+  listRows(f, cx, hy + 1, cw, { h: bottom - hy - 1, cols, band: true });
+}
+
+/* 3 ── 瀑布欄 — Miller columns; every level stays on screen. */
+function miller(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  const top = titlebar(f, 48);
+  const bottom = statusBar(f, { right: 'src/gui/dock.rs · 15.7 KB' });
+  railPanel(f, 0, top, 200, bottom - top, {});
+
+  const cx = 200, cw = f.w - 200;
+  f.rect(cx, top, cw, bottom - top, P.surface);
+
+  const COLW = 232;
+  /* The selection chain is src › gui › dock.rs, so each column's highlight has
+     to be the entry the next column is listing. */
+  const columns = [
+    { rows: TREE.filter((r) => r.d === 0), on: 0 },
+    { rows: TREE.filter((r) => r.d === 1), on: 2 },
+    { rows: TREE.filter((r) => r.d === 2 && r.n.endsWith('.rs')).slice(2), on: 1 },
+  ];
+  columns.forEach((col, ci) => {
+    const x = cx + ci * COLW;
+    f.vair(x + COLW - 1, top, bottom - top, P.border, 0.7);
+    col.rows.slice(0, Math.floor((bottom - top - 12) / 26)).forEach((row, i) => {
+      const ry = top + 8 + i * 26;
+      const on = i === col.on;
+      if (on) f.rect(x + 6, ry, COLW - 14, 26, ci === 2 ? P.sel : P.raised, { r: 6 });
+      const glyphTint = on && ci === 2 ? P.onSel : tint(row, P);
+      if (row.k === 'dir') f.folder(x + 14, ry + 6.5, glyphTint, false);
+      else f.file(x + 14, ry + 6.5, glyphTint);
+      f.text(x + 36, ry + 13, row.n, {
+        size: 12.5, fill: on && ci === 2 ? P.onSel : P.text, max: COLW - 70,
+        weight: row.k === 'dir' ? 500 : 400,
+      });
+      if (row.k === 'dir') {
+        f.chevron(x + COLW - 20, ry + 13, on ? (ci === 2 ? P.onSel : P.text) : P.faint, false);
+      }
+      if (row.s === 'unreadable') f.text(x + COLW - 34, ry + 13, '!', { size: 11, fill: P.warn, align: 'right' });
+    });
+  });
+
+  /* The preview pane is the fourth column, and it is where the metadata went. */
+  const px = cx + 3 * COLW, pw = cw - 3 * COLW;
+  f.rect(px, top, pw, bottom - top, P.sunken);
+  f.rect(px + pw / 2 - 34, top + 32, 68, 62, P.raised, { r: 10 });
+  f.file(px + pw / 2 - 21, top + 44, P.kindDoc);
+  f.text(px + pw / 2, top + 110, 'dock.rs', { size: 15, fill: P.text, align: 'center', weight: 600 });
+  f.text(px + pw / 2, top + 130, 'Rust source · 15.7 KB', { size: 11, fill: P.muted, align: 'center' });
+  let my = top + 162;
+  [['Where', 'src/gui'], ['Modified', 'Aug 14 · 14:02'], ['Created', 'Aug 12 · 20:59'],
+   ['Owner', 'tanch · staff'], ['Mode', '-rw-r--r--'], ['Host', 'Local · this machine']]
+    .forEach(([k, v]) => {
+      f.text(px + 20, my, k, { size: 10.5, fill: P.faint });
+      f.text(px + pw - 20, my, v, { size: 10.5, fill: P.muted, align: 'right', max: pw - 100 });
+      my += 22;
+    });
+  f.hair(px + 20, my + 6, pw - 40, P.border);
+  section(f, px + 20, my + 28, 'Transfer');
+  transfer(f, px + 20, my + 50, pw - 40);
+}
+
+/* 4 ── 檢視器 — the metadata gets a permanent home on the right. */
+function inspector(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  const top = titlebar(f, 44);
+  const bottom = statusBar(f);
+  railPanel(f, 0, top, 208, bottom - top, {});
+
+  const iw = 300, ix = f.w - iw;
+  const cx = 208 + 10, cw = ix - cx - 10;
+  const tabsY = tabBar(f, cx, top + 10, cw, ['file-peeker', '/var/log'], 0);
+  const panelY = tabsY + 6, panelH = bottom - 10 - panelY;
+  f.rect(cx, panelY, cw, panelH, P.surface, { r: 10, shadow: true });
+  const fy = filterRow(f, cx, panelY, cw);
+  const cols = [{ label: 'Size', w: 88, key: 'size', mono: true }, { label: 'Status', w: 80, key: 'status' }];
+  const hy = columnHeader(f, cx, fy, cw, cols);
+  listRows(f, cx, hy, cw, { h: panelH - (hy - panelY), cols });
+
+  /* The inspector: one column, no tabs, everything visible at once. */
+  f.rect(ix, top, iw, bottom - top, P.sunken);
+  f.vair(ix, top, bottom - top, P.border);
+  f.rect(ix + 20, top + 22, iw - 40, 88, P.raised, { r: 10 });
+  f.file(ix + 44, top + 58, P.kindDoc);
+  f.text(ix + 78, top + 54, 'dock.rs', { size: 15, fill: P.text, weight: 600 });
+  f.text(ix + 78, top + 74, '15.7 KB · Rust source', { size: 11, fill: P.muted });
+  let my = top + 138;
+  section(f, ix + 20, my, 'Where');
+  f.text(ix + 20, my + 20, PATH + '/src/gui', { size: 11, fill: P.muted, max: iw - 40 });
+  my += 46;
+  f.hair(ix + 20, my, iw - 40, P.border);
+  my += 20;
+  [['Modified', 'Aug 14 · 14:02'], ['Created', 'Aug 12 · 20:59'], ['Owner', 'tanch'],
+   ['Group', 'staff'], ['Mode', '-rw-r--r--'], ['Kind', 'file'], ['Host', 'Local']]
+    .forEach(([k, v]) => {
+      f.text(ix + 20, my, k, { size: 11, fill: P.faint });
+      f.text(ix + iw - 20, my, v, { size: 11, fill: P.text, align: 'right' });
+      my += 24;
+    });
+  my += 6;
+  f.hair(ix + 20, my, iw - 40, P.border);
+  my += 22;
+  section(f, ix + 20, my, 'Transfers');
+  transfer(f, ix + 20, my + 24, iw - 40);
+  my += 74;
+  f.text(ix + 20, my, CLIP.name, { size: 11.5, fill: P.muted, max: iw - 90 });
+  f.text(ix + iw - 20, my, 'queued', { size: 10.5, fill: P.faint, align: 'right' });
+}
+
+/* 5 ── 雙面板 — y and p become a distance you can see. */
+function dual(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  const top = titlebar(f, 44, { right: false });
+  pill(f, f.w - 76, 9, 62, 'Light');
+
+  /* The bottom bar is key hints here: two panes need a shared command line. */
+  const bottom = f.h - 34;
+  f.rect(0, bottom, f.w, 34, P.sunken);
+  f.hair(0, bottom, f.w, P.border);
+  let kx = 14;
+  [['y', 'copy'], ['p', 'paste'], ['Tab', 'other pane'], ['/', 'filter'],
+   ['⌘N', 'tab'], ['⌘W', 'close'], ['⌘K', 'connections']].forEach(([k, label]) => {
+    f.rect(kx, bottom + 9, measure(k, 10.5, true) + 12, 17, P.raised, { r: 4 });
+    f.text(kx + 6, bottom + 17.5, k, { size: 10.5, fill: P.accent, mono: true });
+    kx += measure(k, 10.5, true) + 18;
+    f.text(kx, bottom + 17.5, label, { size: 11, fill: P.muted });
+    kx += measure(label, 11) + 22;
+  });
+
+  const GUT = 76;
+  const paneW = (f.w - GUT) / 2;
+  [0, 1].forEach((side) => {
+    const x = side ? paneW + GUT : 0;
+    const active = side === 0;
+    f.rect(x, top, paneW, bottom - top, P.surface);
+    if (side) f.vair(x, top, bottom - top, P.border);
+    else f.vair(x + paneW - 1, top, bottom - top, P.border);
+
+    /* Each pane carries its own connection chip, because which host you are on
+       is the one thing a two-pane copy must never leave ambiguous. */
+    f.rect(x, top, paneW, 40, P.sunken);
+    f.hair(x, top + 39, paneW, P.border);
+    f.dot(x + 20, top + 20, P[side ? 'good' : 'good']);
+    f.text(x + 34, top + 20, side ? 'box-01' : 'Local', { size: 12.5, fill: P.text, weight: 600 });
+    f.text(x + 34 + measure(side ? 'box-01' : 'Local', 12.5) + 10, top + 20,
+      side ? '/var/log' : '~/workspace/file-peeker',
+      { size: 11.5, fill: P.muted, max: paneW - 150 });
+    if (active) f.rect(x, top + 38, paneW, 2, P.accent);
+    f.text(x + paneW - 14, top + 20, side ? '18 ms' : 'local', { size: 10.5, fill: P.faint, align: 'right', mono: true });
+
+    /* Both columns, not just Size: without Status a refused expansion has no
+       way to say so, and a copy target you cannot read is exactly what this
+       layout exists to show you before you press p. */
+    const cols = [
+      { label: 'Size', w: 84, key: 'size', mono: true },
+      { label: 'Status', w: 80, key: 'status' },
+    ];
+    const hy = columnHeader(f, x, top + 40, paneW, cols);
+    listRows(f, x, hy, paneW, {
+      h: bottom - hy, cols, data: side ? REMOTE : TREE,
+      sel: active ? SEL : 12, dim: !active,
+    });
+  });
+
+  /* The gutter is the operation itself. */
+  const gx = paneW;
+  f.rect(gx, top, GUT, bottom - top, P.base);
+  const mid = (top + bottom) / 2;
+  f.rect(gx + 14, mid - 62, GUT - 28, 34, P.raised, { r: 8 });
+  f.arrow(gx + GUT / 2, mid - 45, P.accent, 1, 20);
+  f.rect(gx + 14, mid - 22, GUT - 28, 34, P.raised, { r: 8 });
+  f.arrow(gx + GUT / 2, mid - 5, P.muted, -1, 20);
+  f.text(gx + GUT / 2, mid + 34, XFER.pct + '%', { size: 11, fill: P.accent, align: 'center', mono: true });
+  f.rect(gx + 18, mid + 46, GUT - 36, 4, P.raised, { r: 2 });
+  f.rect(gx + 18, mid + 46, (GUT - 36) * XFER.pct / 100, 4, P.accent, { r: 2 });
+  f.text(gx + GUT / 2, mid + 64, 'report', { size: 9.5, fill: P.faint, align: 'center' });
+}
+
+/* 6 ── 指令面板 — the filter, which is already the fastest way through a
+       filesystem, promoted from a row to the whole interaction. */
+function commandPalette(f) {
+  const P = f.P;
+  /* Whatever is behind, behind it stays: the overlay is this layout, so the
+     backdrop falls back on its own when the window is too small for the dock. */
+  const under = LAYOUTS[0];
+  if (f.w >= under.min.w && f.h >= under.min.h) dock(f);
+  else compact(f, under.grammar);
+  /* Dimmed by a scrim, not blurred: egui has no backdrop filter. The scrim is
+     the palette's own shadow colour, so it darkens in the light themes too. */
+  f.rect(0, 0, f.w, f.h, P.shadowC, { op: 0.42 });
+
+  const w = Math.min(720, f.w - 64);
+  const h = Math.min(428, f.h - 132);
+  const x = (f.w - w) / 2, y = Math.min(96, (f.h - h) / 2 - 20);
+  /* The stroke is not decoration: `visuals.window_stroke` in theme.rs already
+     puts a border hairline on every egui window, shadow or no shadow. */
+  f.rect(x, y, w, h, P.surface, { r: 12, shadow: true, stroke: P.border });
+  f.rect(x, y, w, 56, P.raised, { r: 12 });
+  f.rect(x, y + 44, w, 12, P.raised);
+  f.hair(x, y + 55, w, P.border);
+  f.text(x + 22, y + 28, '/', { size: 17, fill: P.accent, mono: true });
+  f.text(x + 40, y + 28, 'gui/th', { size: 16, fill: P.text });
+  f.rect(x + 40 + measure('gui/th', 16) + 2, y + 16, 2, 24, P.accent);
+  f.text(x + w - 22, y + 28, '3 matches', { size: 11.5, fill: P.muted, align: 'right' });
+
+  const hits = [
+    ['theme.rs', 'src/gui', '6.3 KB', 'file'],
+    ['glyph.rs', 'src/gui', '4.1 KB', 'file'],
+    ['gui', 'src', '49 KB', 'folder'],
+  ];
+  const room = Math.floor((h - 68 - 92) / 44);
+  hits.slice(0, Math.max(1, room)).forEach((hit, i) => {
+    const ry = y + 68 + i * 44;
+    if (i === 0) f.rect(x + 8, ry, w - 16, 44, P.sel, { r: 8 });
+    const on = i === 0;
+    if (hit[3] === 'folder') f.folder(x + 24, ry + 15, on ? P.onSel : P.folder, false);
+    else f.file(x + 24, ry + 15, on ? P.onSel : P.kindDoc);
+    /* The matched span is the one place accent appears inside a row. */
+    const pre = hit[0].slice(0, hit[0].startsWith('gui') ? 3 : 2);
+    f.text(x + 50, ry + 16, hit[0], { size: 13.5, fill: on ? P.onSel : P.text, weight: 500 });
+    f.rect(x + 50, ry + 27, measure(pre, 13.5), 1.5, on ? P.onSel : P.accent);
+    f.text(x + 50, ry + 33, hit[1], { size: 10.5, fill: on ? P.onSel : P.faint, op: on ? 0.8 : 1 });
+    f.text(x + w - 24, ry + 22, hit[2], {
+      size: 11, fill: on ? P.onSel : P.faint, align: 'right', mono: true, op: on ? 0.8 : 1,
+    });
+  });
+
+  f.hair(x, y + h - 92, w, P.border);
+  section(f, x + 22, y + h - 72, 'Search on');
+  let ax = x + 22;
+  CONNS.forEach((conn) => {
+    const cw = measure(conn.name, 11.5) + 34;
+    f.rect(ax, y + h - 58, cw, 24, P.raised, { r: 6 });
+    f.dot(ax + 13, y + h - 46, P[conn.state === 'bad' ? 'bad' : 'good']);
+    f.text(ax + 24, y + h - 46, conn.name, { size: 11.5, fill: conn.state === 'bad' ? P.bad : P.muted });
+    ax += cw + 8;
+  });
+  let hx = x + 22;
+  [['↵', 'open'], ['⇥', 'complete'], ['⌃N', 'next'], ['esc', 'back']].forEach(([k, label]) => {
+    f.text(hx, y + h - 18, k, { size: 10.5, fill: P.accent, mono: true });
+    hx += measure(k, 10.5, true) + 7;
+    f.text(hx, y + h - 18, label, { size: 10.5, fill: P.faint });
+    hx += measure(label, 10.5) + 18;
+  });
+}
+
+/* 7 ── 縮圖 — the same tree as a grid, for directories full of media. */
+function gallery(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  f.rect(0, 0, f.w, 52, P.sunken);
+  f.hair(0, 51, f.w, P.border);
+  f.traffic(18, 26);
+  let x = 90;
+  f.text(x, 26, '／', { size: 12, fill: P.faint }); x += 16;
+  CRUMBS.forEach((part, i) => {
+    const last = i === CRUMBS.length - 1;
+    f.text(x, 26, part, { size: 13.5, fill: last ? P.text : P.muted, weight: last ? 600 : 400 });
+    x += measure(part, 13.5) + 6;
+    if (!last) { f.text(x, 26, '›', { size: 12, fill: P.faint }); x += 11; }
+  });
+  /* The view switch is the layout's own control, so it earns the toolbar. */
+  const modes = ['List', 'Grid'];
+  const mw = 62;
+  f.rect(f.w - 208, 13, mw * 2, 26, P.raised, { r: 7 });
+  modes.forEach((m, i) => {
+    if (i === 1) f.rect(f.w - 208 + mw + 2, 15, mw - 4, 22, P.surface, { r: 6 });
+    f.text(f.w - 208 + i * mw + mw / 2, 26, m, { size: 11.5, fill: i === 1 ? P.text : P.muted, align: 'center' });
+  });
+  pill(f, f.w - 76, 13, 62, 'Light');
+
+  const bottom = statusBar(f, { right: '25 items · 1 selected' });
+  railPanel(f, 0, 52, 208, bottom - 52, {});
+
+  const cx = 208, cw = f.w - 208;
+  f.rect(cx, 52, cw, bottom - 52, P.surface);
+  const fy = filterRow(f, cx, 52, cw);
+
+  const CELL = 152, CH = 128, GAP = 8;
+  const perRow = Math.floor((cw - 16) / (CELL + GAP));
+  /* The leftover width is split rather than left hanging on one side, so the
+     field reads as a grid instead of as a left-aligned list of squares. */
+  const inset = (cw - (perRow * (CELL + GAP) - GAP)) / 2;
+  TREE.slice(0, perRow * Math.floor((bottom - fy - 16) / (CH + GAP))).forEach((row, i) => {
+    const gx = cx + inset + (i % perRow) * (CELL + GAP);
+    const gy = fy + 14 + Math.floor(i / perRow) * (CH + GAP);
+    const on = i === SEL;
+    if (on) f.rect(gx, gy, CELL, CH, P.sel, { r: 10 });
+    else f.rect(gx, gy, CELL, CH, P.raised, { r: 10, op: 0.4 });
+
+    /* The glyph is drawn at 3.4x its list size — the only place the app's own
+       icons are large enough to carry a whole cell. */
+    const s = 3.4, gw = 14 * s, gh = 13 * s;
+    const px = gx + CELL / 2 - gw / 2, py = gy + 22;
+    const t = on ? P.onSel : tint(row, P);
+    if (row.k === 'dir') {
+      f.rect(px, py, gw * 0.46, 4 * s, t, { r: 3, op: 0.75 });
+      if (row.x === 'expanded') {
+        f.rect(px, py + 2.5 * s, gw, gh - 2.5 * s, t, { r: 6, op: 0.55 });
+        f.rect(px, py + 2.5 * s, gw, 3 * s, t, { r: 6 });
+      } else {
+        f.rect(px, py + 2.5 * s, gw, gh - 2.5 * s, t, { r: 6 });
+      }
+    } else {
+      const fo = 4.5 * s;
+      f.poly([[px, py], [px + gw - fo, py], [px + gw, py + fo],
+              [px + gw, py + gh], [px, py + gh]], t, 0.85);
+      f.poly([[px + gw - fo, py], [px + gw - fo, py + fo], [px + gw, py + fo]], t, 0.45);
+    }
+    if (row.s === 'unreadable') {
+      f.circle(gx + CELL - 24, gy + 24, 8, P.warn, 0.2);
+      f.text(gx + CELL - 24, gy + 24, '!', { size: 11, fill: P.warn, align: 'center', weight: 700 });
+    }
+    if (row.s === 'loading') f.indeterminate(gx + 30, gy + 24, CELL - 60, P.accent);
+    f.text(gx + CELL / 2, gy + 92, row.n, {
+      size: 12, fill: on ? P.onSel : P.text, align: 'center', max: CELL - 16,
+    });
+    f.text(gx + CELL / 2, gy + 110, row.z, {
+      size: 10.5, fill: on ? P.onSel : P.faint, align: 'center', op: on ? 0.8 : 1, mono: true,
+    });
+  });
+}
+
+/* 8 ── 主控台 — for the operator watching three hosts at once. */
+function console_(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  const top = titlebar(f, 44, { crumbs: CRUMBS });
+
+  /* The connection strip replaces the sidebar: three hosts, always visible,
+     with the numbers an operator actually watches. */
+  const stripY = top, stripH = 80;
+  f.rect(0, stripY, f.w, stripH, P.sunken);
+  f.hair(0, stripY + stripH - 1, f.w, P.border);
+  const cw = (f.w - 40) / 3 - 8;
+  CONNS.forEach((conn, i) => {
+    const x = 20 + i * (cw + 12);
+    const on = i === 0;
+    f.rect(x, stripY + 12, cw, 56, on ? P.raised : P.surface, { r: 9 });
+    if (on) f.rect(x, stripY + 20, 2.5, 40, P.accent, { r: 2 });
+    f.dot(x + 20, stripY + 30, P[conn.state === 'bad' ? 'bad' : 'good']);
+    f.text(x + 34, stripY + 30, conn.name, { size: 13, fill: P.text, weight: 600 });
+    f.text(x + 34, stripY + 48, conn.detail, { size: 10.5, fill: P.faint });
+    f.text(x + cw - 14, stripY + 30, conn.ms, {
+      size: 11, fill: conn.state === 'bad' ? P.bad : P.good, align: 'right', mono: true,
+    });
+    f.text(x + cw - 14, stripY + 48, conn.tabs.length + ' tab' + (conn.tabs.length === 1 ? '' : 's'), {
+      size: 10.5, fill: P.faint, align: 'right', mono: true,
+    });
+  });
+
+  /* The log is docked, not a panel you open: this layout exists to keep it. */
+  const logH = 148;
+  const bottom = statusBar(f, { right: 'stream ok · 25 rows' });
+  const logY = bottom - logH;
+  const listTop = stripY + stripH;
+  f.rect(0, listTop, f.w, logY - listTop, P.surface);
+  const cols = [
+    { label: 'Size', w: 92, key: 'size', mono: true },
+    { label: 'Status', w: 88, key: 'status' },
+    { label: 'Where', w: 96, key: 'path' },
+  ];
+  const hy = columnHeader(f, 0, listTop, f.w, cols);
+  f.hair(0, hy, f.w, P.border);
+  listRows(f, 0, hy + 1, f.w, { h: logY - hy - 1, cols, band: true });
+
+  f.rect(0, logY, f.w, logH, P.sunken);
+  f.hair(0, logY, f.w, P.border);
+  section(f, 14, logY + 16, 'Activity');
+  f.text(f.w - 14, logY + 16, 'follow', { size: 10.5, fill: P.accent, align: 'right' });
+  LOG.forEach((line, i) => {
+    const ly = logY + 40 + i * 21;
+    f.text(14, ly, line[0], { size: 10.5, fill: P.faint, mono: true });
+    f.text(72, ly, line[1], { size: 10.5, fill: P.muted, mono: true });
+    f.text(116, ly, line[2], { size: 10.5, fill: P.text, mono: true, max: 420 });
+    f.text(f.w - 14, ly, line[3], { size: 10.5, fill: P[line[4]], align: 'right', mono: true });
+  });
+}
+
+/* 9 ── 大綱 — one column, no chrome, the tree read as a document. */
+function outline(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  f.traffic(18, 26);
+  pill(f, f.w - 76, 13, 62, 'Light');
+
+  const COLW = Math.min(760, f.w - 120);
+  const x = (f.w - COLW) / 2;
+  f.text(x, 74, 'file-peeker', { size: 24, fill: P.text, weight: 600 });
+  f.text(x, 102, PATH, { size: 12, fill: P.faint, max: COLW - 160 });
+  f.text(x + COLW, 74, '25 items', { size: 12, fill: P.muted, align: 'right', mono: true });
+  f.text(x + COLW, 96, 'Local', { size: 11, fill: P.faint, align: 'right' });
+  f.hair(x, 126, COLW, P.border);
+
+  /* No column header, no card, no rules between rows: the indent guides and the
+     one accent bar are the entire structure. */
+  const rowH = 34, top = 146;
+  const room = Math.floor((f.h - top - 72) / rowH);
+  TREE.slice(0, room).forEach((row, i) => {
+    const ry = top + i * rowH;
+    const on = i === SEL;
+    if (on) {
+      f.rect(x - 20, ry, COLW + 40, rowH, P.sel, { r: 8 });
+      f.rect(x - 20, ry + 6, 3, rowH - 12, P.accent, { r: 2 });
+    }
+    for (let level = 0; level < row.d; level++) {
+      f.vair(x + level * 22 + 4, ry + 3, rowH - 6, P.faint, 0.4);
+    }
+    let cx = x + row.d * 22;
+    if (row.k === 'dir') f.chevron(cx + 6, ry + rowH / 2, on ? P.onSel : P.faint, row.x === 'expanded');
+    cx += 18;
+    const t = on ? P.onSel : tint(row, P);
+    if (row.k === 'dir') f.folder(cx, ry + rowH / 2 - 6.5, t, row.x === 'expanded');
+    else f.file(cx, ry + rowH / 2 - 6.5, t);
+    f.text(cx + 26, ry + rowH / 2, row.n, {
+      size: 14, fill: on ? P.onSel : P.text, weight: row.k === 'dir' ? 500 : 400,
+      max: COLW - (cx - x) - 150,
+    });
+    /* Narrow enough and the right-hand pair goes, name first and name last. */
+    const status = statusOf(row);
+    if (COLW >= 600 && status && status !== 'file') {
+      f.text(x + COLW - 96, ry + rowH / 2, status, {
+        size: 11, fill: on ? P.onSel : statusColour(row, P), align: 'right', op: on ? 0.85 : 1,
+      });
+    }
+    if (COLW >= 520) {
+      f.text(x + COLW, ry + rowH / 2, row.z, {
+        size: 11.5, fill: on ? P.onSel : P.faint, align: 'right', mono: true, op: on ? 0.8 : 1,
+      });
+    }
+  });
+
+  f.hair(x, f.h - 52, COLW, P.border);
+  let hx = x;
+  [['/', 'filter'], ['↵', 'open'], ['y p', 'copy'], ['⌘K', 'connections']].forEach(([k, label]) => {
+    f.text(hx, f.h - 30, k, { size: 11, fill: P.accent, mono: true });
+    hx += measure(k, 11, true) + 8;
+    f.text(hx, f.h - 30, label, { size: 11, fill: P.faint });
+    hx += measure(label, 11) + 22;
+  });
+  f.text(x + COLW, f.h - 30, XFER.name + ' · ' + XFER.pct + '%', {
+    size: 11, fill: P.muted, align: 'right',
+  });
+}
+
+/* 10 ── 面積圖 — size becomes area, because a list of numbers never answers
+        "what is taking the space". */
+function treemapLayout(f) {
+  const P = f.P;
+  f.rect(0, 0, f.w, f.h, P.base);
+  const top = titlebar(f, 48);
+  const bottom = statusBar(f, { right: '412 KB in src/' });
+  railPanel(f, 0, top, 200, bottom - top, {});
+
+  const lx = 200, lw = 452;
+  f.rect(lx, top, lw, bottom - top, P.surface);
+  f.vair(lx + lw - 1, top, bottom - top, P.border);
+  const cols = [{ label: 'Size', w: 86, key: 'size', mono: true }];
+  const hy = columnHeader(f, lx, top, lw, cols);
+  listRows(f, lx, hy, lw, { h: bottom - hy, cols });
+
+  const mx = lx + lw, mw = f.w - mx;
+  f.rect(mx, top, mw, bottom - top, P.sunken);
+  section(f, mx + 20, top + 22, 'src/ by size');
+  f.text(mx + mw - 20, top + 22, '412 KB · 11 entries', {
+    size: 10.5, fill: P.faint, align: 'right', mono: true,
+  });
+
+  const items = [
+    { n: 'tui', v: 118, k: 'dir' }, { n: 'server', v: 72, k: 'dir' },
+    { n: 'client', v: 61, k: 'dir' }, { n: 'gui', v: 49, k: 'dir', sel: true },
+    { n: 'fs', v: 38, k: 'dir' }, { n: 'browser', v: 23, k: 'dir' },
+    { n: 'cli', v: 14, k: 'dir' }, { n: 'bin', v: 6, k: 'dir' },
+    { n: 'test_support.rs', v: 5, k: 'file' }, { n: 'lib.rs', v: 2, k: 'file' },
+    { n: 'protocol.rs', v: 2, k: 'file' },
+  ];
+  const box = { x: mx + 20, y: top + 44, w: mw - 40, h: bottom - top - 78 };
+  squarify(items, box).forEach((cell) => {
+    /* Selection is the accent outline, not an inverted fill: the fill already
+       carries the entry's kind, and two jobs on one colour loses both. */
+    const t = cell.k === 'dir' ? P.folder : P.kindDoc;
+    f.rect(cell.x, cell.y, cell.w - 2, cell.h - 2, t, { r: 4, op: cell.sel ? 0.58 : 0.3 });
+    if (cell.sel) f.rect(cell.x, cell.y, cell.w - 2, cell.h - 2, 'none', { r: 4, stroke: P.accent, sw: 2 });
+    if (cell.w > 54 && cell.h > 26) {
+      f.text(cell.x + 8, cell.y + 15, cell.n, {
+        size: 11.5, fill: P.text, max: cell.w - 16, weight: cell.sel ? 600 : 500,
+      });
+      if (cell.h > 42) {
+        f.text(cell.x + 8, cell.y + 31, cell.v + ' KB', {
+          size: 10, fill: P.text, op: 0.7, mono: true, max: cell.w - 16,
+        });
+      }
+    }
+  });
+  f.text(mx + 20, bottom - 18, 'gui · 49 KB · 12% of src/', { size: 11, fill: P.accent });
+}
+
+/** Slice-and-dice with alternating orientation — enough to keep cells readable. */
+function squarify(items, box) {
+  const total = items.reduce((a, b) => a + b.v, 0);
+  const out = [];
+  let rest = { ...box }, remaining = total, horizontal = rest.w > rest.h;
+  items.forEach((item, i) => {
+    const last = i === items.length - 1;
+    const share = last ? 1 : item.v / remaining;
+    if (horizontal) {
+      const w = last ? rest.w : rest.w * share;
+      out.push({ ...item, x: rest.x, y: rest.y, w, h: rest.h });
+      rest = { x: rest.x + w, y: rest.y, w: rest.w - w, h: rest.h };
+    } else {
+      const h = last ? rest.h : rest.h * share;
+      out.push({ ...item, x: rest.x, y: rest.y, w: rest.w, h });
+      rest = { x: rest.x, y: rest.y + h, w: rest.w, h: rest.h - h };
+    }
+    remaining -= item.v;
+    horizontal = rest.w > rest.h;
+  });
+  return out;
+}
+
+/* ==========================================================================
+   COMPACT — the one responsive renderer, for every window below full.
+
+   A layout that no longer fits does not become a different product: it keeps
+   its own grammar (rail, chrome, card, columns, footer) and loses only the
+   panels there is no room for. Strip the grammar and the same function is the
+   floor every layout shares: one list, one bar above, one bar below.
+   ========================================================================== */
+
+const BARE = { rail: 'none', chrome: 'titlebar', card: false, cols: [], footer: 'status' };
+
+function compact(f, grammar) {
+  const P = f.P;
+  const g = grammar || BARE;
+  f.rect(0, 0, f.w, f.h, P.base);
+
+  const roomy = f.w >= 940;
+  const chromeH = g.chrome === 'toolbar' ? 52 : 44;
+  const top = g.chrome === 'none'
+    ? (f.traffic(18, 26), pill(f, f.w - 76, 13, 62, 'Light'), 44)
+    : titlebar(f, chromeH, { crumbs: roomy ? CRUMBS : CRUMBS.slice(-2) });
+  const bottom = g.footer === 'none' ? f.h : statusBar(f, { right: '25 items' });
+
+  /* What fits decides which rail exists at all. */
+  let railW = 0;
+  if (g.rail === 'full' && roomy) railW = 200;
+  else if (g.rail === 'full' || g.rail === 'icons') railW = f.w >= 820 ? 56 : 0;
+
+  if (railW === 200) {
+    railPanel(f, 0, top, railW, bottom - top, {});
+  } else if (railW === 56) {
+    /* The icon rail is the rung where Places lose their labels but the three
+       connection dots survive: which host you are on outranks everything. */
+    f.rect(0, top, railW, bottom - top, P.sunken);
+    f.vair(railW - 1, top, bottom - top, P.border);
+    CONNS.forEach((conn, i) => {
+      const cy = top + 24 + i * 40;
+      if (i === 0) f.rect(8, cy - 15, 40, 30, P.raised, { r: 8 });
+      f.dot(28, cy, P[conn.state === 'bad' ? 'bad' : 'good']);
+    });
+    PLACES.forEach((place, i) => {
+      f.folder(21, top + 152 + i * 34, i === 0 ? P.folder : P.faint, false);
+    });
+  }
+
+  const cx = railW + (g.card ? 10 : 0);
+  const cw = f.w - cx - (g.card ? 10 : 0);
+  let y = top + (g.card ? 10 : 0);
+  if (g.card && f.h >= 600) y = tabBar(f, cx, y, cw, ['file-peeker', '/var/log'], 0) + 6;
+
+  const panelH = bottom - y - (g.card ? 10 : 0);
+  if (g.card) f.rect(cx, y, cw, panelH, P.surface, { r: 10, shadow: true });
+  else f.rect(cx, y, cw, panelH, P.surface);
+
+  let listY = y;
+  if (f.h >= 560) listY = filterRow(f, cx, y, cw, { matches: '25 matches' });
+
+  /* Columns are spent in priority order: Status is the one the app cannot do
+     without, because it is where a refused expansion says so. */
+  const cols = [];
+  let budget = cw - 220;
+  for (const col of [{ label: 'Status', w: 84, key: 'status' }, ...g.cols]) {
+    if (budget < col.w) break;
+    cols.push(col);
+    budget -= col.w;
+  }
+  const hy = columnHeader(f, cx, listY, cw, cols);
+  if (!g.card) f.hair(cx, hy, cw, P.border);
+  listRows(f, cx, hy + (g.card ? 0 : 1), cw, {
+    h: y + panelH - hy - (g.footer === 'pane' ? 30 : 0), cols, band: g.band,
+  });
+
+  if (g.footer === 'pane') {
+    const fy = y + panelH - 30;
+    f.hair(cx, fy, cw, P.border);
+    f.text(cx + 14, fy + 15, 'src/gui/dock.rs', { size: 11.5, fill: P.muted, max: cw - 110 });
+    f.text(cx + cw - 14, fy + 15, '25 rows', { size: 10.5, fill: P.faint, align: 'right', mono: true });
+  }
+}
+
+/* ==========================================================================
+   The ten layouts, declared
+   ========================================================================== */
+
+const LAYOUTS = [
+  {
+    id: 'dock', name: '分頁塢', key: 'dock', paint: dock,
+    min: { w: 1100, h: 700 },
+    grammar: { rail: 'full', chrome: 'titlebar', card: true, cols: [], footer: 'pane' },
+    note: '現在出貨的樣子：自繪標題列、216 點側欄、egui_dock 的分頁條，內容是一張浮起來的圓角面。每個分頁自己帶 loading 髮絲線、filter 列、Name／Status 兩欄和一條路徑 footer。',
+    side: '側欄由上到下：Connections、Places、Clipboard、Transfer。四段之間沒有框線，只有留白和一行小標。',
+    fold: '折疊時 Clipboard 和 Transfer 先走，側欄縮成一排連線圓點；那張浮起來的面留到最後，因為它是這個排版唯一的形狀。',
+  },
+  {
+    id: 'sidebar', name: '側欄', key: 'side', paint: sidebarLayout,
+    min: { w: 1040, h: 620 },
+    grammar: { rail: 'full', chrome: 'toolbar', card: false, band: true, cols: [{ label: 'Size', w: 88, key: 'size', mono: true }], footer: 'status' },
+    note: '拿掉分頁條，分頁變成工具列上的一個分段控制；內容滿版貼齊，沒有卡片、沒有陰影，欄位加到四個：Name、Modified、Size、Kind。隔行加深取代列與列之間的線。',
+    side: '側欄 240 點，連線底下直接掛它自己的分頁，所以「哪個分頁屬於哪台主機」不用再去讀分頁條。',
+    fold: '第一個掉的是 Kind，然後是 Modified。分段控制縮成一個下拉，側欄縮成圖示排。',
+  },
+  {
+    id: 'miller', name: '瀑布欄', key: 'mill', paint: miller,
+    min: { w: 1180, h: 620 },
+    grammar: { rail: 'icons', chrome: 'titlebar', card: false, cols: [], footer: 'status' },
+    note: '三個目錄層級並排，每一欄是一層，右邊第四欄是預覽。走到多深，來時路就有多長 —— 這是唯一一個不用麵包屑也知道自己在哪的排版。',
+    side: '側欄只留連線和 Places，因為層級已經佔滿了橫向。預覽欄吃掉 316 點，是十個裡最耗寬度的一個。',
+    fold: '欄一次掉一個，預覽欄最先走。掉到剩一欄時它就是一般列表 —— 這個排版最不耐窄。',
+  },
+  {
+    id: 'inspector', name: '檢視器', key: 'insp', paint: inspector,
+    min: { w: 1160, h: 660 },
+    grammar: { rail: 'full', chrome: 'titlebar', card: true, cols: [{ label: 'Size', w: 88, key: 'size', mono: true }], footer: 'status' },
+    note: '右邊一整欄常駐檢視器：大圖示、路徑、七行後設資料、傳輸佇列。列表因此可以只留 Name／Size／Status 三欄，不必把權限和時間硬塞進去。',
+    side: '左側欄和檢視器一起把中間夾成 462 點。這是十個裡兩側都佔住的唯一一個，也是最需要寬螢幕的一個。',
+    fold: '檢視器整片收起來變成 footer 一行；側欄縮成圖示排。收起來之後它就退化成分頁塢。',
+  },
+  {
+    id: 'dual', name: '雙面板', key: 'dual', paint: dual,
+    min: { w: 1120, h: 640 },
+    grammar: { rail: 'none', chrome: 'titlebar', card: false, cols: [{ label: 'Size', w: 84, key: 'size', mono: true }], footer: 'none' },
+    note: '兩個面板並排，來源在左、目的地在右，中間 76 點的槽裡放兩個方向鍵和那條進度。y 和 p 之間的距離變成看得見的距離，這是複製流程唯一被畫出來的排版。兩邊都留 Status 欄 —— 貼過去之前先看得到目的地讀不讀得動。',
+    side: '沒有側欄。每個面板自己頂一條連線列（圓點、主機名、路徑、延遲），因為兩欄複製最不能含糊的就是「這一邊是哪台機器」。',
+    fold: '窄到放不下兩欄時，右欄收成一條可切換的分頁 —— 但那等於拆掉這個排版存在的理由。',
+  },
+  {
+    id: 'palette', name: '指令面板', key: 'cmd', paint: commandPalette,
+    min: { w: 700, h: 500 },
+    grammar: { rail: 'full', chrome: 'titlebar', card: true, cols: [], footer: 'pane' },
+    note: '把 filter 從一列升成整個互動：中央一張 720×428 的浮層，輸入在上、命中在下、命中的字段底下畫一條 accent 底線，最下面一排連線 chip。背後的 app 用一層 scrim 壓暗，不是模糊 —— egui 沒有 backdrop filter。',
+    side: '這是唯一一個依賴陰影把浮層和背景分開的排版，所以 shadowA 低的色票（孔版 0.10）會讓它讀起來變扁。',
+    fold: '浮層本來就置中，縮窗只是讓它跟著窄、命中列表少幾列；背後那層 app 自己退化，浮層不受影響。十個裡唯二在最小視窗還保有原形的排版之一。',
+  },
+  {
+    id: 'gallery', name: '縮圖', key: 'grid', paint: gallery,
+    min: { w: 1060, h: 640 },
+    grammar: { rail: 'full', chrome: 'toolbar', card: false, cols: [], footer: 'status' },
+    note: '同一棵樹改成 152×128 的格子，圖示畫到列表尺寸的 3.4 倍 —— 這是 app 自己的 folder 和 file 唯一大到撐得住一整格的地方。拒絕展開的目錄在右上角掛一個警告圓點，還在列的目錄格子裡跑一條 loading 條。',
+    side: '工具列上多一個 List／Grid 分段控制，因為這個排版是一個可切換的檢視方式，不是一個獨立的 app。',
+    fold: '一列少一格，格子本身不縮。窄到三格以下時就該切回 List。',
+  },
+  {
+    id: 'console', name: '主控台', key: 'ops', paint: console_,
+    min: { w: 1140, h: 720 },
+    grammar: { rail: 'none', chrome: 'titlebar', card: false, band: true, cols: [{ label: 'Size', w: 92, key: 'size', mono: true }], footer: 'status' },
+    note: '給同時盯三台主機的人：頂上一條連線帶，三張卡各自帶狀態燈、延遲和分頁數；底下 148 點的活動記錄常駐，list／copy／dial 各自用 good／accent／warn／bad 上色。中間的列表因此可以放到滿版四欄。',
+    side: '沒有側欄 —— 連線資訊全部上移到頂帶，Places 在這個排版裡不存在，因為操作員是照主機找路，不是照家目錄找路。',
+    fold: '活動記錄先縮成三行再收成一行；連線帶三張卡疊成一行圓點。',
+  },
+  {
+    id: 'outline', name: '大綱', key: 'out', paint: outline,
+    min: { w: 620, h: 460 },
+    grammar: { rail: 'none', chrome: 'none', card: false, cols: [], footer: 'none' },
+    note: '沒有側欄、沒有分頁條、沒有卡片、沒有欄位表頭。760 點的單欄置中，列高 34、字級 14，結構完全靠縮排線和一條 accent 條撐。十個裡唯一一個把檔案樹當文件讀而不是當表格讀的。',
+    side: '狀態只有在不是普通檔案時才印出來，所以整頁大部分的列右邊只有一個大小。留白是這個排版的材料。',
+    fold: '單欄本來就會跟著窄。欄寬 600 點以下狀態欄先走，520 點以下大小欄跟著走，最後只剩名字和縮排 —— 那正好就是這個排版的骨架，所以它在最小視窗也不需要退化。',
+  },
+  {
+    id: 'treemap', name: '面積圖', key: 'area', paint: treemapLayout,
+    min: { w: 1160, h: 640 },
+    grammar: { rail: 'icons', chrome: 'titlebar', card: false, cols: [{ label: 'Size', w: 86, key: 'size', mono: true }], footer: 'status' },
+    note: '左邊照常是列表，右邊把 src/ 的大小畫成面積：矩形大小就是位元組數，目錄用 folder 色、檔案用 kindDoc 色，選中的那格外框是 accent。一串數字回答不了「空間被誰吃掉」，一塊面積可以。',
+    side: '面積圖只吃矩形和文字，egui 本來就畫得出來 —— 這是十個裡看起來最不像檔案總管、實作起來卻最單純的一個。',
+    fold: '面積圖先掉，因為它是輔助而不是主體；掉了之後左邊那半就是一般列表。',
+  },
+];
+
+/* ==========================================================================
+   Window rungs
+   ========================================================================== */
+
+const SIZES = [
+  { id: 'full', w: 1280, h: 800, name: '1280 × 800', note: '預設開窗大小，十個排版都完整', rung: 'full' },
+  { id: 'compact', w: 1000, h: 680, name: '1000 × 680', note: '半螢幕，側欄縮成圖示排', rung: 'compact' },
+  { id: 'minimal', w: 760, h: 560, name: '760 × 560', note: '最小可用，只剩 Name 與 Status', rung: 'minimal' },
+];
+
+/* ==========================================================================
+   The consequence of a palette that declines to distinguish two roles.
+   Computed from the colours themselves, so a note cannot go stale.
+   ========================================================================== */
+
+/**
+ * How far apart two role colours actually read, weighted for the eye rather
+ * than for the bit pattern. Two roles do not have to be *equal* to stop being
+ * told apart, so the notes below are computed from this rather than from `===`.
+ */
+function apart(a, b) {
+  const ch = (h, i) => parseInt(h.slice(i, i + 2), 16);
+  const [r1, g1, b1] = [ch(a, 1), ch(a, 3), ch(a, 5)];
+  const [r2, g2, b2] = [ch(b, 1), ch(b, 3), ch(b, 5)];
+  const rm = (r1 + r2) / 2;
+  return Math.sqrt((2 + rm / 256) * (r1 - r2) ** 2 + 4 * (g1 - g2) ** 2
+    + (2 + (255 - rm) / 256) * (b1 - b2) ** 2);
+}
+const SAME = 60;                     /* below this, two tints read as one */
+
+function comboNote(layout, palette, mode) {
+  const P = palette[mode];
+  const out = [];
+  if (apart(P.folder, P.kindMedia) < SAME) {
+    out.push('目錄色和符號連結色在這套色票裡幾乎讀成同一個 —— '
+      + '列表裡 latest 會看起來像一個目錄，只剩圖示形狀（資料夾 vs 折角紙）在分。'
+      + '帶 Kind 欄的排版（側欄）撐得住，沒有 Kind 欄的撐不住。');
+  }
+  if (apart(P.accent, P.folder) < SAME) {
+    out.push('accent 和目錄色太近，「選中的那個」和「這是個目錄」用的是同一個訊號。'
+      + '面積圖靠 accent 外框標選取、雙面板靠 accent 標作用中面板，這兩個在這套色票下要改用明度或粗細來分。');
+  }
+  if (apart(P.kindDoc, P.kindMedia) < SAME) {
+    out.push('一般檔案和符號連結同色，四種 kind 在這套色票下只剩三種看得出來。');
+  }
+  if (P.accent === P.good) {
+    out.push('這套色票的 accent 和 good 是同一個顏色，所以「正在傳輸」和「已完成」在進度條上分不出來 —— '
+      + '帶進度條的排版（分頁塢、檢視器、雙面板）要另外用文字說，光看顏色不夠。');
+  }
+  if (P.shadowA < 0.13) {
+    out.push('這套色票的陰影濃度是 ' + P.shadowA + '，浮起來的東西幾乎不浮。'
+      + '指令面板的浮層還有 window_stroke 那條髮絲線頂著，但分頁塢和檢視器那張內容面沒有 —— '
+      + '它們在這套色票下只剩 surface 和 base 的明度差把自己從視窗底分開，'
+      + '所以這兩個排版配這套色票時，內容面也該補一條 border。');
+  }
+  if (P.surface === P.base) {
+    out.push('內容面和視窗底同色，卡片的邊會消失。');
+  }
+  return out;
+}
+
+/* ==========================================================================
+   Chrome
+   ========================================================================== */
+
+let iL = 0, iP = 0, MODE = 'dark', iS = 0, VIEW = 'one';
+
+const VIEWS = [['v-one', 'one'], ['v-pal', 'pal'], ['v-lay', 'lay'],
+               ['v-size', 'size'], ['v-all', 'all']];
+
+const $ = (id) => document.getElementById(id);
+
+function paintOf(layout, palette, mode, size) {
+  const P = palette[mode];
+  const f = new Frame(size.w, size.h, P);
+  const fits = size.w >= layout.min.w && size.h >= layout.min.h;
+  if (fits) layout.paint(f);
+  else compact(f, layout.grammar);
+  return f;
+}
+
+function render() {
+  const L = LAYOUTS[iL], Pal = PALETTES[iP], S = SIZES[iS];
+
+  $('t-layout').textContent = L.name;
+  $('t-palette').textContent = Pal.name;
+  $('t-id').textContent = L.id + ' / ' + Pal.id + ' / ' + MODE + ' / ' + S.id;
+  $('d-layout-name').textContent = L.name;
+  $('d-layout').textContent = L.note;
+  $('d-layout-side').textContent = L.fold;
+  $('d-palette-name').textContent = Pal.name;
+  $('d-palette').textContent = Pal.note;
+  $('d-palette-from').textContent = Pal.from;
+
+  $('m-dark').setAttribute('aria-pressed', String(MODE === 'dark'));
+  $('m-light').setAttribute('aria-pressed', String(MODE === 'light'));
+  for (const [id, v] of VIEWS) {
+    $(id).setAttribute('aria-pressed', String(VIEW === v));
+  }
+  document.querySelectorAll('#rail-layout .pick').forEach((el, i) => el.setAttribute('aria-current', String(i === iL)));
+  document.querySelectorAll('#rail-palette .pick').forEach((el, i) => el.setAttribute('aria-current', String(i === iP)));
+  document.querySelectorAll('#sizes button').forEach((el, i) => el.setAttribute('aria-pressed', String(i === iS)));
+
+  const notes = comboNote(L, Pal, MODE);
+  const note = $('combo-note');
+  note.classList.toggle('hidden', notes.length === 0);
+  note.textContent = notes.join(' ');
+
+  $('view-one').classList.toggle('hidden', VIEW !== 'one');
+  $('view-strip').classList.toggle('hidden', VIEW === 'one' || VIEW === 'all');
+  $('view-all').classList.toggle('hidden', VIEW !== 'all');
+  if (VIEW === 'one') {
+    const f = paintOf(L, Pal, MODE, SIZES[iS]);
+    $('win').style.maxWidth = SIZES[iS].w + 'px';
+    $('win').innerHTML = f.svg(SIZES[iS].w);
+  } else if (VIEW === 'all') {
+    buildMatrix();
+  } else {
+    buildStrip();
+  }
+  writeConfig(L, Pal);
+  buildRoles();
+  paintSwatches();
+
+  const frag = L.id + '/' + Pal.id + '/' + MODE
+    + (iS ? '/' + SIZES[iS].id : '')
+    + (VIEW === 'one' ? '' : '/' + VIEW);
+  if (location.hash.slice(1) !== frag) history.replaceState(null, '', '#' + frag);
+}
+
+function buildStrip() {
+  const L = LAYOUTS[iL], Pal = PALETTES[iP];
+  const strip = $('strip');
+  strip.innerHTML = '';
+  let items;
+  if (VIEW === 'pal') {
+    items = PALETTES.map((p, i) => ({ layout: L, palette: p, size: SIZES[0], no: i + 1, name: p.name, tag: p.id, set: () => { iP = i; } }));
+  } else if (VIEW === 'lay') {
+    items = LAYOUTS.map((l, i) => ({ layout: l, palette: Pal, size: SIZES[0], no: i + 1, name: l.name, tag: l.id, set: () => { iL = i; } }));
+  } else {
+    items = SIZES.map((s, i) => ({ layout: L, palette: Pal, size: s, no: i + 1, name: s.name, tag: s.id, set: () => { iS = i; } }));
+  }
+  items.forEach((item) => {
+    const card = document.createElement('button');
+    card.className = 'card';
+    card.type = 'button';
+    const f = paintOf(item.layout, item.palette, MODE, item.size);
+    card.innerHTML = '<div class="clip">' + f.svg(item.size.w) + '</div>'
+      + '<figcaption><span class="no">' + String(item.no).padStart(2, '0') + '</span>'
+      + '<b>' + esc(item.name) + '</b><span>' + esc(item.tag) + '</span></figcaption>';
+    card.addEventListener('click', () => { item.set(); VIEW = 'one'; render(); });
+    strip.appendChild(card);
+  });
+}
+
+/** All one hundred at once: layouts down, palettes across. */
+function buildMatrix() {
+  const grid = $('matrix');
+  grid.innerHTML = '';
+  const cell = (html, cls) => {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = html;
+    grid.appendChild(el);
+    return el;
+  };
+  cell('', 'corner');
+  PALETTES.forEach((p, j) => {
+    cell(p.name, 'colhead' + (j === iP ? ' on' : ''));
+  });
+  LAYOUTS.forEach((l, i) => {
+    cell(l.name, 'rowhead' + (i === iL ? ' on' : ''));
+    PALETTES.forEach((p, j) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.title = l.name + ' × ' + p.name;
+      b.setAttribute('aria-label', l.name + ' × ' + p.name);
+      if (i === iL && j === iP) b.setAttribute('aria-current', 'true');
+      b.innerHTML = paintOf(l, p, MODE, SIZES[0]).svg(SIZES[0].w);
+      b.addEventListener('click', () => { iL = i; iP = j; VIEW = 'one'; render(); });
+      grid.appendChild(b);
+    });
+  });
+}
+
+function writeConfig(L, Pal) {
+  const P = Pal[MODE];
+  $('cfg-toml').innerHTML =
+    '<span class="c"># ~/.config/file-peeker/config.toml</span>\n'
+    + '[<span class="k">ui</span>]\n'
+    + 'layout  = <span class="s">"' + L.id + '"</span>\n'
+    + 'palette = <span class="s">"' + Pal.id + '"</span>\n'
+    + 'mode    = <span class="s">"' + MODE + '"</span>\n\n'
+    + '<span class="c"># 只想改一個角色，不用整套換掉</span>\n'
+    + '[<span class="k">ui.palette.override</span>]\n'
+    + 'accent = <span class="s">"' + P.accent + '"</span>';
+
+  $('cfg-rust').innerHTML =
+    '<span class="c">// src/gui/theme.rs — 已經是這個形狀，</span>\n'
+    + '<span class="c">// 少的是 sel / on_sel / bad / shadow。</span>\n'
+    + '<span class="k">pub</span>(crate) <span class="k">struct</span> Palette {\n'
+    + '    base: Color32,     surface: Color32,\n'
+    + '    sunken: Color32,   raised: Color32,\n'
+    + '    sel: Color32,      on_sel: Color32,   <span class="c">// new</span>\n'
+    + '    border: Color32,\n'
+    + '    text: Color32, muted: Color32, faint: Color32,\n'
+    + '    accent: Color32,   folder: Color32,\n'
+    + '    good: Color32, warn: Color32, bad: Color32, <span class="c">// new</span>\n'
+    + '    kind_doc: Color32, kind_media: Color32,\n'
+    + '    shadow: Shadow,                       <span class="c">// new</span>\n'
+    + '}\n\n'
+    + '<span class="k">pub</span>(crate) <span class="k">enum</span> Layout {\n'
+    + '    ' + LAYOUTS.map((l) => l.id[0].toUpperCase() + l.id.slice(1)).join(', ') + ',\n'
+    + '}';
+}
+
+/* ---- the rail ---- */
+
+LAYOUTS.forEach((l, i) => {
+  const b = document.createElement('button');
+  b.className = 'pick';
+  b.type = 'button';
+  b.innerHTML = '<span class="no">' + String(i + 1).padStart(2, '0') + '</span>'
+    + '<span class="nm">' + esc(l.name) + '</span>'
+    + '<span class="key">' + esc(l.key) + '</span>';
+  b.addEventListener('click', () => { iL = i; render(); });
+  $('rail-layout').appendChild(b);
+});
+
+PALETTES.forEach((p, i) => {
+  const b = document.createElement('button');
+  b.className = 'pick';
+  b.type = 'button';
+  /* Filled by paintSwatches() on every render: a picker that always shows the
+     dark ramp is lying in exactly the mode where the choice is hardest. */
+  b.innerHTML = '<span class="swatch">' + '<i></i>'.repeat(4) + '</span>'
+    + '<span class="nm">' + esc(p.name) + '</span>'
+    + '<span class="key">' + esc(p.family) + '</span>';
+  b.addEventListener('click', () => { iP = i; render(); });
+  $('rail-palette').appendChild(b);
+});
+
+SIZES.forEach((s, i) => {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.innerHTML = '<b>' + esc(s.name) + '</b><i>' + esc(s.note) + '</i>'
+    + '<em class="rung-' + s.rung + '">' + s.rung + '</em>';
+  b.addEventListener('click', () => { iS = i; render(); });
+  $('sizes').appendChild(b);
+});
+
+/** The rail's four-chip ramps, repainted in whichever mode is showing. */
+function paintSwatches() {
+  document.querySelectorAll('#rail-palette .swatch').forEach((swatch, i) => {
+    const p = PALETTES[i][MODE];
+    ['base', 'surface', 'accent', 'folder'].forEach((role, j) => {
+      swatch.children[j].style.background = p[role];
+    });
+  });
+}
+
+/* ---- the role table ---- */
+
+function buildRoles() {
+  const P = PALETTES[iP][MODE];
+  $('roles').innerHTML = ROLE_GROUPS.map(([group, roles]) => {
+    const rows = roles.map(([key, label]) => {
+      const swatch = key === 'shadowA'
+        ? '<span class="chip" style="background:' + P.shadowC + ';opacity:' + Math.max(0.2, P.shadowA) + '"></span>'
+        : '<span class="chip" style="background:' + P[key] + '"></span>';
+      const isNew = label.includes('NEW');
+      return swatch + '<dt' + (isNew ? ' class="new"' : '') + '>' + key + '</dt>'
+        + '<dd>' + esc(label.replace(' · NEW', '')) + '</dd>';
+    }).join('');
+    return '<section><h3>' + group + '</h3><dl>' + rows + '</dl></section>';
+  }).join('');
+}
+
+/* ---- keys and the fragment ---- */
+
+addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  if (k === 'j') iL = (iL + 1) % LAYOUTS.length;
+  else if (k === 'k') iL = (iL + LAYOUTS.length - 1) % LAYOUTS.length;
+  else if (k === 'l') iP = (iP + 1) % PALETTES.length;
+  else if (k === 'h') iP = (iP + PALETTES.length - 1) % PALETTES.length;
+  else if (k === 'd') MODE = MODE === 'dark' ? 'light' : 'dark';
+  else if (k === ']') iS = Math.min(SIZES.length - 1, iS + 1);
+  else if (k === '[') iS = Math.max(0, iS - 1);
+  else return;
+  e.preventDefault();
+  render();
+});
+
+$('m-dark').addEventListener('click', () => { MODE = 'dark'; render(); });
+$('m-light').addEventListener('click', () => { MODE = 'light'; render(); });
+for (const [id, v] of VIEWS) {
+  $(id).addEventListener('click', () => { VIEW = v; render(); });
+}
+
+/* Every segment past the layout is optional, so each is recognised by what it
+   names rather than by where it sits. */
+function readHash() {
+  const parts = location.hash.slice(1).split('/').filter(Boolean);
+  if (!parts.length) return;
+  const l = LAYOUTS.findIndex((x) => x.id === parts[0]);
+  if (l >= 0) iL = l;
+  for (const part of parts.slice(1)) {
+    const p = PALETTES.findIndex((x) => x.id === part);
+    if (p >= 0) { iP = p; continue; }
+    if (part === 'light' || part === 'dark') { MODE = part; continue; }
+    const s = SIZES.findIndex((x) => x.id === part);
+    if (s >= 0) { iS = s; continue; }
+    if (VIEWS.some(([, v]) => v === part)) VIEW = part;
+  }
+}
+
+addEventListener('hashchange', () => { readHash(); render(); });
+readHash();
+render();
+</script>
+</body>
+</html>

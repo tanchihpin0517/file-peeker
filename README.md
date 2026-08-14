@@ -53,6 +53,8 @@ otherwise place them all. `file-peeker-gui` is outside `default`; build it with
 - [Client API](docs/api.md)
 - [Copy file](docs/operations/copy-file.md)
 - [TUI implementation](docs/tui.md)
+- [Layout and palette galleries](docs/design/README.md), for the
+  [TUI](docs/design/tui-layouts.md) and the [GUI](docs/design/gui-layouts.md)
 - [Client and UI state ownership](docs/state-ownership.md)
 
 ## License
