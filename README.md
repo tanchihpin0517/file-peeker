@@ -36,7 +36,8 @@ scripts/run-tui.sh
 ```
 
 `make check` runs formatting, Clippy, a slim server-only build, and the test
-suite. `make verify` adds the documentation checks.
+suite. `make verify` adds the documentation and shell script checks; the latter
+needs [ShellCheck](https://www.shellcheck.net).
 
 The package builds four binaries: `file-peeker` (the TUI), `file-peeker-gui`
 (the desktop front end), `file-peeker-client` (a test CLI), and

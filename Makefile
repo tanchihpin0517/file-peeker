@@ -1,6 +1,11 @@
 SHELL := /bin/bash
 
-.PHONY: all check docs-check fmt lint slim-server test verify
+# Locally a clippy finding stays a warning, so a half-finished edit still
+# compiles and runs. CI passes `LINT_DENY=-Dwarnings` to turn the same findings
+# into a failure; the clippy invocation itself is identical either way.
+LINT_DENY ?=
+
+.PHONY: all check docs-check fmt lint shell-check slim-server test verify
 
 all: check
 
@@ -10,9 +15,9 @@ fmt:
 	cargo fmt --all --check
 
 lint:
-	cargo clippy --all-targets
+	cargo clippy --all-targets -- $(LINT_DENY)
 # The desktop front end is outside `default`, so it needs naming to be linted.
-	cargo clippy --features gui --all-targets
+	cargo clippy --features gui --all-targets -- $(LINT_DENY)
 
 # Targets whose `required-features` are unmet are silently skipped unless named
 # explicitly, so the slim build the remote installer uses needs its own check.
@@ -32,4 +37,12 @@ docs-check:
 	bash scripts/check-docs.sh
 	git diff --check -- README.md docs scripts/check-docs.sh
 
-verify: docs-check check
+# The remote install path is shell that nothing else checks: `ensure-server.sh`
+# runs over an SSH stdin pipe and `install-server-from-source.sh` runs on a host
+# this project never sees. The file list comes from git so a script added later
+# is covered without being named here, and so `run-tui.sh` and the documentation
+# checker are covered too.
+shell-check:
+	shellcheck $$(git ls-files '*.sh')
+
+verify: docs-check shell-check check
