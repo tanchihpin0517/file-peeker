@@ -578,9 +578,22 @@ mod tests {
         app.shutdown().await.unwrap();
     }
 
+    /// The files `listed` creates.
+    const LISTED_NAMES: [&str; 3] = ["alpha.txt", "beta.txt", "gamma.txt"];
+
+    /// Whether a rendered line holds one of the listed entries.
+    ///
+    /// Which one it holds is not knowable: a listing follows the host's
+    /// filesystem iteration order and is never sorted, so a row's position says
+    /// nothing about its name. APFS happens to hand these three back in
+    /// alphabetical order and ext4 does not.
+    fn holds_a_listed_entry(line: &str) -> bool {
+        LISTED_NAMES.iter().any(|name| line.contains(name))
+    }
+
     /// A browser whose listing of three files has been fully applied.
     async fn listed(directory: &std::path::Path) -> App {
-        for name in ["alpha.txt", "beta.txt", "gamma.txt"] {
+        for name in LISTED_NAMES {
             tokio::fs::write(directory.join(name), b"").await.unwrap();
         }
         let mut app = App::new();
@@ -643,7 +656,7 @@ mod tests {
         let closed = rendered_lines(&mut app, 60, 16);
         let (closed_first, _) = list_bounds(&closed);
         assert!(
-            closed[closed_first].contains("alpha.txt"),
+            holds_a_listed_entry(&closed[closed_first]),
             "an unfiltered list starts at the top edge"
         );
 
@@ -678,7 +691,7 @@ mod tests {
         app.abandon_filter();
         let closed = rendered_lines(&mut app, 60, 16);
         let (first, _) = list_bounds(&closed);
-        assert!(closed[first].contains("alpha.txt"));
+        assert!(holds_a_listed_entry(&closed[first]));
         assert!(closed.concat().contains("/: filter"));
 
         app.shutdown().await.unwrap();
