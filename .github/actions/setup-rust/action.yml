@@ -1,0 +1,52 @@
+name: Set up Rust
+description: >
+  Installs the toolchain `rust-toolchain.toml` pins, the system libraries the
+  desktop front end links against, and a build cache keyed to one job.
+
+inputs:
+  cache-key:
+    description: >
+      Distinguishes this job's cache from the other jobs'. Jobs that compile the
+      same feature set should share a key; a `gui` build should not share one
+      with a default build.
+    required: true
+  gui:
+    description: >
+      Set to `true` for jobs that compile the `gui` feature. On Linux that needs
+      X11 and xkb development headers that the runner image does not carry.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # `rust-toolchain.toml` stays the single pin: rustup reads it here the same
+    # way it does on a developer machine, components included.
+    - name: Install the pinned toolchain
+      shell: bash
+      run: |
+        rustup show active-toolchain || rustup toolchain install
+        rustc --version
+        cargo --version
+
+    - name: Install desktop front end system libraries
+      if: inputs.gui == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends --yes \
+          libxcb-render0-dev \
+          libxcb-shape0-dev \
+          libxcb-xfixes0-dev \
+          libxkbcommon-dev
+
+    - name: Restore the build cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+
+    # A resolution that Cargo.lock cannot satisfy fails here, before a job spends
+    # minutes compiling, and it fails loudly instead of quietly updating the lock.
+    - name: Check Cargo.lock is current
+      shell: bash
+      run: cargo fetch --locked

@@ -1,5 +1,10 @@
 SHELL := /bin/bash
 
+# Locally a clippy finding stays a warning, so a half-finished edit still
+# compiles and runs. CI passes `LINT_DENY=-Dwarnings` to turn the same findings
+# into a failure; the clippy invocation itself is identical either way.
+LINT_DENY ?=
+
 .PHONY: all check docs-check fmt lint slim-server test verify
 
 all: check
@@ -10,9 +15,9 @@ fmt:
 	cargo fmt --all --check
 
 lint:
-	cargo clippy --all-targets
+	cargo clippy --all-targets -- $(LINT_DENY)
 # The desktop front end is outside `default`, so it needs naming to be linted.
-	cargo clippy --features gui --all-targets
+	cargo clippy --features gui --all-targets -- $(LINT_DENY)
 
 # Targets whose `required-features` are unmet are silently skipped unless named
 # explicitly, so the slim build the remote installer uses needs its own check.

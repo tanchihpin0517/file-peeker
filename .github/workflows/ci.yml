@@ -1,17 +1,111 @@
 name: CI
 
+# A branch push and its pull request would otherwise run the same commits twice.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
+# A new push to a pull request makes the previous run's answer irrelevant. Runs
+# on `main` are the record of what landed, so they are left to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+# Every job runs a `make` target, so a failure here is reproducible with one
+# command locally. `make verify` is the same set in sequence.
 jobs:
-  verify:
-    runs-on: macos-15
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: format
+      - run: make fmt
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: lint-gui
+          gui: 'true'
+      # Locally clippy findings stay warnings so a half-finished edit still
+      # compiles; here the same findings fail the job.
+      - run: make lint LINT_DENY=-Dwarnings
 
-      - name: Build app
-        run: make verify
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is where the front ends are developed; Linux is where a remote
+        # server runs. Path resolution and the filesystem layer differ enough
+        # between them that one platform is not evidence for the other.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: test-gui
+          gui: 'true'
+      - run: make test
+
+  slim-server:
+    name: Slim server build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: slim-server
+      # What the remote installer builds. Kept separate from `test` because its
+      # point is the feature set nothing else compiles: server only, no client.
+      - run: make slim-server
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # No toolchain: the documentation checks are shell and never build.
+      - run: make docs-check
+
+  # One check to require on `main`, so adding a job above does not mean editing
+  # branch protection. `always()` makes a skipped or cancelled dependency fail
+  # here rather than pass by omission.
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [format, lint, test, slim-server, docs]
+    steps:
+      - name: Report whether every job succeeded
+        run: |
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "job results: $results"
+          for result in $results; do
+            if [[ "$result" != success ]]; then
+              echo "a required job did not succeed" >&2
+              exit 1
+            fi
+          done
