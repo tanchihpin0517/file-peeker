@@ -59,11 +59,11 @@ operation answers “what workflow does the caller want?”. Simple workflows ma
 delegate once; more involved workflows, such as a cross-connection copy, compose
 several requests and order the locks between them.
 
-### One package, three binaries
+### One package, four binaries
 
 Status: implemented.
 
-Everything lives in a single package rooted at the repository. The three
+Everything lives in a single package rooted at the repository. The four
 binaries under `src/bin/` are shims: each one calls the `run` entry point of its
 feature-gated module, so all logic stays in the library where `cfg(test)` reaches
 it.
@@ -75,12 +75,15 @@ src/
 ├── fs/                     host-local filesystem behavior
 ├── protocol.rs             wire contract, including the generated `v1` module
 ├── client/                 the Client layer: connections, operations, transport
+├── browser/                the headless model both front ends browse with
 ├── test_support.rs         cfg(test) fixtures
 ├── server/                 the file-peeker-server binary's logic
 ├── cli/                    the file-peeker-client binary's logic
 ├── tui/                    the file-peeker binary's logic
+├── gui/                    the file-peeker-gui binary's logic
 └── bin/
     ├── file-peeker.rs          -> tui::run()
+    ├── file-peeker-gui.rs      -> gui::run()
     ├── file-peeker-client.rs   -> cli::run()
     └── file-peeker-server.rs   -> server::run()
 ```
@@ -107,11 +110,11 @@ listener — is enabled by both `client` and `server`, but `server` does not ena
 them. `make slim-server` is what actually runs that build, because a target
 whose `required-features` are unmet is skipped in silence.
 
-`fs` and `protocol` being unreachable from `tui` is convention only.
+`fs` and `protocol` being unreachable from a front end is convention only.
 
-Visibility carries the rest. Only `tui::run`, `cli::run`, and `server::run` are
-`pub`; everything else is `pub(crate)` or private, and the `unreachable_pub`
-lint keeps it that way.
+Visibility carries the rest. Only `tui::run`, `gui::run`, `cli::run`, and
+`server::run` are `pub`; everything else is `pub(crate)` or private, and the
+`unreachable_pub` lint keeps it that way.
 
 ### The filesystem layer
 
@@ -322,6 +325,45 @@ This split keeps high-level orchestration visible without fragmenting
 `BrowserContext` into state, event and task files that would need to understand
 the same invariants.
 
+### GUI
+
+Status: implemented. Outside `default`, because `eframe` brings a window system
+and a GPU backend with it; `make lint` compiles it so it cannot rot.
+
+```text
+src/gui/
+├── mod.rs
+├── app.rs
+├── dock.rs
+├── glyph.rs
+└── theme.rs
+```
+
+- `mod.rs` holds the binary's own concerns: argument parsing, the Tokio runtime
+  the UI thread is entered *around* rather than wrapped in, the local connection,
+  the window, and shutting the server down once the window is gone.
+- `app.rs` owns `App` and the bridge between a synchronous immediate-mode UI and
+  the asynchronous `Client`. Listings run as tasks that send groups over a
+  bounded channel; a frame drains it with `try_recv`. Bounded, so the filesystem
+  still feels backpressure when the UI is the slow one; `try_recv`, so the render
+  thread never blocks. It also draws the chrome — title bar, breadcrumb, sidebar,
+  status bar — and holds the expansion policy a click goes through.
+- `dock.rs` owns a tab. `egui_dock` owns the layout, so there is no pane
+  structure here: what a tab *contains* is the filter field, the listing as an
+  `egui_extras` table, and a footer. A tab also holds its own filter query.
+- `glyph.rs` paints the icons with the painter instead of loading assets, so the
+  shapes sit on the pixel grid at the one size the list uses.
+- `theme.rs` holds `Palette` and `Mode`. Every colour comes from `Palette`, so a
+  theme swap is one struct, and egui's own defaults are overwritten wholesale.
+
+The front end raises `Action`s rather than acting: a tab cannot reach the
+connection or the runtime, so a click becomes `Toggle` or `Enter` for `App` to
+apply after the frame. That is what keeps drawing free of task ownership, the
+same rule `app/view.rs` follows in the TUI.
+
+Both front ends drive `browser::Tree`; see [Browser model](#browser-model) for
+the seam and why the viewport is where it falls.
+
 ### Test CLI
 
 Status: implemented.
@@ -350,8 +392,9 @@ src/cli/
 
 ### Binary targets and features
 
-`default` enables all three binaries, so `cargo test` and
-`cargo clippy --all-targets` cover everything without extra flags.
+`default` enables three of the four binaries, so `cargo test` and
+`cargo clippy --all-targets` cover them without extra flags. `gui` is the
+exception, and `make lint` and `make test` name it explicitly.
 
 | Feature | Adds | Gated dependencies |
 | --- | --- | --- |

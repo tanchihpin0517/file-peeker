@@ -483,3 +483,38 @@ fn state_label(palette: &Palette, row: &Row) -> (&'static str, Color32) {
         _ => (kind_label(row), palette.muted),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Browser, Palette, Tree, state_label};
+    use crate::browser::fixture::entry;
+    use crate::gui::theme::Mode;
+
+    fn browser(root: &str) -> Browser {
+        Browser::new(Tree::new(root.into()), 1)
+    }
+
+    #[test]
+    fn a_tab_is_labelled_by_the_last_component_of_its_root() {
+        assert_eq!(browser("/home/user/reports").label(), "reports");
+        assert_eq!(browser("/home/user/reports/").label(), "reports");
+        assert_eq!(browser("/").label(), "/");
+    }
+
+    /// The status column says how an expansion is going while something is
+    /// happening to it, and falls back to the kind of entry once nothing is.
+    #[test]
+    fn an_expansion_in_progress_outranks_the_kind_of_entry() {
+        let palette = Palette::of(Mode::Light);
+        let mut tree = Tree::new("/root".into());
+        tree.extend_root(vec![entry("dir", true)]);
+        tree.finish_root(Ok(()));
+        assert_eq!(state_label(&palette, &tree.rows()[0]).0, "");
+
+        tree.begin_expansion(0, 1);
+        assert_eq!(state_label(&palette, &tree.rows()[0]).0, "loading");
+
+        tree.finish_child(1, Err("permission denied".into()));
+        assert_eq!(state_label(&palette, &tree.rows()[0]).0, "unreadable");
+    }
+}

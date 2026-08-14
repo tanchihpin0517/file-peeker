@@ -2,8 +2,8 @@
 
 File Peeker is a read-only browser whose filesystem behavior lives in a
 reusable, transport-neutral module. A shared client exposes one typed
-asynchronous API to the Ratatui frontend and to the command-line interface.
-All of it is one crate producing three binaries.
+asynchronous API to the Ratatui frontend, the egui desktop frontend, and the
+command-line interface. All of it is one crate producing four binaries.
 
 See [Code Structure](code-structure.md) for the current module plan, operation
 placement rules, and the expected structure for future features.

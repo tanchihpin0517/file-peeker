@@ -100,3 +100,24 @@ impl Row {
 pub(crate) fn child_path(parent: &str, name: &str) -> String {
     Path::new(parent).join(name).to_string_lossy().into_owned()
 }
+
+/// Entries to build a tree out of in tests, here rather than in each test module
+/// because both front ends drive the same model and want the same fixtures.
+#[cfg(test)]
+pub(crate) mod fixture {
+    use crate::{DirectoryEntry, EntryKind};
+
+    /// A named entry, a directory when it is navigable and a plain file when it is
+    /// not.
+    pub(crate) fn entry(name: &str, navigable: bool) -> DirectoryEntry {
+        DirectoryEntry {
+            name: name.into(),
+            kind: if navigable {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            navigable,
+        }
+    }
+}

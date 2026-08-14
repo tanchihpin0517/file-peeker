@@ -343,19 +343,7 @@ impl Tree {
 #[cfg(test)]
 mod tests {
     use super::{Expansion, Tree};
-    use crate::{DirectoryEntry, EntryKind};
-
-    fn entry(name: &str, navigable: bool) -> DirectoryEntry {
-        DirectoryEntry {
-            name: name.into(),
-            kind: if navigable {
-                EntryKind::Directory
-            } else {
-                EntryKind::File
-            },
-            navigable,
-        }
-    }
+    use crate::browser::fixture::entry;
 
     fn names(tree: &Tree) -> Vec<&str> {
         tree.rows().iter().map(super::Row::name).collect()

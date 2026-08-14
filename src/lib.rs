@@ -1,6 +1,6 @@
 //! File Peeker: browse and open files on a local or remote host.
 //!
-//! One package, three binaries. The shared layers are always compiled:
+//! One package, four binaries. The shared layers are always compiled:
 //!
 //! - [`fs`] performs host-local filesystem work, transport-neutral.
 //! - [`protocol`] is the generated wire contract both sides of the gRPC hop use.

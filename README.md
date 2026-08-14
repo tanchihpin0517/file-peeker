@@ -38,9 +38,11 @@ scripts/run-tui.sh
 `make check` runs formatting, Clippy, a slim server-only build, and the test
 suite. `make verify` adds the documentation checks.
 
-The package builds three binaries: `file-peeker` (the TUI), `file-peeker-client`
-(a test CLI), and `file-peeker-server`. Pass `--bin` to select one, since
-`cargo install` would otherwise place all three.
+The package builds four binaries: `file-peeker` (the TUI), `file-peeker-gui`
+(the desktop front end), `file-peeker-client` (a test CLI), and
+`file-peeker-server`. Pass `--bin` to select one, since `cargo install` would
+otherwise place them all. `file-peeker-gui` is outside `default`; build it with
+`--features gui`.
 
 ## Documentation
 

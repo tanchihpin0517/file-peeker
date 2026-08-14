@@ -3,9 +3,9 @@
 The application API is the `Client` layer of the `file-peeker` crate, reached as
 `crate::Client`. It exposes directory listings one entry at a time.
 
-The layer is crate-internal: the two front ends are modules of the same crate,
-so nothing is exported beyond the three binary entry points. "Public" below
-means the surface the `tui` and `cli` modules consume, not a published API.
+The layer is crate-internal: the front ends are modules of the same crate, so
+nothing is exported beyond the four binary entry points. "Public" below means the
+surface the `tui`, `gui` and `cli` modules consume, not a published API.
 
 ## Public interface
 

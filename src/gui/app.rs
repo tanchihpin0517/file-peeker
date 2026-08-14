@@ -466,28 +466,45 @@ fn breadcrumb(ui: &mut egui::Ui, palette: &Palette, path: &str) -> Option<String
     {
         jump = Some("/".to_owned());
     }
-    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-    for (index, part) in parts.iter().enumerate() {
-        let last = index + 1 == parts.len();
+    for (part, target) in crumbs(path) {
+        let last = target.is_none();
         let response = ui.add(
             egui::Label::new(
-                egui::RichText::new(*part)
+                egui::RichText::new(part)
                     .color(if last { palette.text } else { palette.muted })
                     .font(FontId::proportional(if last { 13.5 } else { 13.0 })),
             )
             .sense(Sense::click()),
         );
-        if !last {
+        if let Some(target) = target {
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             if response.clicked() {
-                jump = Some(format!("/{}", parts[..=index].join("/")));
+                jump = Some(target);
             }
             ui.label(egui::RichText::new("›").color(palette.faint));
         }
     }
     jump
+}
+
+/// The breadcrumb's segments, each with the path that clicking it goes to.
+///
+/// The last segment is where the browser already is, so it has nowhere to go, and
+/// that is what the renderer reads to draw it as the current one rather than as a
+/// link.
+fn crumbs(path: &str) -> Vec<(&str, Option<String>)> {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    parts
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let target =
+                (index + 1 < parts.len()).then(|| format!("/{}", parts[..=index].join("/")));
+            (*part, target)
+        })
+        .collect()
 }
 
 /// A borderless text button that lights up on hover — the app's only button.
@@ -593,4 +610,88 @@ fn place_row(ui: &mut egui::Ui, palette: &Palette, label: &str, hint: &str) -> b
         palette.faint,
     );
     response.clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Tree, crumbs, toggle};
+    use crate::browser::{Expansion, Row, fixture::entry};
+
+    fn tree() -> Tree {
+        let mut tree = Tree::new("/root".into());
+        tree.extend_root(vec![entry("dir", true), entry("note.txt", false)]);
+        tree.finish_root(Ok(()));
+        tree
+    }
+
+    fn names(tree: &Tree) -> Vec<&str> {
+        tree.rows().iter().map(Row::name).collect()
+    }
+
+    #[test]
+    fn a_closed_directory_opens_and_reports_the_path_to_list() {
+        let mut tree = tree();
+        assert_eq!(toggle(&mut tree, 0, 7).as_deref(), Some("/root/dir"));
+        assert_eq!(
+            tree.rows()[0].expansion(),
+            &Expansion::Loading { request_id: 7 }
+        );
+    }
+
+    #[test]
+    fn a_file_has_nothing_to_open() {
+        let mut tree = tree();
+        assert_eq!(toggle(&mut tree, 1, 7), None);
+        assert_eq!(tree.rows()[1].expansion(), &Expansion::Collapsed);
+    }
+
+    #[test]
+    fn an_open_directory_closes_and_asks_for_no_listing() {
+        let mut tree = tree();
+        toggle(&mut tree, 0, 1);
+        tree.extend_child(1, vec![entry("child.txt", false)]);
+        tree.finish_child(1, Ok(()));
+        assert_eq!(names(&tree), ["dir", "child.txt", "note.txt"]);
+
+        assert_eq!(toggle(&mut tree, 0, 2), None);
+        assert_eq!(names(&tree), ["dir", "note.txt"]);
+        assert_eq!(tree.rows()[0].expansion(), &Expansion::Collapsed);
+    }
+
+    /// Retrying a failed expansion drops what the failed attempt managed to place
+    /// first. Listing again over the top of it would land the same children beside
+    /// the ones already there.
+    #[test]
+    fn a_failed_directory_retries_without_keeping_what_it_placed() {
+        let mut tree = tree();
+        toggle(&mut tree, 0, 1);
+        tree.extend_child(1, vec![entry("half.txt", false)]);
+        tree.finish_child(1, Err("permission denied".into()));
+        assert_eq!(names(&tree), ["dir", "half.txt", "note.txt"]);
+
+        assert_eq!(toggle(&mut tree, 0, 2).as_deref(), Some("/root/dir"));
+        assert_eq!(names(&tree), ["dir", "note.txt"]);
+
+        tree.extend_child(2, vec![entry("half.txt", false)]);
+        assert_eq!(names(&tree), ["dir", "half.txt", "note.txt"]);
+    }
+
+    #[test]
+    fn every_breadcrumb_but_the_last_points_at_its_own_ancestor() {
+        assert_eq!(
+            crumbs("/home/user/reports"),
+            [
+                ("home", Some("/home".to_owned())),
+                ("user", Some("/home/user".to_owned())),
+                ("reports", None),
+            ]
+        );
+    }
+
+    /// The root has no segments of its own; the leading separator the breadcrumb
+    /// draws is what goes back to it.
+    #[test]
+    fn the_root_has_no_segments() {
+        assert!(crumbs("/").is_empty());
+    }
 }
