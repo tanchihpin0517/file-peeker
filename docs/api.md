@@ -27,7 +27,17 @@ Every operation names its connection with the `ConnectionId` that `open`
 returned. There is no connection handle to hold: an ID is a `Copy` value, and
 the Client owns the connection it names.
 
-The client re-exports core `EntryKind`, `DirectoryEntry`, and `WalkEntry` types.
+The client re-exports core `EntryKind`, `DirectoryEntry`, `EntryMetadata`, and
+`WalkEntry` types. A `DirectoryEntry` carries its name, kind and navigability, its
+`EntryMetadata` when that could be read, and otherwise the reason it could not — which
+is a property of that one entry and never ends a listing.
+
+Names and paths are `HostPath`, not `String`. A Unix filename is any byte sequence but
+`/` and NUL, so it is held as an invertible escape that is always valid UTF-8; see
+[Remote Protocol](protocol.md) for the encoding. The type is what keeps the two forms
+apart: `as_escaped` is what addresses a file and crosses the wire, `display` is lossy
+and for a person to read, and neither can be passed where the other belongs by
+accident.
 `EntryStream` and `WalkStream` are native boxed streams. Every method reports
 `std::io::Error`, lifecycle included: there is no separate typed error to
 translate, so an `ErrorKind` set deep in the transport — `InvalidInput` for an
@@ -77,7 +87,9 @@ selected host's environment, makes the result absolute, and lexically removes
 `.` and `..`. It does not require the target to exist or resolve symbolic links.
 Resolving an already resolved path returns the same path.
 
-`Client.op_list_dir` yields shared-core `DirectoryEntry` values in order. The
+`Client.op_list_dir` yields shared-core `DirectoryEntry` values in order. An entry the
+selected host could not inspect arrives as a degraded entry rather than as a stream
+error, so one such entry does not hide the rest of the directory. The
 remote server batches entries only for gRPC transport, and the remote client
 flattens those messages back into the same entry stream. The client does not
 define a second listing model. Dropping the stream cancels unfinished work.

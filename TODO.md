@@ -10,12 +10,14 @@ galleries — [TUI](docs/design/tui-layouts.md) and
 The GUI gallery's own fixture asks for three connections including a refused one,
 a directory whose expansion was refused, another still listing, and one transfer
 in flight ([GUI layout and palette system](docs/design/gui-layout-spec.md),
-section 11). The desktop front end holds one connection, has no transfer, and
-cannot report a per-entry failure.
+section 11). The desktop front end holds one connection and has no transfer.
 
 So the work that comes before a new front end is not arrangement and color. It is
 the entry model, the input model, and the operations the layouts assume already
-exist.
+exist. **The entry model is now settled** — items 1 to 3 are done, so an entry has a
+size and a modification time, and a failure belongs to the entry it happened to
+rather than to the whole listing. What is left is the input model, a second
+connection, and the operations.
 
 ## Status
 
@@ -35,28 +37,35 @@ Legend: `[ ]` open, `[~]` in progress, `[x]` done.
 
 Landing these late means reworking every layout that reads them.
 
-- [ ] **1. Report listing failures per entry, not per stream.**
-  [`fs::directory::list`](src/fs/directory/list.rs) ends the stream on the
-  first entry error, so one bad entry truncates the directory and reports a
-  failure for the whole listing. The GUI proposal draws a per-row `warn` `!`
-  badge and an `unreadable` status; the model cannot express "this one entry is
-  bad, the rest are fine". Decide the stream item type, whether
-  [`ListingEntry`](proto/file_peeker.proto) carries an unreadable flag, and
-  where [`browser::Row`](src/browser/tree.rs) keeps it.
-- [ ] **2. Tolerate non-UTF-8 names and paths.**
-  [`fs::directory::entry`](src/fs/directory/entry.rs) rejects them as
-  invalid arguments, which combined with item 1 means one unusual filename hides
-  a whole directory. Decide the display strategy and how a protobuf `string`
-  field carries it.
-- [ ] **3. Give an entry its metadata: size, modified time, mode, symlink
-  target.** `DirectoryEntry` and `ListingEntry` carry `name`, `kind` and
-  `navigable` only. The GUI proposal's value columns want `size` and `modified`,
-  its grid cell wants a size, and its inspector wants a metadata panel. This cut
-  crosses the protocol, `fs`, `client::rpc`, `browser::Row` and both front ends
-  with their tests. Watch the per-entry cost: `inspect_entry` already has the
-  file type, and a second stat per entry is not free. Decide whether a symlink
-  reports its own metadata or its target's.
-- [ ] **4. Decide which layer sorts, and let the tree reorder.** *Blocked by 3.*
+- [x] **1. Report listing failures per entry, not per stream.**
+  [`inspect_entry`](src/fs/directory/entry.rs) is now infallible: an entry it
+  cannot describe is reported with `metadata: None` and the reason in `defect`.
+  The stream item type did not change; what changed is which conditions produce
+  `Err`, now only iterating the directory failing and cancellation. `browser::Row`
+  keeps it on the `DirectoryEntry` it already held, so neither front end needed a
+  new field and no placement invariant was touched. A degraded row draws as
+  `unknown` in the desktop table and `×` in the terminal.
+- [x] **2. Tolerate non-UTF-8 names and paths.**
+  [`host_path`](src/host_path.rs) carries them through an invertible escape —
+  `%%` for a literal marker, `%XX` for a byte outside UTF-8 — so a protobuf
+  `string` holds any name without losing a byte and the name still addresses its
+  file. The `HostPath` newtype keeps the escaped and displayed forms from being
+  confused. Five separate refusals went away, including two in `resolve_path` and
+  `write_file` that the item did not know about.
+- [x] **3. Give an entry its metadata: size, modified time, mode, symlink
+  target.** `EntryMetadata` carries all four, and one `symlink_metadata` call
+  yields the file type with them rather than a second stat beside
+  `DirEntry::file_type`. A symlink reports **its own** metadata plus its target,
+  as `lstat` and `ls -l` do, so a dangling link keeps its metadata and stays
+  distinguishable from an entry that could not be stat'd. That stat is also what
+  made item 1 necessary rather than merely tidy: it is a per-entry syscall that
+  can be refused on its own. The desktop table gained `Size` and `Modified`
+  columns; the terminal shows a size above 52 columns.
+- [ ] **4. Decide which layer sorts, and let the tree reorder.** *Unblocked: 3 is
+  done.* Note that paths and names are now escaped, and `Ord` on the escaped form is
+  not the ordering of the real bytes — `%` is `0x25`, so an escaped high byte sorts
+  before a letter. `HostPath` deliberately does not derive `Ord`; this item chooses
+  whether to collate the displayed form or the real bytes.
   Listings arrive in `read_dir` order; [Client API](docs/api.md) promises stream
   order, not a collation. The difficulty is not the comparison: `Placement` in
   [`browser::tree`](src/browser/tree.rs) holds row indices and is only
@@ -91,7 +100,8 @@ after.
   transfers between panes. The TUI already has a Connection Manager and tabs, so
   this is lifting a proven model into shared code rather than inventing one.
 - [ ] **8. Report transfer progress, queue transfers, and cancel them.**
-  *Blocked by 3.* [`Client::op_copy_file`](src/client/file/copy.rs) is a
+  *Unblocked: 3 is done, so the source size a determinate bar needs is available.*
+  [`Client::op_copy_file`](src/client/file/copy.rs) is a
   single await returning a final byte count. The proposal draws a transfer track
   and an inspector queue; a determinate bar also needs the source size.
 - [ ] **9. Expose a bounded, cancellable file read.** `read_file` is private and
@@ -109,8 +119,8 @@ Each is cheap to settle now and expensive to settle after a hundred combinations
 exist.
 
 - [ ] **11. Decide whether the treemap's recursive directory sizes are worth it.**
-  *Blocked by 3.* `op_walk_dir` exists but carries no sizes, no aggregation and
-  no cache, and walking a large tree has a real cost and a cancellation story.
+  *Unblocked: 3 is done, so a walk entry now carries a size.* `op_walk_dir` still has
+  no aggregation and no cache, and walking a large tree has a real cost and a cancellation story.
   Either compute lazily with a cache, or drop the layout.
 - [ ] **12. Decide the accessibility cost of painting text.** `crate::gui` draws
   every string through `Painter::text` rather than as a widget, so there is no
@@ -147,20 +157,17 @@ None of these touch the data layer.
 
 | Item | Blocked by |
 | --- | --- |
-| 4 — sorting and tree reorder | 3 |
-| 8 — transfer progress | 3 |
-| 11 — treemap sizes | 3 |
 | 15 — contrast checks | 14 |
 
-Everything else is startable in any order. Items 14, 16 and 17 are the only ones
-that touch neither the data layer nor a pending decision.
+Nothing else is blocked. Items 4, 8 and 11 waited on the entry model and no longer
+do.
 
 ## Suggested route
 
-1. Items 16 and 17, as one pass over the two defects the proposal already found.
-2. Items 1, 2 and 3, in that order: the entry model settles before anything reads
-   it.
-3. Item 4, once metadata exists to sort by.
+1. ~~Items 1, 2 and 3: the entry model settles before anything reads it.~~ Done.
+2. Items 16 and 17, as one pass over the two defects the proposal already found.
+3. Item 4, now that there is metadata to sort by — and a decision to make about
+   whether a collation reads the displayed name or the real bytes.
 4. Items 5 and 6, which are what a selectable layout and palette are carried on.
 5. Items 7 through 10 in parallel with the GUI proposal's first three build
    phases — widening the palette, landing the ten, and extracting the

@@ -35,7 +35,7 @@ test:
 
 docs-check:
 	bash scripts/check-docs.sh
-	git diff --check -- README.md docs scripts/check-docs.sh
+	git diff --check -- README.md TODO.md docs scripts/check-docs.sh
 
 # The remote install path is shell that nothing else checks: `ensure-server.sh`
 # runs over an SSH stdin pipe and `install-server-from-source.sh` runs on a host

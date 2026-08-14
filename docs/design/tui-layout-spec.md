@@ -35,6 +35,14 @@ following has gone wrong.
   glyphs `▸ ▾ … !` are the expansion states and stay one-to-one with them.
 - **Entry kinds.** `EntryKind::{File, Directory, Symlink, Other}`, glyphs
   `(space) ▸ @ ?`.
+- **An entry that could not be inspected takes `×`,** which is neither an expansion
+  state nor a kind. It needs a glyph of its own precisely because it is never
+  navigable: without one it would fall through to its kind glyph, and a directory's
+  kind glyph is the same `▸` as a collapsed expandable row, so it would look openable
+  and do nothing.
+- **Values a layout may show.** A size, formatted by `browser::value` so the two front
+  ends spell it the same way. Absent where the entry could not be inspected, and for a
+  directory, whose own size describes the entry rather than its contents.
 - **Streaming.** Listings arrive in groups and a frame draws whatever has landed;
   no layout may require a complete listing before it draws.
 - **Viewport ownership.** `BrowserContext::viewport` decides which rows a frame

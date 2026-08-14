@@ -73,6 +73,7 @@ Cargo.toml   build.rs   proto/file_peeker.proto
 src/
 ├── lib.rs                  module declarations and the crate-internal facade
 ├── fs/                     host-local filesystem behavior
+├── host_path.rs            selected-host names and paths, escaped so a `String` holds them
 ├── protocol.rs             wire contract, including the generated `v1` module
 ├── client/                 the Client layer: connections, operations, transport
 ├── browser/                the headless model both front ends browse with
@@ -454,7 +455,9 @@ are actually shared.
 - Add a trait only when there are real implementations to vary, or a boundary
   must be substituted in tests.
 - Keep streaming pull-based and preserve partial results followed by a terminal
-  error unless a feature explicitly requires different semantics.
+  error unless a feature explicitly requires different semantics. Reserve a terminal
+  error for a condition that really does end the stream: anything wrong with one item
+  travels with that item, because ending the stream hides every item behind it.
 - Avoid adding UI surface area until a concrete consumer needs it.
 - Prefer a `cfg(test)` fixture in `test_support` over a trait introduced only
   to be faked.

@@ -93,14 +93,17 @@ consumer polls for another entry, so stream polling provides backpressure
 without a producer task or channel. The server applies wire batching, and the
 client flattens those transport batches before exposing them to callers. This is
 now true of a local connection too: its entries are batched by its own embedded
-server and flattened again in the same process. A non-UTF-8 entry terminates the listing with an invalid-argument
-error. The exact transport limits are owned by
-[Remote Protocol](protocol.md).
+server and flattened again in the same process. An entry whose name is not UTF-8 is
+carried by an invertible escape rather than refused, and an entry that cannot be
+inspected is reported as that one degraded entry; neither ends the listing. The exact
+transport limits are owned by [Remote Protocol](protocol.md).
 
 Listing success is normal gRPC stream completion. A terminal gRPC status may
 follow valid entries, allowing UIs to retain partial results and show an
-incomplete state. Neither core nor the server sorts because global sorting would
-require collecting the entire directory.
+incomplete state. Only two conditions are terminal: iterating the directory failing,
+and cancellation. Anything wrong with a single entry travels with that entry, so one
+unreadable entry no longer hides the siblings behind it. Neither core nor the server
+sorts because global sorting would require collecting the entire directory.
 
 The core walks trees using an explicit depth-first stack with one open
 directory frame per active depth. It emits each directory before opening its

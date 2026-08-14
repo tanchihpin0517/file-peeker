@@ -142,11 +142,25 @@ time proportional to its size.
 Activating a non-navigable row does nothing. Expansion, navigation, streaming,
 and stale-event rejection are owned by `browser_context.rs`.
 
+A row shows its size right-aligned once the list is at least 52 columns wide, and
+spends the width on names below that. A directory shows none: its own size describes
+the directory entry rather than what is inside it. An entry the host could not inspect
+takes a `×` instead of an expansion or kind glyph — it is never navigable, and a
+directory's kind glyph is the same `▸` as a collapsed expandable row, so without one it
+would look openable and do nothing. Selecting it puts the reason in the footer, where a
+refused expansion already reports itself.
+
+A name the host does not hold as UTF-8 is shown with the unrepresentable bytes replaced,
+while the row keeps the exact name underneath, so opening, expanding and copying it all
+still reach the right file. A name holding a literal `%` shows the single `%` it is.
+
 ## Filtering
 
 `/` opens a filter prompt over the active browser. Typing narrows the rows to
 the names that contain the query, case-insensitively, along with the ancestors of
-each match so a hit inside a directory still reads as being inside it. The
+each match so a hit inside a directory still reads as being inside it. Matching is
+against the name as it is shown rather than the exact form underneath, which is what
+lets `Tab` spell a match back into the query without the two disagreeing. The
 selection follows the nearest match rather than a carried-along ancestor. `Tab`
 extends the query to the longest prefix every match agrees on, the way a shell
 completes a partial word, which can never narrow what is on screen because every

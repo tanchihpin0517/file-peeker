@@ -54,6 +54,34 @@ makes relative inputs absolute against the server working directory, and
 lexically removes `.` and `..`. It does not access the target, require it to
 exist, or follow symbolic links. Already resolved paths are returned unchanged.
 
+### Selected-host names and paths
+
+Every path and name in this protocol crosses as an **escaped** form, because a Unix
+filename is any byte sequence but `/` and NUL while a protobuf `string` must be UTF-8.
+The escape is invertible, so a name a listing reports still addresses the file it
+names:
+
+| Input | Escaped |
+| --- | --- |
+| a valid UTF-8 run | verbatim |
+| the literal `%` | `%%` |
+| a byte that is not valid UTF-8 | `%XX`, uppercase hexadecimal |
+
+The marker is escaped too, and must be: a file really can be named `caf%80.txt`, and
+escaping only the invalid bytes would collide it with the name holding byte `0x80`.
+Every ordinary filename is therefore its own escaped form.
+
+Decoding accepts `%%` and `%XX` for `XX` from `80` upward, and **rejects everything
+else** — a lowercase digit, a truncated sequence, or a value below `0x80`. That last
+rule is what stops a peer from smuggling a `/` or a NUL into what is meant to be a
+single name; since every byte below `0x80` is valid UTF-8 alone, the escape never
+emits one. Rejecting only uppercase keeps one file to one escaped spelling, so a path
+stays a single map key and a single comparison. A malformed escape is
+`InvalidArgument`.
+
+The escape never emits `/`, so an escaped path has exactly the components the real
+path has: joining, splitting and prefix tests work on it without decoding.
+
 `List` accepts absolute, relative, and shell-style paths. The server uses its
 own environment to expand `~` and `$VARIABLES`; relative results are interpreted
 against its working directory. The server's core then reads the server host's
@@ -63,8 +91,22 @@ read the path. It streams zero or more non-empty batches and completes with gRPC
 protobuf messages at 1 MiB. The core itself does not batch or sort entries.
 
 Errors may terminate a stream after valid batches, so callers retain partial
-results. Core service cancellation terminates active enumeration with gRPC
-`Cancelled`; dropping the response stream cancels unfinished enumeration.
+results. Only two conditions are terminal: iterating the directory failing, and
+cancellation. Anything wrong with one entry is carried by that entry — an entry whose
+metadata could not be read arrives with `metadata` absent and the reason in `defect`
+— so a directory that is readable but not searchable reports every entry it has
+rather than failing as a whole. Core service cancellation terminates active
+enumeration with gRPC `Cancelled`; dropping the response stream cancels unfinished
+enumeration.
+
+Each `ListingEntry` carries a name, a kind, whether it is navigable, its metadata
+when that could be read, and a `defect` naming why when it could not. `EntryMetadata`
+holds a size, a modification time as signed Unix seconds plus a non-negative
+nanosecond remainder, an optional Unix mode, and a symlink's target. A symlink
+describes **itself**, as `lstat` and `ls -l` do, and names its target separately; a
+dangling link therefore still reports metadata and stays distinguishable from an entry
+that could not be stat'd at all. `metadata` and `unix_mode` use explicit presence, so
+absent is distinct from zero and an empty file never reads as an unreadable one.
 
 `Walk` recursively traverses the selected-host directory in pull-based,
 pre-order depth-first order. The requested root is excluded; direct children
@@ -120,7 +162,7 @@ up incomplete data.
 | Permission failure | `PermissionDenied` |
 | Non-directory list or walk target | `FailedPrecondition` |
 | Non-file read target | `FailedPrecondition` |
-| Invalid or non-UTF-8 path | `InvalidArgument` |
+| Invalid path, or one that is not correctly escaped | `InvalidArgument` |
 | Service or operation cancellation | `Cancelled` |
 | Other filesystem failure | `Internal` |
 

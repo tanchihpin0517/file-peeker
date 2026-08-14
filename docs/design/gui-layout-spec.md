@@ -27,9 +27,21 @@ any of the following has gone wrong.
 - **Listing and expansion states.** `browser::Status::{Loading, Complete,
   Failed(String)}` and `browser::Expansion::{Collapsed, Loading, Expanded,
   Failed}`. A layout may not invent a fifth, and the second column's vocabulary
-  stays `loading` / `unreadable` / the entry kind.
+  stays `loading` / `unreadable` / `unknown` / the entry kind.
+- **A refused expansion and an uninspectable entry are different states, and keep
+  different words.** `unreadable` is a directory that would not open — an
+  `Expansion::Failed`. `unknown` is an entry whose own metadata would not be read, so
+  even its kind is a guess; it is `DirectoryEntry::metadata` being absent, it outranks
+  the kind label rather than sitting beside it, and it is never navigable. A layout may
+  not collapse the two into one word.
 - **Entry kinds.** `EntryKind::{File, Directory, Symlink, Other}`, and the rule
   that a non-navigable row never gets a chevron.
+- **Values a layout may show.** `DirectoryEntry` carries a size, a modification time,
+  a Unix mode and a symlink's target, all of which may be absent. A layout draws
+  nothing where a value is absent rather than a zero, which would read as a fact. A
+  directory's own size is not shown: it describes the directory entry, not what is in
+  it. Sizes and times are formatted by `browser::value`, so no layout invents its own
+  spelling of them.
 - **Streaming.** Listings arrive in groups of up to `LISTING_GROUP` (512) over a
   bounded channel drained with `try_recv` at the top of each frame, so a frame
   draws whatever has landed. No layout may require a complete listing before it
@@ -574,8 +586,8 @@ row's place in the tree:
    is left after the value columns and the gutter.
 
 Value columns carry `size`, `status`, `kind`, `modified` or the parent path at
-10.5pt. `status` is `loading` in `muted`, `unreadable` in `warn`, and otherwise
-the entry kind tinted like its glyph. Unmatched rows under an active filter draw
+10.5pt. `status` is `loading` in `muted`, `unreadable` or `unknown` in `warn`, and
+otherwise the entry kind tinted like its glyph. Unmatched rows under an active filter draw
 at 0.45 alpha rather than being removed.
 
 **Scroll thumb** — width 5, radius 2.5, `faint` at 0.5 alpha, minimum height 28,

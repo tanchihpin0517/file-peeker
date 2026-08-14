@@ -12,7 +12,7 @@ state needed to display its requested listing.
 | Startup path | Resolves shell expressions to an absolute lexical path on the selected host | CLI or New Browser path is resolved on its selected connection before BrowserContext creation |
 | Active listing stream | Native `EntryStream` | Each `BrowserContext` owns one root task plus a task per loading expanded directory |
 | Client-only read stream | One gRPC response stream per operation | Not exposed |
-| Received directory entries | Returned one-by-one, not retained | Stored as visible tree rows with full path, depth, and expansion state |
+| Received directory entries | Returned one-by-one, not retained | Stored as visible tree rows with full escaped path, depth, expansion state, and the entry's own metadata or the reason it has none |
 | Loading and terminal error | Produced by the operation | Root `ListingStatus` plus independent expanded-directory states |
 | Selection | No | `selected_index` stored per `BrowserContext` |
 | Filtering | No | Query and the selection to restore stored per `BrowserContext`; the visible window is derived from the rows per keystroke rather than removing any |
@@ -30,7 +30,8 @@ TUI: no path -> Connection Manager -> add local/SSH connection -> resolve browse
 ```
 
 The TUI preserves selected-host stream arrival order and retains partial entries
-if a stream fails. It can run listings for multiple Browser Contexts and
+if a stream fails. An entry that could not be inspected is a row like any other,
+marked as such rather than missing. It can run listings for multiple Browser Contexts and
 multiple expanded directories concurrently. Bounded events are routed by context
 UUID; each context rejects stale root generations and collapsed-directory
 request IDs before applying transitions. Pressing `o` toggles a navigable row

@@ -67,6 +67,13 @@ environment for local listing. After the listing completes, a debug line on
 standard error reports the entry count, elapsed milliseconds, and entries per
 second.
 
+Paths are written as the bytes the host holds them as, not as text with anything
+unrepresentable replaced, so a name copied out of the output names the same file when
+it is passed back in. A path given as an argument is likewise taken as the real name a
+person typed. This matters for a name the host does not hold as UTF-8, which the
+protocol carries through an escape — see [Remote Protocol](protocol.md) — and for one
+holding a literal `%`, which appears as the single `%` it is.
+
 With `--remote SERVER`, the matching server is started through SSH and the same
 listing operation runs on that host. Relative paths are resolved from the
 remote server's working directory, and shell expressions are expanded in the
