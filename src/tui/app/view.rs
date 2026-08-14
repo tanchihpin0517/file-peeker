@@ -459,7 +459,11 @@ fn row_list_item(row: &BrowserRow) -> ListItem<'static> {
         entry_appearance(row.entry().kind).0
     };
     ListItem::new(Line::styled(
-        format!("{}{prefix}{}", "  ".repeat(row.depth()), row.entry().name),
+        format!(
+            "{}{prefix}{}",
+            "  ".repeat(usize::from(row.depth())),
+            row.entry().name
+        ),
         style,
     ))
 }

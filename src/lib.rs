@@ -15,6 +15,8 @@
 //!   the only one left out of `default`, because eframe brings a window system
 //!   and a GPU backend with it.
 
+#[cfg(any(feature = "tui", feature = "gui"))]
+mod browser;
 #[cfg(feature = "client")]
 mod client;
 mod fs;

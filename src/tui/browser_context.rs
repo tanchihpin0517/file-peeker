@@ -1,9 +1,25 @@
+//! One browsed root as the terminal sees it: a [`Tree`] of rows, the viewport
+//! that frames them, and the filter prompt that narrows them.
+//!
+//! The rows themselves, their expansions and the filter window all live in
+//! [`crate::browser`], which the desktop front end drives too. What is here is
+//! everything the terminal adds: a viewport whose height only render time knows,
+//! a prompt driven one keystroke at a time, and the listing tasks feeding the
+//! tree.
+
 use std::{collections::HashMap, fmt, path::Path, sync::Arc};
 
-use crate::{Client, ConnectionId, DirectoryEntry, EntryKind};
+use crate::{
+    Client, ConnectionId, DirectoryEntry, EntryKind,
+    browser::{Tree, VisibleRows, in_scope, matches_needle},
+};
 use futures::StreamExt as _;
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
+
+pub(crate) use crate::browser::{
+    Expansion as ExpansionStatus, Row as BrowserRow, Status as ListingStatus,
+};
 
 /// Rows of context kept past the selection when the viewport scrolls to follow
 /// it.
@@ -16,40 +32,6 @@ impl BrowserContextId {
     fn new() -> Self {
         Self(Uuid::new_v4())
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ListingStatus {
-    Loading,
-    Complete,
-    Failed(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ExpansionStatus {
-    Collapsed,
-    Loading { request_id: u64 },
-    Expanded { request_id: u64 },
-    Failed { request_id: u64, error: String },
-}
-
-impl ExpansionStatus {
-    fn request_id(&self) -> Option<u64> {
-        match self {
-            Self::Collapsed => None,
-            Self::Loading { request_id }
-            | Self::Expanded { request_id }
-            | Self::Failed { request_id, .. } => Some(*request_id),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct BrowserRow {
-    path: String,
-    depth: usize,
-    entry: DirectoryEntry,
-    expansion: ExpansionStatus,
 }
 
 /// The rows one frame displays, and where the selection sits inside them.
@@ -119,132 +101,6 @@ struct Descent {
     opened: bool,
 }
 
-/// Which rows a frame may show: every row, or the rows a filter matched
-/// together with the ancestors that keep them readable.
-///
-/// Filtering never removes rows. Expansion, streaming insertion, and collapse
-/// all address rows by index, so a filter that dropped them would move every
-/// index out from under an in-flight listing. It is a window instead, and the
-/// only state a filter moves is the selection and the scroll offset -- both of
-/// which are positions in this window rather than row indices.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum VisibleRows {
-    All(usize),
-    Filtered {
-        rows: Vec<VisibleRow>,
-        matches: usize,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct VisibleRow {
-    row: usize,
-    /// False for a row on screen only to place a match underneath it.
-    matched: bool,
-}
-
-impl VisibleRows {
-    fn len(&self) -> usize {
-        match self {
-            Self::All(count) => *count,
-            Self::Filtered { rows, .. } => rows.len(),
-        }
-    }
-
-    /// How many rows matched outright, excluding the ancestors carried along for
-    /// readability. `None` when every row is on screen anyway.
-    fn matches(&self) -> Option<usize> {
-        match self {
-            Self::All(_) => None,
-            Self::Filtered { matches, .. } => Some(*matches),
-        }
-    }
-
-    fn row(&self, position: usize) -> Option<usize> {
-        match self {
-            Self::All(count) => (position < *count).then_some(position),
-            Self::Filtered { rows, .. } => rows.get(position).map(|visible| visible.row),
-        }
-    }
-
-    /// Where `row` sits, or where the nearest visible row after it sits, so a
-    /// selection the filter just hid still lands somewhere sensible. `None` when
-    /// there is nowhere to land at all.
-    fn position_of(&self, row: usize) -> Option<usize> {
-        let last = self.len().checked_sub(1)?;
-        Some(match self {
-            Self::All(_) => row.min(last),
-            Self::Filtered { rows, .. } => start_of(rows, row).min(last),
-        })
-    }
-
-    /// Whether `row` is on screen because it matched, rather than to place a match
-    /// under it.
-    fn matched(&self, row: usize) -> bool {
-        match self {
-            Self::All(_) => true,
-            Self::Filtered { rows, .. } => rows
-                .get(start_of(rows, row))
-                .is_some_and(|visible| visible.row == row && visible.matched),
-        }
-    }
-
-    /// Where the nearest match at or after `row` sits, falling back to the last
-    /// match. This is where a filter puts the selection: an ancestor is context,
-    /// not something the user asked to land on.
-    ///
-    /// A filtered list only exists because something matched, so a non-empty one
-    /// always has a match to offer.
-    fn match_position_of(&self, row: usize) -> Option<usize> {
-        let Self::Filtered { rows, .. } = self else {
-            return self.position_of(row);
-        };
-        let start = start_of(rows, row);
-        rows.iter()
-            .skip(start)
-            .position(|visible| visible.matched)
-            .map(|offset| start + offset)
-            .or_else(|| rows.iter().rposition(|visible| visible.matched))
-    }
-}
-
-/// The position `row` would take among visible rows, which is where it sits when
-/// it is visible itself.
-fn start_of(rows: &[VisibleRow], row: usize) -> usize {
-    rows.partition_point(|visible| visible.row < row)
-}
-
-/// One directory expansion still streaming: the task listing it, and where the
-/// next group of its children goes.
-#[derive(Debug)]
-struct DirectoryListing {
-    task: JoinHandle<()>,
-    placement: Placement,
-}
-
-/// Where a still-loading expansion's next group of children lands.
-///
-/// Children always land at the end of their own subtree, so the position is
-/// carried forward from group to group rather than searched for again.
-/// Recomputing it meant walking the children already placed, once per group,
-/// which is quadratic in the size of the directory -- the stall a large
-/// expansion showed while a change of directory of the same size did not, since
-/// a root listing only ever appends.
-///
-/// Row indices, so every insertion and removal elsewhere in the tree has to
-/// shift them. That is what [`BrowserContext::placements_after_insertion`] and
-/// [`BrowserContext::placements_after_removal`] are for, and they are the reason
-/// those are the only two places rows may move.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Placement {
-    /// The row being expanded.
-    parent: usize,
-    /// The depth its children sit at.
-    depth: usize,
-    /// The row index the next group is inserted at.
-    insertion: usize,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SelectedEntry {
     pub(crate) path: String,
@@ -252,42 +108,18 @@ pub(crate) struct SelectedEntry {
     pub(crate) kind: EntryKind,
 }
 
-impl BrowserRow {
-    fn new(path: String, depth: usize, entry: DirectoryEntry) -> Self {
-        Self {
-            path,
-            depth,
-            entry,
-            expansion: ExpansionStatus::Collapsed,
-        }
-    }
-
-    pub(crate) fn depth(&self) -> usize {
-        self.depth
-    }
-
-    pub(crate) fn entry(&self) -> &DirectoryEntry {
-        &self.entry
-    }
-
-    pub(crate) fn expansion(&self) -> &ExpansionStatus {
-        &self.expansion
-    }
-}
-
 pub(crate) struct BrowserContext {
     id: BrowserContextId,
-    root_path: String,
-    rows: Vec<BrowserRow>,
-    selected_index: Option<usize>,
+    tree: Tree,
     filter: Option<Filter>,
     /// A position in the visible rows, which is a row index only while no filter
     /// narrows them.
     viewport_offset: usize,
     viewport_height: usize,
-    status: ListingStatus,
     root_listing_task: Option<JoinHandle<()>>,
-    directory_listings: HashMap<u64, DirectoryListing>,
+    /// The task filling each in-flight expansion. The tree holds where the
+    /// children go; this holds what to abort when they are no longer wanted.
+    listing_tasks: HashMap<u64, JoinHandle<()>>,
     generation: u64,
     next_request_id: u64,
     client: Arc<Client>,
@@ -300,13 +132,10 @@ impl fmt::Debug for BrowserContext {
         formatter
             .debug_struct("BrowserContext")
             .field("id", &self.id)
-            .field("root_path", &self.root_path)
-            .field("rows", &self.rows)
-            .field("selected_index", &self.selected_index)
+            .field("tree", &self.tree)
             .field("filter", &self.filter)
             .field("viewport_offset", &self.viewport_offset)
             .field("viewport_height", &self.viewport_height)
-            .field("status", &self.status)
             .field("generation", &self.generation)
             .finish_non_exhaustive()
     }
@@ -321,15 +150,12 @@ impl BrowserContext {
     ) -> Self {
         let mut context = Self {
             id: BrowserContextId::new(),
-            root_path,
-            rows: Vec::new(),
-            selected_index: None,
+            tree: Tree::new(root_path),
             filter: None,
             viewport_offset: 0,
             viewport_height: 0,
-            status: ListingStatus::Loading,
             root_listing_task: None,
-            directory_listings: HashMap::new(),
+            listing_tasks: HashMap::new(),
             generation: 0,
             next_request_id: 0,
             client,
@@ -345,21 +171,24 @@ impl BrowserContext {
     }
 
     pub(crate) fn root_path(&self) -> &str {
-        &self.root_path
+        self.tree.root_path()
     }
 
     pub(crate) fn rows(&self) -> &[BrowserRow] {
-        &self.rows
+        self.tree.rows()
     }
 
     #[cfg(test)]
     fn entries(&self) -> Vec<DirectoryEntry> {
-        self.rows.iter().map(|row| row.entry.clone()).collect()
+        self.rows().iter().map(|row| row.entry().clone()).collect()
     }
 
     #[cfg(test)]
     fn row_names(&self) -> Vec<String> {
-        self.rows.iter().map(|row| row.entry.name.clone()).collect()
+        self.rows()
+            .iter()
+            .map(|row| row.name().to_owned())
+            .collect()
     }
 
     /// The names one frame of `height` rows puts on screen.
@@ -368,36 +197,32 @@ impl BrowserContext {
         self.viewport(height)
             .rows
             .iter()
-            .map(|row| row.entry.name.clone())
+            .map(|row| row.name().to_owned())
             .collect()
     }
 
     pub(crate) fn status(&self) -> &ListingStatus {
-        &self.status
+        self.tree.status()
     }
 
     pub(crate) fn selected_expansion_error(&self) -> Option<(&str, &str)> {
-        let row = self
-            .effective_selection()
-            .and_then(|index| self.rows.get(index))?;
-        match &row.expansion {
-            ExpansionStatus::Failed { error, .. } => Some((&row.path, error)),
+        let row = self.tree.selected_row()?;
+        match row.expansion() {
+            ExpansionStatus::Failed { error, .. } => Some((row.path(), error)),
             _ => None,
         }
     }
 
     pub(crate) fn effective_selection(&self) -> Option<usize> {
-        (!self.rows.is_empty()).then(|| self.selected_index.unwrap_or(0).min(self.rows.len() - 1))
+        self.tree.effective_selection()
     }
 
     pub(crate) fn selected_entry(&self) -> Option<SelectedEntry> {
-        let row = self
-            .effective_selection()
-            .and_then(|index| self.rows.get(index))?;
+        let row = self.tree.selected_row()?;
         Some(SelectedEntry {
-            path: row.path.clone(),
-            name: row.entry.name.clone(),
-            kind: row.entry.kind,
+            path: row.path().to_owned(),
+            name: row.name().to_owned(),
+            kind: row.entry().kind,
         })
     }
 
@@ -452,10 +277,11 @@ impl BrowserContext {
         self.viewport_offset = offset;
 
         let end = (offset + height).min(visible.len());
+        let rows = self.tree.rows();
         Viewport {
             rows: (offset..end)
                 .filter_map(|position| visible.row(position))
-                .filter_map(|row| self.rows.get(row))
+                .filter_map(|row| rows.get(row))
                 .collect(),
             selected: Some(selected - offset),
             matches,
@@ -463,8 +289,8 @@ impl BrowserContext {
     }
 
     pub(crate) fn move_selection(&mut self, down: bool) {
-        if self.rows.is_empty() {
-            self.selected_index = None;
+        if self.rows().is_empty() {
+            self.tree.set_selected_index(None);
             return;
         }
         let visible = self.visible_rows();
@@ -480,7 +306,7 @@ impl BrowserContext {
         } else {
             current.saturating_sub(1)
         };
-        self.selected_index = visible.row(position);
+        self.tree.set_selected_index(visible.row(position));
         self.fill_from_selection();
     }
 
@@ -509,63 +335,17 @@ impl BrowserContext {
             self.viewport_offset = self.viewport_offset.saturating_sub(distance);
             current.saturating_sub(distance)
         };
-        self.selected_index = visible.row(position);
+        self.tree.set_selected_index(visible.row(position));
         self.fill_from_selection();
     }
 
-    /// The rows the active filter leaves on screen: every name that matches, plus
-    /// the ancestors of each match, so a hit inside a deep directory still reads
-    /// as being inside it.
-    ///
-    /// Recomputed per call rather than cached. That costs one pass over the tree
-    /// per keystroke and per frame drawn while filtering, which is the same order
-    /// as the matching itself, and it means no row mutation anywhere else has to
-    /// remember to invalidate anything. An unfiltered browser pays nothing.
+    /// The rows the active filter leaves on screen, or all of them when no prompt
+    /// is open.
     fn visible_rows(&self) -> VisibleRows {
-        let Some(filter) = &self.filter else {
-            return VisibleRows::All(self.rows.len());
-        };
-        let needle = (!filter.query.is_empty()).then(|| filter.query.to_lowercase());
-        let scope = filter.scope();
-        if needle.is_none() && scope.is_none() {
-            return VisibleRows::All(self.rows.len());
+        match &self.filter {
+            Some(filter) => self.tree.window(&filter.query, filter.scope()),
+            None => self.tree.unfiltered(),
         }
-        let mut rows = Vec::new();
-        let mut matches = 0;
-        // The ancestor chain of the row under consideration, and whether each
-        // link has been emitted already. Rows are in pre-order, so truncating to
-        // the current depth leaves exactly that row's ancestors.
-        let mut ancestors: Vec<(usize, bool)> = Vec::new();
-        for (index, row) in self.rows.iter().enumerate() {
-            ancestors.truncate(row.depth);
-            // The directory a `/` stepped into stays on screen whatever the query
-            // does, so stepping into an empty or still-loading one still shows
-            // where the prompt is pointed.
-            let entered = scope == Some(row.path.as_str());
-            let hit = !entered
-                && in_scope(&row.path, scope)
-                && needle
-                    .as_ref()
-                    .is_none_or(|needle| matches_needle(&row.entry.name, needle));
-            if hit || entered {
-                for (ancestor, emitted) in &mut ancestors {
-                    if !*emitted {
-                        rows.push(VisibleRow {
-                            row: *ancestor,
-                            matched: false,
-                        });
-                        *emitted = true;
-                    }
-                }
-                rows.push(VisibleRow {
-                    row: index,
-                    matched: hit,
-                });
-                matches += usize::from(hit);
-            }
-            ancestors.push((index, hit || entered));
-        }
-        VisibleRows::Filtered { rows, matches }
     }
 
     /// What the prompt shows, which is the selected candidate once one has been
@@ -579,7 +359,7 @@ impl BrowserContext {
     pub(crate) fn filter_scope(&self) -> Option<&str> {
         let scope = self.filter.as_ref()?.scope()?;
         Path::new(scope)
-            .strip_prefix(&self.root_path)
+            .strip_prefix(self.tree.root_path())
             .ok()
             .and_then(Path::to_str)
             .or(Some(scope))
@@ -664,10 +444,11 @@ impl BrowserContext {
         let needle = filter.query.to_lowercase();
         let scope = filter.scope();
         let mut matches = self
-            .rows
+            .tree
+            .rows()
             .iter()
-            .filter(|row| scope != Some(row.path.as_str()) && in_scope(&row.path, scope))
-            .map(|row| row.entry.name.as_str())
+            .filter(|row| scope != Some(row.path()) && in_scope(row.path(), scope))
+            .map(BrowserRow::name)
             .filter(|name| matches_needle(name, &needle));
         let Some(first) = matches.next() else {
             return;
@@ -722,14 +503,14 @@ impl BrowserContext {
         }
         let Some((index, path, closed)) = self
             .effective_selection()
-            .and_then(|index| Some((index, self.rows.get(index)?)))
-            .filter(|(_, row)| row.entry.navigable)
+            .and_then(|index| Some((index, self.tree.rows().get(index)?)))
+            .filter(|(_, row)| row.entry().navigable)
             .map(|(index, row)| {
                 (
                     index,
-                    row.path.clone(),
+                    row.path().to_owned(),
                     matches!(
-                        row.expansion,
+                        row.expansion(),
                         ExpansionStatus::Collapsed | ExpansionStatus::Failed { .. }
                     ),
                 )
@@ -856,8 +637,8 @@ impl BrowserContext {
         let visible = self.visible_rows();
         self.effective_selection()
             .filter(|index| visible.matched(*index))
-            .and_then(|index| self.rows.get(index))
-            .map(|row| row.entry.name.clone())
+            .and_then(|index| self.tree.rows().get(index))
+            .map(|row| row.name().to_owned())
     }
 
     /// Closes the prompt, keeping the row the filter led to selected and every
@@ -876,26 +657,26 @@ impl BrowserContext {
         for descent in filter.descents.iter().rev() {
             self.close_descent(descent);
         }
-        self.selected_index = filter
+        let restored = filter
             .restore_path
-            .and_then(|path| self.rows.iter().position(|row| row.path == path));
+            .and_then(|path| self.tree.rows().iter().position(|row| row.path() == path));
+        self.tree.set_selected_index(restored);
     }
 
     fn close_descent(&mut self, descent: &Descent) {
         if descent.opened
             && let Some(index) = self
-                .rows
+                .tree
+                .rows()
                 .iter()
-                .position(|row| row.path == descent.path && row.entry.navigable)
+                .position(|row| row.path() == descent.path && row.entry().navigable)
         {
             self.collapse_directory(index);
         }
     }
 
     fn selected_path(&self) -> Option<String> {
-        self.effective_selection()
-            .and_then(|index| self.rows.get(index))
-            .map(|row| row.path.clone())
+        self.tree.selected_row().map(|row| row.path().to_owned())
     }
 
     /// Moves the selection onto a row the query leaves on screen, so typing never
@@ -904,10 +685,11 @@ impl BrowserContext {
     /// to widen back onto it.
     fn follow_filter(&mut self) {
         let visible = self.visible_rows();
-        let Some(position) = visible.match_position_of(self.selected_index.unwrap_or(0)) else {
+        let Some(position) = visible.match_position_of(self.tree.selected_index().unwrap_or(0))
+        else {
             return;
         };
-        self.selected_index = visible.row(position);
+        self.tree.set_selected_index(visible.row(position));
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -916,10 +698,10 @@ impl BrowserContext {
 
     pub(crate) fn enter_selected(&mut self) {
         let Some(path) = self
-            .effective_selection()
-            .and_then(|index| self.rows.get(index))
-            .filter(|row| row.entry.navigable)
-            .map(|row| row.path.clone())
+            .tree
+            .selected_row()
+            .filter(|row| row.entry().navigable)
+            .map(|row| row.path().to_owned())
         else {
             return;
         };
@@ -927,7 +709,7 @@ impl BrowserContext {
     }
 
     pub(crate) fn leave(&mut self) {
-        let Some(parent) = Path::new(&self.root_path).parent() else {
+        let Some(parent) = Path::new(self.tree.root_path()).parent() else {
             return;
         };
         let parent = if parent.as_os_str().is_empty() {
@@ -945,7 +727,7 @@ impl BrowserContext {
         let Some(index) = self.effective_selection() else {
             return;
         };
-        if self.rows[index].entry.navigable {
+        if self.tree.rows()[index].entry().navigable {
             self.toggle_directory(index);
         }
     }
@@ -970,20 +752,20 @@ impl BrowserContext {
     }
 
     fn change_root_path(&mut self, root_path: &Path) {
-        self.root_path = root_path.to_string_lossy().into_owned();
-        self.selected_index = None;
+        self.tree
+            .set_root_path(root_path.to_string_lossy().into_owned());
+        self.tree.set_selected_index(None);
         self.viewport_offset = 0;
         self.start_root_listing();
     }
 
     fn start_root_listing(&mut self) {
         self.abort_tree_listings();
+        self.tree.restart();
         self.generation = self.generation.wrapping_add(1);
-        self.rows.clear();
-        self.status = ListingStatus::Loading;
         let client = Arc::clone(&self.client);
         let connection = self.connection;
-        let root_path = self.root_path.clone();
+        let root_path = self.tree.root_path().to_owned();
         let context_id = self.id;
         let generation = self.generation;
         let events = self.events.clone();
@@ -999,7 +781,7 @@ impl BrowserContext {
     }
 
     fn toggle_directory(&mut self, index: usize) {
-        match self.rows[index].expansion {
+        match self.tree.rows()[index].expansion() {
             ExpansionStatus::Collapsed => self.start_directory_listing(index),
             _ => self.collapse_directory(index),
         }
@@ -1007,8 +789,7 @@ impl BrowserContext {
 
     fn start_directory_listing(&mut self, index: usize) {
         let request_id = self.next_request_id();
-        let path = self.rows[index].path.clone();
-        self.rows[index].expansion = ExpansionStatus::Loading { request_id };
+        let path = self.tree.begin_expansion(index, request_id);
         let client = Arc::clone(&self.client);
         let connection = self.connection;
         let context_id = self.id;
@@ -1021,46 +802,15 @@ impl BrowserContext {
         let task = tokio::spawn(run_listing(
             client, connection, path, context_id, generation, target, events,
         ));
-        self.directory_listings.insert(
-            request_id,
-            DirectoryListing {
-                task,
-                // A row is only expanded from collapsed, so it has no children
-                // yet and the first group goes directly beneath it.
-                placement: Placement {
-                    parent: index,
-                    depth: self.rows[index].depth + 1,
-                    insertion: index + 1,
-                },
-            },
-        );
+        self.listing_tasks.insert(request_id, task);
     }
 
     fn collapse_directory(&mut self, index: usize) {
-        let end = self.subtree_end(index);
-        let request_ids: Vec<_> = self.rows[index..end]
-            .iter()
-            .filter_map(|row| row.expansion.request_id())
-            .collect();
-        // Every expansion inside the subtree goes with it, which is what leaves
-        // the placements still standing all outside the removed rows.
-        for request_id in request_ids {
-            if let Some(listing) = self.directory_listings.remove(&request_id) {
-                listing.task.abort();
+        for request_id in self.tree.collapse(index) {
+            if let Some(task) = self.listing_tasks.remove(&request_id) {
+                task.abort();
             }
         }
-        self.rows.drain(index + 1..end);
-        self.placements_after_removal(index + 1, end);
-        self.rows[index].expansion = ExpansionStatus::Collapsed;
-        self.selected_index = Some(index);
-    }
-
-    fn subtree_end(&self, index: usize) -> usize {
-        let depth = self.rows[index].depth;
-        self.rows[index + 1..]
-            .iter()
-            .position(|row| row.depth <= depth)
-            .map_or(self.rows.len(), |offset| index + 1 + offset)
     }
 
     fn apply_listing(&mut self, target: ListingTarget, result: ListingResult) {
@@ -1075,30 +825,14 @@ impl BrowserContext {
 
     fn apply_root_listing(&mut self, result: ListingResult) {
         match result {
-            ListingResult::Entries(entries) => {
-                let insertion_index = self.rows.len();
-                let count = entries.len();
-                self.rows.extend(entries.into_iter().map(|entry| {
-                    let path = child_path(&self.root_path, &entry.name);
-                    BrowserRow::new(path, 0, entry)
-                }));
-                // Root entries land past every expansion's subtree, so this
-                // moves nothing. It is called anyway, so that every insertion
-                // into the tree reports itself.
-                self.placements_after_insertion(insertion_index, count, 0);
-                if self.selected_index.is_none() && !self.rows.is_empty() {
-                    self.selected_index = Some(0);
-                }
-            }
+            ListingResult::Entries(entries) => self.tree.extend_root(entries),
             ListingResult::Finished => {
-                self.status = ListingStatus::Complete;
+                self.tree.finish_root(Ok(()));
                 self.root_listing_task = None;
-                self.clamp_selection();
             }
             ListingResult::Failed(error) => {
-                self.status = ListingStatus::Failed(error);
+                self.tree.finish_root(Err(error));
                 self.root_listing_task = None;
-                self.clamp_selection();
             }
         }
     }
@@ -1109,89 +843,26 @@ impl BrowserContext {
         request_id: u64,
         result: ListingResult,
     ) {
-        // No placement means the expansion is no longer in flight: it was
-        // collapsed, or the tree it belonged to was replaced, and its task was
+        // Nothing expanding under this request means it is no longer in flight: it
+        // was collapsed, or the tree it belonged to was replaced, and its task was
         // aborted with an event already on the channel.
-        let Some(placement) = self
-            .directory_listings
-            .get(&request_id)
-            .map(|listing| listing.placement)
-        else {
+        if self.tree.expanding_path(request_id).is_none() {
             return;
-        };
+        }
         debug_assert_eq!(
-            self.rows.get(placement.parent).map(|row| row.path.as_str()),
+            self.tree.expanding_path(request_id),
             Some(parent_path),
             "a placement should follow the row it is expanding"
         );
         match result {
-            ListingResult::Entries(entries) => {
-                let count = entries.len();
-                let insertion_index = placement.insertion;
-                if let Some(selected_index) = self.selected_index
-                    && insertion_index <= selected_index
-                {
-                    self.selected_index = Some(selected_index + count);
-                }
-                let rows = entries.into_iter().map(|entry| {
-                    let path = child_path(parent_path, &entry.name);
-                    BrowserRow::new(path, placement.depth, entry)
-                });
-                self.rows.splice(insertion_index..insertion_index, rows);
-                self.placements_after_insertion(insertion_index, count, placement.depth);
-            }
+            ListingResult::Entries(entries) => self.tree.extend_child(request_id, entries),
             ListingResult::Finished => {
-                self.directory_listings.remove(&request_id);
-                self.rows[placement.parent].expansion = ExpansionStatus::Expanded { request_id };
-                self.clamp_selection();
+                self.listing_tasks.remove(&request_id);
+                self.tree.finish_child(request_id, Ok(()));
             }
             ListingResult::Failed(error) => {
-                self.directory_listings.remove(&request_id);
-                self.rows[placement.parent].expansion =
-                    ExpansionStatus::Failed { request_id, error };
-                self.clamp_selection();
-            }
-        }
-    }
-
-    /// Keeps every in-flight expansion pointing at the rows it was pointing at,
-    /// after `count` rows at depth `depth` land at `insertion_index`.
-    ///
-    /// Rows landing exactly where an expansion's next group goes are the one case
-    /// an index cannot settle on its own: they belong inside that subtree when
-    /// they are a descendant of it, and follow it when they are a sibling of its
-    /// children -- which a still-streaming parent listing inserts at the very
-    /// same index. Depth is what tells the two apart.
-    fn placements_after_insertion(&mut self, insertion_index: usize, count: usize, depth: usize) {
-        for listing in self.directory_listings.values_mut() {
-            let placement = &mut listing.placement;
-            if insertion_index <= placement.parent {
-                placement.parent += count;
-                placement.insertion += count;
-            } else if insertion_index < placement.insertion
-                || (insertion_index == placement.insertion && depth >= placement.depth)
-            {
-                placement.insertion += count;
-            }
-        }
-    }
-
-    /// Keeps every in-flight expansion pointing at the rows it was pointing at,
-    /// after the rows in `start..end` are removed. Expansions inside that range
-    /// are the caller's to drop first.
-    fn placements_after_removal(&mut self, start: usize, end: usize) {
-        let count = end - start;
-        for listing in self.directory_listings.values_mut() {
-            let placement = &mut listing.placement;
-            if placement.parent >= end {
-                placement.parent -= count;
-                placement.insertion -= count;
-            } else if placement.insertion >= end {
-                placement.insertion -= count;
-            } else if placement.insertion > start {
-                // The removed rows were inside this subtree, which now ends
-                // where they began.
-                placement.insertion = start;
+                self.listing_tasks.remove(&request_id);
+                self.tree.finish_child(request_id, Err(error));
             }
         }
     }
@@ -1200,22 +871,14 @@ impl BrowserContext {
         if let Some(task) = self.root_listing_task.take() {
             task.abort();
         }
-        for (_, listing) in self.directory_listings.drain() {
-            listing.task.abort();
+        for (_, task) in self.listing_tasks.drain() {
+            task.abort();
         }
     }
 
     fn next_request_id(&mut self) -> u64 {
         self.next_request_id = self.next_request_id.wrapping_add(1);
         self.next_request_id
-    }
-
-    fn clamp_selection(&mut self) {
-        self.selected_index = match (self.selected_index, self.rows.len()) {
-            (_, 0) => None,
-            (Some(index), length) => Some(index.min(length - 1)),
-            (None, _) => Some(0),
-        };
     }
 }
 
@@ -1344,30 +1007,6 @@ async fn send_listing_result(
             },
         })
         .await
-}
-
-fn child_path(parent: &str, name: &str) -> String {
-    Path::new(parent).join(name).to_string_lossy().into_owned()
-}
-
-/// Whether a name matches a filter query, which is a case-insensitive substring.
-///
-/// Substring rather than a fuzzy subsequence, because completion has to have
-/// something to complete to: a subsequence match shares no prefix with what was
-/// typed, so `Tab` would have nothing to agree on.
-///
-/// The needle arrives already lowercased.
-fn matches_needle(name: &str, needle: &str) -> bool {
-    name.to_lowercase().contains(needle)
-}
-
-/// Whether a row lies inside the directory a `/` stepped into, or anywhere at all
-/// when none has been.
-///
-/// Compared by path component rather than by string prefix, so entering `reports`
-/// never captures `reports-old`.
-fn in_scope(path: &str, scope: Option<&str>) -> bool {
-    scope.is_none_or(|scope| Path::new(path).starts_with(scope))
 }
 
 #[cfg(test)]
@@ -1535,7 +1174,7 @@ mod tests {
         let viewport = context.viewport(6);
         assert_eq!(viewport.rows.len(), 6);
         assert_eq!(viewport.selected, Some(0));
-        assert_eq!(viewport.rows[0].entry.name, "item-0");
+        assert_eq!(viewport.rows[0].name(), "item-0");
 
         // Moving inside the window does not scroll it.
         for _ in 0..4 {
@@ -1549,7 +1188,7 @@ mod tests {
         context.move_selection(true);
         let viewport = context.viewport(6);
         assert_eq!(viewport.rows.len(), 6);
-        assert_eq!(viewport.rows[0].entry.name, "item-1");
+        assert_eq!(viewport.rows[0].name(), "item-1");
         assert_eq!(viewport.selected, Some(4));
         assert_eq!(context.viewport_offset(), 1);
 
@@ -1559,7 +1198,7 @@ mod tests {
         }
         let viewport = context.viewport(6);
         assert_eq!(viewport.rows.len(), 6);
-        assert_eq!(viewport.rows[5].entry.name, "item-11");
+        assert_eq!(viewport.rows[5].name(), "item-11");
         assert_eq!(viewport.selected, Some(5));
         assert_eq!(context.viewport_offset(), 6);
 
@@ -1568,7 +1207,7 @@ mod tests {
             context.move_selection(false);
         }
         let viewport = context.viewport(6);
-        assert_eq!(viewport.rows[0].entry.name, "item-5");
+        assert_eq!(viewport.rows[0].name(), "item-5");
         assert_eq!(viewport.selected, Some(1));
     }
 
@@ -1595,7 +1234,7 @@ mod tests {
         context.move_selection(true);
         let viewport = context.viewport(1);
         assert_eq!(viewport.rows.len(), 1);
-        assert_eq!(viewport.rows[0].entry.name, "item-2");
+        assert_eq!(viewport.rows[0].name(), "item-2");
         assert_eq!(viewport.selected, Some(0));
     }
 
@@ -1619,7 +1258,7 @@ mod tests {
         assert_eq!(context.effective_selection(), Some(0));
         assert_eq!(context.viewport_offset(), 0);
 
-        context.selected_index = Some(10);
+        context.tree.set_selected_index(Some(10));
         context.set_viewport(6, 6);
         context.scroll_half_page(true);
         assert_eq!(context.effective_selection(), Some(11));
@@ -1628,7 +1267,7 @@ mod tests {
         assert_eq!(context.effective_selection(), Some(11));
         assert_eq!(context.viewport_offset(), 6);
 
-        context.selected_index = Some(4);
+        context.tree.set_selected_index(Some(4));
         context.set_viewport(4, 6);
         context.scroll_half_page(false);
         assert_eq!(context.effective_selection(), Some(1));
@@ -1693,7 +1332,7 @@ mod tests {
         context.refresh();
         assert!(context.entries().is_empty());
         assert_eq!(
-            context.selected_index,
+            context.tree.selected_index(),
             Some(2),
             "the index outlives the rows"
         );
@@ -1710,7 +1349,7 @@ mod tests {
             );
         }
         assert_eq!(
-            context.selected_index,
+            context.tree.selected_index(),
             Some(1),
             "finishing clamps it into the shorter listing"
         );
@@ -1846,7 +1485,10 @@ mod tests {
 
         context.activate_selected();
         assert_eq!(context.root_path(), "/home");
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
 
@@ -1854,24 +1496,27 @@ mod tests {
             context
                 .rows()
                 .iter()
-                .map(|row| (row.path.as_str(), row.depth))
+                .map(|row| (row.path(), row.depth()))
                 .collect::<Vec<_>>(),
             [("/home/reports", 0), ("/home/reports/first.txt", 1)]
         );
         assert!(matches!(
-            context.rows[0].expansion,
-            ExpansionStatus::Expanded { .. }
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Expanded { .. }
         ));
 
         context.activate_selected();
         assert_eq!(context.rows().len(), 1);
-        assert_eq!(context.rows[0].expansion, ExpansionStatus::Collapsed);
+        assert_eq!(context.rows()[0].expansion(), &ExpansionStatus::Collapsed);
 
         context.activate_selected();
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
-        assert_eq!(context.rows[1].path, "/home/reports/second.txt");
+        assert_eq!(context.rows()[1].path(), "/home/reports/second.txt");
         assert_eq!(
             source.requested_paths(),
             ["/home", "/home/reports", "/home/reports"]
@@ -1895,7 +1540,7 @@ mod tests {
         apply_next(&mut context, &mut receiver).await;
         context.move_selection(true);
         context.activate_selected();
-        while !context.directory_listings.is_empty() {
+        while !context.listing_tasks.is_empty() {
             apply_next(&mut context, &mut receiver).await;
         }
 
@@ -1903,7 +1548,7 @@ mod tests {
             context
                 .rows()
                 .iter()
-                .map(|row| (row.entry.name.as_str(), row.depth))
+                .map(|row| (row.name(), row.depth()))
                 .collect::<Vec<_>>(),
             [
                 ("reports", 0),
@@ -1962,17 +1607,16 @@ mod tests {
 
         // The directory sits at the end of what has arrived, so its children are
         // due at the same row as the root listing's next group.
-        context.selected_index = Some(LISTING_GROUP - 1);
+        context.tree.set_selected_index(Some(LISTING_GROUP - 1));
         context.activate_selected();
-        while !context.directory_listings.is_empty() || context.status() != &ListingStatus::Complete
-        {
+        while !context.listing_tasks.is_empty() || context.status() != &ListingStatus::Complete {
             apply_next(&mut context, &mut receiver).await;
         }
 
         let rows: Vec<_> = context
             .rows()
             .iter()
-            .map(|row| (row.entry.name.as_str(), row.depth))
+            .map(|row| (row.name(), row.depth()))
             .collect();
         assert_eq!(rows.len(), LISTING_GROUP + 88 + 2);
         assert_eq!(
@@ -2005,16 +1649,16 @@ mod tests {
 
         context.activate_selected();
         apply_group(&mut context, &mut receiver).await;
-        context.selected_index = Some(LISTING_GROUP);
+        context.tree.set_selected_index(Some(LISTING_GROUP));
         context.activate_selected();
-        while !context.directory_listings.is_empty() {
+        while !context.listing_tasks.is_empty() {
             apply_next(&mut context, &mut receiver).await;
         }
 
         let rows: Vec<_> = context
             .rows()
             .iter()
-            .map(|row| (row.entry.name.as_str(), row.depth))
+            .map(|row| (row.name(), row.depth()))
             .collect();
         assert_eq!(rows.len(), LISTING_GROUP + 88 + 3);
         assert_eq!(
@@ -2047,16 +1691,16 @@ mod tests {
 
         context.activate_selected();
         apply_group(&mut context, &mut receiver).await;
-        context.selected_index = Some(LISTING_GROUP + 1);
+        context.tree.set_selected_index(Some(LISTING_GROUP + 1));
         context.activate_selected();
-        while !context.directory_listings.is_empty() {
+        while !context.listing_tasks.is_empty() {
             apply_next(&mut context, &mut receiver).await;
         }
 
         let rows: Vec<_> = context
             .rows()
             .iter()
-            .map(|row| (row.entry.name.as_str(), row.depth))
+            .map(|row| (row.name(), row.depth()))
             .collect();
         assert_eq!(rows.len(), LISTING_GROUP + 88 + 4);
         assert_eq!(
@@ -2088,13 +1732,13 @@ mod tests {
 
         context.activate_selected();
         apply_group(&mut context, &mut receiver).await;
-        context.selected_index = Some(LISTING_GROUP + 1);
+        context.tree.set_selected_index(Some(LISTING_GROUP + 1));
         context.activate_selected();
         // Collapsing the first directory while it streams takes its children back
         // out from under the second one's insertion point.
-        context.selected_index = Some(0);
+        context.tree.set_selected_index(Some(0));
         context.activate_selected();
-        while !context.directory_listings.is_empty() {
+        while !context.listing_tasks.is_empty() {
             apply_next(&mut context, &mut receiver).await;
         }
 
@@ -2102,7 +1746,7 @@ mod tests {
             context
                 .rows()
                 .iter()
-                .map(|row| (row.entry.name.as_str(), row.depth))
+                .map(|row| (row.name(), row.depth()))
                 .collect::<Vec<_>>(),
             [
                 ("first", 0),
@@ -2111,7 +1755,7 @@ mod tests {
                 ("second-1", 1),
             ]
         );
-        assert_eq!(context.rows[0].expansion, ExpansionStatus::Collapsed);
+        assert_eq!(context.rows()[0].expansion(), &ExpansionStatus::Collapsed);
     }
 
     #[tokio::test]
@@ -2129,16 +1773,14 @@ mod tests {
         context.activate_selected();
         context.move_selection(true);
         assert_eq!(
-            context.rows[context.effective_selection().unwrap()]
-                .entry
-                .name,
+            context.rows()[context.effective_selection().unwrap()].name(),
             "root.txt"
         );
 
         apply_next(&mut context, &mut receiver).await;
 
         assert_eq!(context.effective_selection(), Some(2));
-        assert_eq!(context.rows[2].entry.name, "root.txt");
+        assert_eq!(context.rows()[2].name(), "root.txt");
     }
 
     #[tokio::test]
@@ -2161,10 +1803,13 @@ mod tests {
         assert_eq!(context.rows().len(), 1);
 
         context.activate_selected();
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
-        assert_eq!(context.rows[1].entry.name, "current.txt");
+        assert_eq!(context.rows()[1].name(), "current.txt");
     }
 
     #[tokio::test]
@@ -2183,7 +1828,7 @@ mod tests {
         context.move_selection(true);
         context.activate_selected();
 
-        assert_eq!(context.rows.len(), 2);
+        assert_eq!(context.rows().len(), 2);
         assert_eq!(source.requested_paths(), ["/home"]);
     }
 
@@ -2205,15 +1850,18 @@ mod tests {
         }
 
         context.activate_selected();
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
-        assert_eq!(context.rows[1].path, "/home/linked-directory/child.txt");
+        assert_eq!(context.rows()[1].path(), "/home/linked-directory/child.txt");
 
         context.move_selection(true);
         context.move_selection(true);
         context.activate_selected();
-        assert_eq!(context.rows.len(), 3);
+        assert_eq!(context.rows().len(), 3);
     }
 
     /// A tree with one expanded directory, so filtering has both a nested match
@@ -2229,7 +1877,10 @@ mod tests {
             apply_next(&mut context, &mut receiver).await;
         }
         context.activate_selected();
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
         assert_eq!(
@@ -2296,7 +1947,10 @@ mod tests {
             "the directory shows while its children are still loading"
         );
 
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
         assert_eq!(
@@ -2444,7 +2098,10 @@ mod tests {
         }
         context.move_selection(true);
         context.descend_filter();
-        while matches!(context.rows[1].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[1].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
         for character in "fil".chars() {
@@ -2561,7 +2218,10 @@ mod tests {
             context.extend_filter(character);
         }
         context.descend_filter();
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
         context.extend_filter('j');
@@ -2611,7 +2271,10 @@ mod tests {
         // Enter spells the selected directory out, which is what lets `/` open it.
         context.submit_filter();
         context.descend_filter();
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
         assert_eq!(context.rows().len(), 5);
@@ -2626,7 +2289,10 @@ mod tests {
         // Enter spells the selected directory out, which is what lets `/` open it.
         context.submit_filter();
         context.descend_filter();
-        while matches!(context.rows[0].expansion, ExpansionStatus::Loading { .. }) {
+        while matches!(
+            context.rows()[0].expansion(),
+            &ExpansionStatus::Loading { .. }
+        ) {
             apply_next(&mut context, &mut receiver).await;
         }
         context.commit_filter();
