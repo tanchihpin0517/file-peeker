@@ -79,3 +79,41 @@ fn join_unix_time(seconds: i64, nanos: u32) -> Option<SystemTime> {
     };
     base.checked_add(Duration::new(0, nanos))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{UNIX_EPOCH, join_unix_time};
+    use crate::server::ops::split_unix_time;
+
+    /// The two halves of the wire's time encoding are written in different modules —
+    /// the server splits, the client joins — so this is the test that they agree.
+    #[test]
+    fn times_survive_the_round_trip_in_both_directions() {
+        for offset in [0, 1, 999_999_999, 1_786_000_000_000_000_000] {
+            let after = UNIX_EPOCH + Duration::from_nanos(offset);
+            let (seconds, nanos) = split_unix_time(after);
+            assert_eq!(
+                join_unix_time(seconds, nanos),
+                Some(after),
+                "{offset}ns after"
+            );
+
+            let before = UNIX_EPOCH - Duration::from_nanos(offset);
+            let (seconds, nanos) = split_unix_time(before);
+            assert_eq!(
+                join_unix_time(seconds, nanos),
+                Some(before),
+                "{offset}ns before"
+            );
+        }
+    }
+
+    /// A nanosecond field out of range is one entry's oddity, not a reason to refuse
+    /// the listing it arrived in.
+    #[test]
+    fn an_impossible_remainder_reports_no_time_rather_than_failing() {
+        assert_eq!(join_unix_time(0, 1_000_000_000), None);
+    }
+}

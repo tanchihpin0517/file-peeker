@@ -25,7 +25,7 @@ use self::{
 /// The core-to-wire entry conversion, reused by the scripted server in
 /// `test_support` so a canned listing is encoded exactly as a real one is.
 #[cfg(test)]
-pub(crate) use entry::convert_entry;
+pub(crate) use entry::{convert_entry, split_unix_time};
 
 pub(crate) const GRPC_BATCH_MAX_BYTES: usize = crate::protocol::GRPC_MESSAGE_MAX_BYTES;
 pub(crate) const GRPC_BATCH_MAX_ENTRIES: usize = 1024;

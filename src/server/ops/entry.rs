@@ -40,7 +40,7 @@ fn convert_metadata(metadata: EntryMetadata) -> ProtocolEntryMetadata {
 /// Seconds are signed because a modification time before 1970 is a real thing to
 /// find, and the remainder stays non-negative so the pair always reads as
 /// `seconds + nanos` rather than needing a sign rule of its own.
-fn split_unix_time(time: SystemTime) -> (i64, u32) {
+pub(crate) fn split_unix_time(time: SystemTime) -> (i64, u32) {
     match time.duration_since(UNIX_EPOCH) {
         Ok(since) => (
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
