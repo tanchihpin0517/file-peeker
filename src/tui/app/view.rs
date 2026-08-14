@@ -455,7 +455,7 @@ fn render_file_list<'a>(
 
 fn row_list_item(row: &BrowserRow) -> ListItem<'static> {
     let (_, style) = entry_appearance(row.entry().kind);
-    // An entry the host would not describe gets a glyph of its own. Without one it
+    // An entry that could not be inspected gets a glyph of its own. Without one it
     // would fall through to its kind glyph, and a directory's kind glyph is the same
     // `▸ ` as a collapsed expandable row -- so it would look openable and do nothing.
     let prefix = if row.entry().is_degraded() {

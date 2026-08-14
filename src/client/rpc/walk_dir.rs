@@ -115,6 +115,7 @@ fn invalid_data(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::readable_metadata;
     use crate::protocol::v1::{
         EntryKind as ProtocolEntryKind, ListingEntry, WalkBatch, WalkEntry as ProtocolWalkEntry,
     };
@@ -130,6 +131,7 @@ mod tests {
                 name: path.rsplit('/').next().unwrap().into(),
                 kind: ProtocolEntryKind::File.into(),
                 navigable: false,
+                metadata: Some(readable_metadata()),
                 defect: String::new(),
             }),
             depth,
@@ -172,6 +174,7 @@ mod tests {
                     name: "unknown".into(),
                     kind: i32::MAX,
                     navigable: false,
+                    metadata: Some(readable_metadata()),
                     defect: String::new(),
                 }),
                 depth: 1,

@@ -17,3 +17,16 @@ pub(crate) const FILE_DATA_CHUNK_MAX_BYTES: usize = 64 * 1024;
 pub mod v1 {
     tonic::include_proto!("file_peeker.v1");
 }
+
+/// Wire metadata for an entry with nothing interesting about it, for the fixtures
+/// that build `ListingEntry` values by hand.
+#[cfg(test)]
+pub(crate) fn readable_metadata() -> v1::EntryMetadata {
+    v1::EntryMetadata {
+        size: 0,
+        modified_unix_seconds: 0,
+        modified_nanos: 0,
+        unix_mode: None,
+        symlink_target: String::new(),
+    }
+}

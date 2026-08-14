@@ -1,8 +1,13 @@
-use std::io;
+use std::{
+    io,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use crate::protocol::v1::{EntryKind as ProtocolEntryKind, ListingEntry};
+use crate::protocol::v1::{
+    EntryKind as ProtocolEntryKind, EntryMetadata as ProtocolEntryMetadata, ListingEntry,
+};
 
-use crate::{DirectoryEntry, EntryKind, host_path::HostPath};
+use crate::{DirectoryEntry, EntryKind, fs::EntryMetadata, host_path::HostPath};
 
 /// Takes a selected-host name or path off the wire.
 ///
@@ -41,6 +46,36 @@ pub(super) fn convert_entry(entry: ListingEntry) -> io::Result<DirectoryEntry> {
         name: wire_path(entry.name, "entry name")?,
         kind,
         navigable: entry.navigable,
+        metadata: entry.metadata.map(convert_metadata).transpose()?,
         defect: (!entry.defect.is_empty()).then_some(entry.defect),
     })
+}
+
+fn convert_metadata(metadata: ProtocolEntryMetadata) -> io::Result<EntryMetadata> {
+    Ok(EntryMetadata {
+        size: metadata.size,
+        modified: join_unix_time(metadata.modified_unix_seconds, metadata.modified_nanos),
+        unix_mode: metadata.unix_mode,
+        symlink_target: (!metadata.symlink_target.is_empty())
+            .then(|| wire_path(metadata.symlink_target, "symlink target"))
+            .transpose()?,
+    })
+}
+
+/// Rebuilds a time from whole seconds and a non-negative sub-second remainder.
+///
+/// `None` rather than an error for a value that cannot be represented: an odd
+/// timestamp is a curiosity of one entry, and refusing the whole listing over one
+/// would be the very behaviour this work removed.
+fn join_unix_time(seconds: i64, nanos: u32) -> Option<SystemTime> {
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    let offset = Duration::new(seconds.unsigned_abs(), 0);
+    let base = if seconds < 0 {
+        UNIX_EPOCH.checked_sub(offset)?
+    } else {
+        UNIX_EPOCH.checked_add(offset)?
+    };
+    base.checked_add(Duration::new(0, nanos))
 }

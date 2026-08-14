@@ -47,6 +47,7 @@ fn convert_batch(entries: Vec<ListingEntry>) -> io::Result<Vec<DirectoryEntry>> 
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::readable_metadata;
     use crate::protocol::v1::{EntryKind as ProtocolEntryKind, ListingEntry};
 
     use super::convert_batch;
@@ -57,6 +58,7 @@ mod tests {
             name: name.into(),
             kind: kind.into(),
             navigable: kind == ProtocolEntryKind::Directory,
+            metadata: Some(readable_metadata()),
             defect: String::new(),
         }
     }
@@ -97,6 +99,7 @@ mod tests {
                 name: "unknown".into(),
                 kind: i32::MAX,
                 navigable: false,
+                metadata: Some(readable_metadata()),
                 defect: String::new(),
             }])
             .unwrap_err()

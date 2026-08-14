@@ -479,13 +479,13 @@ fn kind_label(row: &Row) -> &'static str {
 }
 
 /// What the second column says: how an expansion is going when something is
-/// happening to it, then whether the entry could be described at all, and otherwise
+/// happening to it, then whether the entry could be inspected at all, and otherwise
 /// what kind of entry it is.
 ///
 /// `unreadable` and `unknown` are deliberately different words for different
 /// failures. `unreadable` is a directory that would not open. `unknown` is an entry
-/// the host would not describe, so even its kind is a guess -- which is why it
-/// outranks the kind label rather than sitting beside it.
+/// whose own metadata would not be read, so even its kind is a guess -- which is why
+/// it outranks the kind label rather than sitting beside it.
 fn state_label(palette: &Palette, row: &Row) -> (&'static str, Color32) {
     match row.expansion() {
         Expansion::Loading { .. } => ("loading", palette.muted),

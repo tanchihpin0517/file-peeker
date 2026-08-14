@@ -216,7 +216,7 @@ impl BrowserContext {
         }
     }
 
-    /// Why the selected entry could not be described, which is a different failure
+    /// Why the selected entry could not be inspected, which is a different failure
     /// from a refused expansion: this one is about the entry, not about opening it.
     pub(crate) fn selected_entry_defect(&self) -> Option<(&HostPath, &str)> {
         let row = self.tree.selected_row()?;

@@ -83,6 +83,22 @@ message ListingEntry {
   // Empty when it is not. Never ends the listing: it describes the entry it arrived
   // with, and the entries behind it still follow.
   string defect = 4;
+  // Absent when the entry could not be inspected. Explicit presence so absent is
+  // distinct from zero: an empty file and an unreadable one must not look alike.
+  optional EntryMetadata metadata = 5;
+}
+
+message EntryMetadata {
+  uint64 size = 1;
+  // Signed, because a modification time before 1970 is a real thing to find on a
+  // filesystem.
+  int64 modified_unix_seconds = 2;
+  uint32 modified_nanos = 3;
+  // Absent off Unix, where there is no mode to report.
+  optional uint32 unix_mode = 4;
+  // The link's own target, escaped like every other name. Empty unless the kind is
+  // ENTRY_KIND_SYMLINK.
+  string symlink_target = 5;
 }
 
 enum EntryKind {

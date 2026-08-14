@@ -174,7 +174,7 @@ fn batches(
 }
 
 /// The server's own conversion rather than a second copy of it, so a scripted entry
-/// carries its defect the way a real one does.
+/// carries its metadata and its defect the way a real one does.
 fn listing_entry(entry: DirectoryEntry) -> ListingEntry {
     crate::server::ops::convert_entry(entry)
 }

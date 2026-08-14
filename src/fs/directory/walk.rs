@@ -91,7 +91,8 @@ pub(crate) async fn walk_dir(
                 Err(error) => return Some((Err(FsError::from_io(&error)), None)),
             };
             // Infallible: an entry it could not describe is emitted degraded rather
-            // than ending the traversal, and is not descended into.
+            // than ending the traversal, and a directory whose stat was refused is
+            // reported without being descended into.
             let inspected = tokio::select! {
                 biased;
                 () = state.cancellation.cancelled() => {
