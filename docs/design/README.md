@@ -19,6 +19,10 @@ the contract says what an implementation owes.
 | [TUI layout and palette system](tui-layout-spec.md) | roles, grammar, rungs, config, build order, and what may not change |
 | [GUI layout and palette system](gui-layout-spec.md) | the same, plus a component inventory with metrics, and the palette values as Rust |
 
+Both contracts assume behavior the application does not have yet: an entry with
+a size, a per-entry failure, a keyboard, a second connection. The repository's
+[TODO](../../TODO.md) tracks that work as a checklist.
+
 ## Status
 
 Both galleries are a **future possibility**, not current behavior. Each frontend

@@ -40,6 +40,7 @@ check_file_links() {
 }
 
 check_file_links "$repository_root/README.md"
+check_file_links "$repository_root/TODO.md"
 while IFS= read -r file; do
     check_file_links "$file"
 done < <(find "$repository_root/docs" -type f -name '*.md' -print | sort)
@@ -48,7 +49,7 @@ done < <(find "$repository_root/docs" -type f -name '*.md' -print | sort)
 # `--include` keeps the recursive walk off `docs/assets`, which ripgrep skipped
 # for being binary.
 if grep -rn --include='*.md' -E '[[:blank:]]+$' \
-    "$repository_root/README.md" "$repository_root/docs"; then
+    "$repository_root/README.md" "$repository_root/TODO.md" "$repository_root/docs"; then
     echo "documentation contains trailing whitespace" >&2
     status=1
 fi

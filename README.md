@@ -47,6 +47,7 @@ otherwise place them all. `file-peeker-gui` is outside `default`; build it with
 
 ## Documentation
 
+- [TODO](TODO.md), the tracked work list
 - [Documentation index](docs/README.md)
 - [Architecture](docs/architecture.md)
 - [Code structure](docs/code-structure.md)

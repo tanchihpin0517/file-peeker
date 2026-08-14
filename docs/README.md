@@ -1,7 +1,8 @@
 # File Peeker Documentation
 
 This directory is the entry point for File Peeker's maintained design and usage
-documentation.
+documentation. It describes what is built. What is planned lives in the
+repository's [TODO](../TODO.md).
 
 ## Reading paths
 
