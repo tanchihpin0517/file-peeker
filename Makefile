@@ -5,7 +5,7 @@ SHELL := /bin/bash
 # into a failure; the clippy invocation itself is identical either way.
 LINT_DENY ?=
 
-.PHONY: all check docs-check fmt lint slim-server test verify
+.PHONY: all check docs-check fmt lint shell-check slim-server test verify
 
 all: check
 
@@ -37,4 +37,12 @@ docs-check:
 	bash scripts/check-docs.sh
 	git diff --check -- README.md docs scripts/check-docs.sh
 
-verify: docs-check check
+# The remote install path is shell that nothing else checks: `ensure-server.sh`
+# runs over an SSH stdin pipe and `install-server-from-source.sh` runs on a host
+# this project never sees. The file list comes from git so a script added later
+# is covered without being named here, and so `run-tui.sh` and the documentation
+# checker are covered too.
+shell-check:
+	shellcheck $$(git ls-files '*.sh')
+
+verify: docs-check shell-check check

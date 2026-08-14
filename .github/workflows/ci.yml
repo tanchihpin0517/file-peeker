@@ -89,6 +89,25 @@ jobs:
       # No toolchain: the documentation checks are shell and never build.
       - run: make docs-check
 
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # The runner image ships shellcheck; the fallback keeps this job working if
+      # a future image drops it, rather than skipping the check silently.
+      - name: Ensure shellcheck is present
+        run: |
+          command -v shellcheck || {
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes shellcheck
+          }
+          shellcheck --version
+      # `make shell-check` reads the file list from git, so it needs the checkout
+      # above and no toolchain.
+      - run: make shell-check
+
   # One check to require on `main`, so adding a job above does not mean editing
   # branch protection. `always()` makes a skipped or cancelled dependency fail
   # here rather than pass by omission.
@@ -97,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [format, lint, test, slim-server, docs]
+    needs: [format, lint, test, slim-server, docs, scripts]
     steps:
       - name: Report whether every job succeeded
         run: |
