@@ -12,6 +12,7 @@ use std::{collections::HashMap, fmt, path::Path, sync::Arc};
 use crate::{
     Client, ConnectionId, DirectoryEntry, EntryKind,
     browser::{Tree, VisibleRows, in_scope, matches_needle},
+    host_path::HostPath,
 };
 use futures::StreamExt as _;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -57,6 +58,8 @@ struct Filter {
     query: String,
     /// The name of the selected match, spelled out in the prompt in place of the
     /// query. Cleared by anything that edits the query.
+    ///
+    /// The name as a person reads it, matching what the query is compared against.
     filled: Option<String>,
     /// What the last `/` refused to do, shown in the prompt until the next keystroke
     /// so the key never fails silently.
@@ -68,12 +71,12 @@ struct Filter {
     /// Held as a path rather than an index, because rows inserted while the prompt
     /// is open -- by a streaming listing, or by the expansion a `/` starts -- would
     /// drift an index out from under it.
-    restore_path: Option<String>,
+    restore_path: Option<HostPath>,
 }
 
 impl Filter {
-    fn scope(&self) -> Option<&str> {
-        self.descents.last().map(|descent| descent.path.as_str())
+    fn scope(&self) -> Option<&HostPath> {
+        self.descents.last().map(|descent| &descent.path)
     }
 
     /// What the prompt shows: the selected candidate when one has been spelled out,
@@ -96,15 +99,15 @@ impl Filter {
 /// query that was spent entering it, and whether entering it is what opened it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Descent {
-    path: String,
+    path: HostPath,
     query: String,
     opened: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SelectedEntry {
-    pub(crate) path: String,
-    pub(crate) name: String,
+    pub(crate) path: HostPath,
+    pub(crate) name: HostPath,
     pub(crate) kind: EntryKind,
 }
 
@@ -145,7 +148,7 @@ impl BrowserContext {
     pub(crate) fn new(
         client: Arc<Client>,
         connection: ConnectionId,
-        root_path: String,
+        root_path: HostPath,
         events: mpsc::Sender<BrowserContextEvent>,
     ) -> Self {
         let mut context = Self {
@@ -170,7 +173,7 @@ impl BrowserContext {
         self.id
     }
 
-    pub(crate) fn root_path(&self) -> &str {
+    pub(crate) fn root_path(&self) -> &HostPath {
         self.tree.root_path()
     }
 
@@ -187,7 +190,7 @@ impl BrowserContext {
     fn row_names(&self) -> Vec<String> {
         self.rows()
             .iter()
-            .map(|row| row.name().to_owned())
+            .map(|row| row.name().display().into_owned())
             .collect()
     }
 
@@ -197,7 +200,7 @@ impl BrowserContext {
         self.viewport(height)
             .rows
             .iter()
-            .map(|row| row.name().to_owned())
+            .map(|row| row.name().display().into_owned())
             .collect()
     }
 
@@ -205,7 +208,7 @@ impl BrowserContext {
         self.tree.status()
     }
 
-    pub(crate) fn selected_expansion_error(&self) -> Option<(&str, &str)> {
+    pub(crate) fn selected_expansion_error(&self) -> Option<(&HostPath, &str)> {
         let row = self.tree.selected_row()?;
         match row.expansion() {
             ExpansionStatus::Failed { error, .. } => Some((row.path(), error)),
@@ -356,13 +359,23 @@ impl BrowserContext {
 
     /// The directory a `/` stepped into, relative to the root, which the prompt
     /// shows as the segments already committed.
-    pub(crate) fn filter_scope(&self) -> Option<&str> {
+    pub(crate) fn filter_scope(&self) -> Option<String> {
         let scope = self.filter.as_ref()?.scope()?;
-        Path::new(scope)
-            .strip_prefix(self.tree.root_path())
+        // Stripped on the escaped form, which has the components the real path has,
+        // then decoded for the prompt to show.
+        let relative = Path::new(scope.as_escaped())
+            .strip_prefix(Path::new(self.tree.root_path().as_escaped()))
             .ok()
             .and_then(Path::to_str)
-            .or(Some(scope))
+            .map(str::to_owned);
+        Some(
+            relative
+                .map(HostPath::from_escaped_fragment)
+                .as_ref()
+                .unwrap_or(scope)
+                .display()
+                .into_owned(),
+        )
     }
 
     /// What the last `/` refused to do, until the next keystroke clears it.
@@ -447,13 +460,16 @@ impl BrowserContext {
             .tree
             .rows()
             .iter()
-            .filter(|row| scope != Some(row.path()) && in_scope(row.path(), scope))
-            .map(BrowserRow::name)
+            .filter(|row| {
+                scope != Some(row.path())
+                    && in_scope(row.path().as_escaped(), scope.map(HostPath::as_escaped))
+            })
+            .map(|row| row.name().display())
             .filter(|name| matches_needle(name, &needle));
         let Some(first) = matches.next() else {
             return;
         };
-        let mut completion = first.to_owned();
+        let mut completion = first.into_owned();
         for name in matches {
             completion = completion
                 .chars()
@@ -638,7 +654,7 @@ impl BrowserContext {
         self.effective_selection()
             .filter(|index| visible.matched(*index))
             .and_then(|index| self.tree.rows().get(index))
-            .map(|row| row.name().to_owned())
+            .map(|row| row.name().display().into_owned())
     }
 
     /// Closes the prompt, keeping the row the filter led to selected and every
@@ -659,7 +675,7 @@ impl BrowserContext {
         }
         let restored = filter
             .restore_path
-            .and_then(|path| self.tree.rows().iter().position(|row| row.path() == path));
+            .and_then(|path| self.tree.rows().iter().position(|row| *row.path() == path));
         self.tree.set_selected_index(restored);
     }
 
@@ -669,13 +685,13 @@ impl BrowserContext {
                 .tree
                 .rows()
                 .iter()
-                .position(|row| row.path() == descent.path && row.entry().navigable)
+                .position(|row| *row.path() == descent.path && row.entry().navigable)
         {
             self.collapse_directory(index);
         }
     }
 
-    fn selected_path(&self) -> Option<String> {
+    fn selected_path(&self) -> Option<HostPath> {
         self.tree.selected_row().map(|row| row.path().to_owned())
     }
 
@@ -705,20 +721,18 @@ impl BrowserContext {
         else {
             return;
         };
-        self.change_root_path(Path::new(&path));
+        self.change_root_path(path);
     }
 
     pub(crate) fn leave(&mut self) {
-        let Some(parent) = Path::new(self.tree.root_path()).parent() else {
+        // Walked on the escaped form, which carries the same components the real path
+        // does, so the parent of an escaped path is the escape of the real parent.
+        let root = self.tree.root_path().as_escaped();
+        let Some(parent) = Path::new(root).parent().and_then(Path::to_str) else {
             return;
         };
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        }
-        .to_path_buf();
-        self.change_root_path(&parent);
+        let parent = if parent.is_empty() { "." } else { parent };
+        self.change_root_path(HostPath::from_escaped_fragment(parent.to_owned()));
     }
 
     /// Expands or collapses the selected directory. Files have no activation
@@ -751,8 +765,8 @@ impl BrowserContext {
         self.abort_tree_listings();
     }
 
-    fn change_root_path(&mut self, root_path: &Path) {
-        self.tree.reroot(root_path.to_string_lossy().into_owned());
+    fn change_root_path(&mut self, root_path: HostPath) {
+        self.tree.reroot(root_path);
         self.viewport_offset = 0;
         self.start_root_listing();
     }
@@ -837,7 +851,7 @@ impl BrowserContext {
 
     fn apply_directory_listing(
         &mut self,
-        parent_path: &str,
+        parent_path: &HostPath,
         request_id: u64,
         result: ListingResult,
     ) {
@@ -911,7 +925,7 @@ enum BrowserEvent {
 enum ListingTarget {
     Root,
     Directory {
-        parent_path: String,
+        parent_path: HostPath,
         request_id: u64,
     },
 }
@@ -937,7 +951,7 @@ const LISTING_GROUP: usize = 512;
 async fn run_listing(
     client: Arc<Client>,
     connection: ConnectionId,
-    path: String,
+    path: HostPath,
     context_id: BrowserContextId,
     generation: u64,
     target: ListingTarget,
@@ -1494,7 +1508,7 @@ mod tests {
             context
                 .rows()
                 .iter()
-                .map(|row| (row.path(), row.depth()))
+                .map(|row| (row.path().as_escaped(), row.depth()))
                 .collect::<Vec<_>>(),
             [("/home/reports", 0), ("/home/reports/first.txt", 1)]
         );
@@ -1546,7 +1560,7 @@ mod tests {
             context
                 .rows()
                 .iter()
-                .map(|row| (row.name(), row.depth()))
+                .map(|row| (row.name().as_escaped(), row.depth()))
                 .collect::<Vec<_>>(),
             [
                 ("reports", 0),
@@ -1614,7 +1628,7 @@ mod tests {
         let rows: Vec<_> = context
             .rows()
             .iter()
-            .map(|row| (row.name(), row.depth()))
+            .map(|row| (row.name().as_escaped(), row.depth()))
             .collect();
         assert_eq!(rows.len(), LISTING_GROUP + 88 + 2);
         assert_eq!(
@@ -1656,7 +1670,7 @@ mod tests {
         let rows: Vec<_> = context
             .rows()
             .iter()
-            .map(|row| (row.name(), row.depth()))
+            .map(|row| (row.name().as_escaped(), row.depth()))
             .collect();
         assert_eq!(rows.len(), LISTING_GROUP + 88 + 3);
         assert_eq!(
@@ -1698,7 +1712,7 @@ mod tests {
         let rows: Vec<_> = context
             .rows()
             .iter()
-            .map(|row| (row.name(), row.depth()))
+            .map(|row| (row.name().as_escaped(), row.depth()))
             .collect();
         assert_eq!(rows.len(), LISTING_GROUP + 88 + 4);
         assert_eq!(
@@ -1744,7 +1758,7 @@ mod tests {
             context
                 .rows()
                 .iter()
-                .map(|row| (row.name(), row.depth()))
+                .map(|row| (row.name().as_escaped(), row.depth()))
                 .collect::<Vec<_>>(),
             [
                 ("first", 0),
@@ -1933,7 +1947,7 @@ mod tests {
         context.descend_filter();
 
         assert_eq!(context.root_path(), "/home", "the root never moves");
-        assert_eq!(context.filter_scope(), Some("reports"));
+        assert_eq!(context.filter_scope().as_deref(), Some("reports"));
         assert_eq!(
             context.filter(),
             Some(""),
@@ -1974,7 +1988,7 @@ mod tests {
 
         // A file is named outright here, and still has nothing to step into.
         context.descend_filter();
-        assert_eq!(context.filter_scope(), Some("reports"));
+        assert_eq!(context.filter_scope().as_deref(), Some("reports"));
         assert_eq!(context.filter(), Some("january.txt"));
         assert_eq!(context.filter_warning(), Some("not a directory"));
     }
@@ -2033,7 +2047,7 @@ mod tests {
         }
         context.submit_filter();
         context.descend_filter();
-        assert_eq!(context.filter_scope(), Some("reports"));
+        assert_eq!(context.filter_scope().as_deref(), Some("reports"));
         assert_eq!(context.selected_entry().unwrap().name, "reports");
         context.submit_filter();
         assert_eq!(context.filter(), None, "taken directly");
@@ -2110,7 +2124,7 @@ mod tests {
         // The query goes, and the directory it was narrowing stays open.
         context.clear_filter_entry();
         assert_eq!(context.filter(), Some(""));
-        assert_eq!(context.filter_scope(), Some("workspace"));
+        assert_eq!(context.filter_scope().as_deref(), Some("workspace"));
         assert_eq!(context.visible_names(8), ["workspace", "file.txt"]);
 
         // With no query left, the next press is the directory itself, and the name
@@ -2187,7 +2201,7 @@ mod tests {
         );
 
         context.descend_filter();
-        assert_eq!(context.filter_scope(), Some("workspace"));
+        assert_eq!(context.filter_scope().as_deref(), Some("workspace"));
         assert_eq!(context.filter(), Some(""));
 
         context.shorten_filter();
@@ -2310,7 +2324,7 @@ mod tests {
         context.begin_filter();
         context.submit_filter();
         context.descend_filter();
-        assert_eq!(context.filter_scope(), Some("reports"));
+        assert_eq!(context.filter_scope().as_deref(), Some("reports"));
         context.abandon_filter();
         assert_eq!(context.rows().len(), 5);
     }

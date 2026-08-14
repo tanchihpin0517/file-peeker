@@ -64,6 +64,7 @@ fn convert_chunk(entries: Vec<Result<DirectoryEntry, FsError>>) -> Vec<Result<Li
 #[cfg(test)]
 mod tests {
     use crate::fs::{DirectoryEntry, EntryKind, FsError, FsErrorKind};
+    use crate::host_path::HostPath;
     use prost::Message as _;
     use tonic::Code;
 
@@ -87,7 +88,10 @@ mod tests {
     fn splits_large_chunks_without_reordering() {
         let entries = (0..3)
             .map(|index| DirectoryEntry {
-                name: format!("{index}-{}", "x".repeat(GRPC_BATCH_MAX_BYTES / 2)),
+                name: HostPath::from_literal(&format!(
+                    "{index}-{}",
+                    "x".repeat(GRPC_BATCH_MAX_BYTES / 2)
+                )),
                 kind: EntryKind::File,
                 navigable: false,
             })
@@ -118,7 +122,7 @@ mod tests {
     #[test]
     fn rejects_single_entries_larger_than_the_grpc_limit() {
         let error = convert_chunk(vec![Ok(DirectoryEntry {
-            name: "x".repeat(GRPC_BATCH_MAX_BYTES),
+            name: HostPath::from_literal(&"x".repeat(GRPC_BATCH_MAX_BYTES)),
             kind: EntryKind::File,
             navigable: false,
         })])

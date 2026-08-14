@@ -15,7 +15,12 @@ use crate::protocol::v1::{
 use futures::stream::BoxStream;
 use tonic::{Request, Response, Status};
 
-use self::{list::list_batches, read::read_chunks, status::fs_status, walk::walk_batches};
+use self::{
+    list::list_batches,
+    read::read_chunks,
+    status::{fs_status, wire_path},
+    walk::walk_batches,
+};
 
 pub(crate) const GRPC_BATCH_MAX_BYTES: usize = crate::protocol::GRPC_MESSAGE_MAX_BYTES;
 pub(crate) const GRPC_BATCH_MAX_ENTRIES: usize = 1024;
@@ -41,9 +46,14 @@ impl FilePeeker for FilePeekerService {
         &self,
         request: Request<ResolvePathRequest>,
     ) -> Result<Response<ResolvePathResponse>, Status> {
+        let path = wire_path(request.into_inner().path)?;
         self.fs
-            .resolve_path(&request.into_inner().path)
-            .map(|path| Response::new(ResolvePathResponse { path }))
+            .resolve_path(&path)
+            .map(|path| {
+                Response::new(ResolvePathResponse {
+                    path: path.into_escaped(),
+                })
+            })
             .map_err(|error| fs_status(&error))
     }
 
@@ -51,9 +61,10 @@ impl FilePeeker for FilePeekerService {
         &self,
         request: Request<ListRequest>,
     ) -> Result<Response<Self::ListStream>, Status> {
+        let path = wire_path(request.into_inner().path)?;
         let stream = self
             .fs
-            .list_dir(&request.into_inner().path)
+            .list_dir(&path)
             .await
             .map_err(|error| fs_status(&error))?;
         Ok(Response::new(list_batches(stream)))
@@ -63,9 +74,10 @@ impl FilePeeker for FilePeekerService {
         &self,
         request: Request<ReadRequest>,
     ) -> Result<Response<Self::ReadStream>, Status> {
+        let path = wire_path(request.into_inner().path)?;
         let stream = self
             .fs
-            .read_file(&request.into_inner().path)
+            .read_file(&path)
             .await
             .map_err(|error| fs_status(&error))?;
         Ok(Response::new(read_chunks(stream)))
@@ -75,9 +87,10 @@ impl FilePeeker for FilePeekerService {
         &self,
         request: Request<WalkRequest>,
     ) -> Result<Response<Self::WalkStream>, Status> {
+        let path = wire_path(request.into_inner().path)?;
         let stream = self
             .fs
-            .walk_dir(&request.into_inner().path)
+            .walk_dir(&path)
             .await
             .map_err(|error| fs_status(&error))?;
         Ok(Response::new(walk_batches(stream)))

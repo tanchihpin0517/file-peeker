@@ -5,12 +5,18 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt as _, stream};
 
 use super::error::read_status_error;
-use crate::client::{connection::ServerConnection, rpc::ReadStream};
+use crate::{
+    client::{connection::ServerConnection, rpc::ReadStream},
+    host_path::HostPath,
+};
 
-pub(crate) async fn read_file(connection: &ServerConnection, path: &str) -> io::Result<ReadStream> {
+pub(crate) async fn read_file(
+    connection: &ServerConnection,
+    path: &HostPath,
+) -> io::Result<ReadStream> {
     let channel = connection.channel();
     let request = connection.request(ReadRequest {
-        path: path.to_owned(),
+        path: path.as_escaped().to_owned(),
     })?;
     let stream = FilePeekerClient::new(channel)
         .read(request)

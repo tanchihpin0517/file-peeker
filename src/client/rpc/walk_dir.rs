@@ -10,13 +10,19 @@ use crate::protocol::v1::{
 };
 use futures::{Stream, StreamExt as _, stream};
 
-use super::{entry::convert_entry, error::operation_status_error};
-use crate::{WalkEntry, WalkStream, client::connection::ServerConnection};
+use super::{
+    entry::{convert_entry, wire_path},
+    error::operation_status_error,
+};
+use crate::{WalkEntry, WalkStream, client::connection::ServerConnection, host_path::HostPath};
 
-pub(crate) async fn walk_dir(connection: &ServerConnection, path: &str) -> io::Result<WalkStream> {
+pub(crate) async fn walk_dir(
+    connection: &ServerConnection,
+    path: &HostPath,
+) -> io::Result<WalkStream> {
     let channel = connection.channel();
     let request = connection.request(WalkRequest {
-        path: path.to_owned(),
+        path: path.as_escaped().to_owned(),
     })?;
     let stream = FilePeekerClient::new(channel)
         .walk(request)
@@ -80,12 +86,14 @@ fn convert_walk_entry(entry: ProtocolWalkEntry) -> io::Result<WalkEntry> {
         .entry
         .ok_or_else(|| invalid_data("server returned a walk entry without listing metadata"))?;
     Ok(WalkEntry {
-        relative_path: entry.relative_path,
+        relative_path: wire_path(entry.relative_path, "walk relative path")?,
         entry: convert_entry(nested)?,
         depth,
     })
 }
 
+/// Checked on the escaped form, which is sound: the escape emits no `/` and no byte
+/// below `0x80`, so the escaped path has exactly the components the real one has.
 fn validate_relative_path(path: &str) -> io::Result<()> {
     let path = Path::new(path);
     if path.as_os_str().is_empty()

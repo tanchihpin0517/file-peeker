@@ -3,7 +3,10 @@ use futures::{StreamExt as _, stream, stream::BoxStream};
 use tokio::fs::File;
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
-use crate::fs::{FsError, FsErrorKind, error::service_cancelled_error, resolve_path::resolve_path};
+use crate::{
+    fs::{FsError, FsErrorKind, error::service_cancelled_error, resolve_path::resolve_path},
+    host_path::HostPath,
+};
 
 /// A demand-driven stream of ordered, non-empty file bytes.
 ///
@@ -15,7 +18,7 @@ use crate::fs::{FsError, FsErrorKind, error::service_cancelled_error, resolve_pa
 pub(crate) type ReadStream = BoxStream<'static, Result<Bytes, FsError>>;
 
 pub(crate) async fn read_file(
-    path: &str,
+    path: &HostPath,
     cancellation_token: CancellationToken,
 ) -> Result<ReadStream, FsError> {
     let path = resolve_path(path)?;
@@ -70,6 +73,7 @@ pub(crate) async fn read_file(
 
 #[cfg(test)]
 mod tests {
+    use crate::host_path::HostPath;
     use futures::{StreamExt as _, TryStreamExt as _};
     use tokio_util::sync::CancellationToken;
 
@@ -85,7 +89,7 @@ mod tests {
             .collect::<Vec<_>>();
         tokio::fs::write(&path, &expected).await.unwrap();
 
-        let chunks = read_file(path.to_str().unwrap(), CancellationToken::new())
+        let chunks = read_file(&HostPath::from_path(&path), CancellationToken::new())
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -103,7 +107,7 @@ mod tests {
         let path = fixture.path().join("empty.bin");
         tokio::fs::write(&path, b"").await.unwrap();
 
-        let items = read_file(path.to_str().unwrap(), CancellationToken::new())
+        let items = read_file(&HostPath::from_path(&path), CancellationToken::new())
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -116,7 +120,7 @@ mod tests {
     #[tokio::test]
     async fn missing_files_fail_before_returning_a_stream() {
         let error = read_file(
-            "/definitely/missing/file-peeker-read-fixture",
+            &"/definitely/missing/file-peeker-read-fixture".into(),
             CancellationToken::new(),
         )
         .await
@@ -130,13 +134,20 @@ mod tests {
     async fn directories_fail_before_returning_a_stream() {
         let fixture = tempfile::tempdir().unwrap();
 
-        let error = read_file(fixture.path().to_str().unwrap(), CancellationToken::new())
-            .await
-            .err()
-            .expect("directory target should fail");
+        let error = read_file(
+            &HostPath::from_path(fixture.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .expect("directory target should fail");
 
         assert_eq!(error.kind(), FsErrorKind::NotFile);
-        assert!(error.message().contains(fixture.path().to_str().unwrap()));
+        assert!(
+            error
+                .message()
+                .contains(&fixture.path().display().to_string())
+        );
     }
 
     #[tokio::test]
@@ -145,7 +156,7 @@ mod tests {
         let path = fixture.path().join("payload.bin");
         tokio::fs::write(&path, vec![0x5a; 1024]).await.unwrap();
         let cancellation_token = CancellationToken::new();
-        let mut stream = read_file(path.to_str().unwrap(), cancellation_token.clone())
+        let mut stream = read_file(&HostPath::from_path(&path), cancellation_token.clone())
             .await
             .unwrap();
 

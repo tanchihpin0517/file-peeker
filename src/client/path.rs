@@ -1,6 +1,7 @@
 use std::io;
 
 use super::{Client, ConnectionId, rpc};
+use crate::host_path::HostPath;
 
 impl Client {
     /// Resolves a path into an absolute lexical path on the selected host.
@@ -13,8 +14,8 @@ impl Client {
     pub(crate) async fn op_resolve_path(
         &self,
         id: &ConnectionId,
-        path: &str,
-    ) -> io::Result<String> {
+        path: &HostPath,
+    ) -> io::Result<HostPath> {
         let connection = self.connection(id).await?;
         rpc::resolve_path(&connection, path).await
     }
@@ -28,7 +29,10 @@ mod tests {
     async fn op_resolve_path_rejects_a_closed_connection() {
         let (client, id) = Client::closed_for_test();
 
-        let error = client.op_resolve_path(&id, ".").await.unwrap_err();
+        let error = client
+            .op_resolve_path(&id, &crate::host_path::HostPath::from_literal("."))
+            .await
+            .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
         assert_eq!(error.to_string(), "connection is closed");

@@ -34,6 +34,7 @@ pub(super) fn read_chunks(
 #[cfg(test)]
 mod tests {
     use crate::fs::{FsError, FsErrorKind};
+    use crate::host_path::HostPath;
     use futures::{StreamExt as _, TryStreamExt as _, stream};
     use tonic::Code;
 
@@ -69,7 +70,7 @@ mod tests {
         let path = fixture.path().join("empty.bin");
         tokio::fs::write(&path, b"").await.unwrap();
         let reader = crate::fs::FsService::new()
-            .read_file(path.to_str().unwrap())
+            .read_file(&HostPath::from_path(&path))
             .await
             .unwrap();
 

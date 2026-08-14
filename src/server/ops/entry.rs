@@ -9,7 +9,7 @@ pub(super) fn convert_entry(entry: DirectoryEntry) -> ListingEntry {
         EntryKind::Other => ProtocolEntryKind::Other,
     };
     ListingEntry {
-        name: entry.name,
+        name: entry.name.into_escaped(),
         kind: kind.into(),
         navigable: entry.navigable,
     }

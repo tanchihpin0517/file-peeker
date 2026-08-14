@@ -22,6 +22,7 @@ mod browser;
 #[cfg(feature = "client")]
 mod client;
 mod fs;
+mod host_path;
 pub(crate) mod protocol;
 #[cfg(all(test, feature = "client"))]
 mod test_support;

@@ -15,6 +15,7 @@ use super::glyph::{self, Side};
 use super::theme::{INDENT, Palette, ROW_HEIGHT};
 use crate::EntryKind;
 use crate::browser::{Expansion, Row, Status, Tree, VisibleRows};
+use crate::host_path::HostPath;
 
 /// One browser: a root being listed, and the filter narrowing it.
 ///
@@ -49,8 +50,11 @@ impl Browser {
     /// The tab's label: the last component of its root, which is what the user
     /// recognises it by.
     fn label(&self) -> String {
-        let root = self.tree.root_path().trim_end_matches('/');
-        root.rsplit('/')
+        // Taken off what a person reads rather than the escaped form, so a tab is
+        // labelled the way its directory is named.
+        let root = self.tree.root_path().display();
+        root.trim_end_matches('/')
+            .rsplit('/')
             .find(|part| !part.is_empty())
             .unwrap_or("/")
             .to_owned()
@@ -64,7 +68,7 @@ pub(crate) enum Action {
     /// Expand or collapse the row, listing its children if it opens.
     Toggle { browser: u64, row: usize },
     /// Replace the browser's root with this path.
-    Enter { browser: u64, path: String },
+    Enter { browser: u64, path: HostPath },
 }
 
 pub(crate) fn initial_state(browser: Browser) -> DockState<Browser> {
@@ -409,7 +413,7 @@ fn name_cell(
     x += 24.0;
 
     let galley = painter.layout_no_wrap(
-        row.name().to_owned(),
+        row.name().display().into_owned(),
         FontId::proportional(12.5),
         palette.text.gamma_multiply(alpha),
     );
@@ -431,7 +435,7 @@ fn footer(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser) {
         _ => (
             tab.tree
                 .selected_row()
-                .map(|row| row.path().to_owned())
+                .map(|row| row.path().display().into_owned())
                 .unwrap_or_default(),
             palette.muted,
         ),

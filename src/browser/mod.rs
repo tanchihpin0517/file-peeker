@@ -16,9 +16,7 @@
 mod tree;
 mod window;
 
-use std::path::Path;
-
-use crate::DirectoryEntry;
+use crate::{DirectoryEntry, host_path::HostPath};
 
 pub(crate) use tree::Tree;
 pub(crate) use window::{VisibleRows, in_scope, matches_needle};
@@ -60,14 +58,17 @@ impl Expansion {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Row {
-    path: String,
+    /// Escaped, like the name it was built from. Path arithmetic still works on it —
+    /// see [`child_path`] — and a front end drawing it calls
+    /// [`HostPath::display`].
+    path: HostPath,
     depth: Depth,
     entry: DirectoryEntry,
     expansion: Expansion,
 }
 
 impl Row {
-    fn new(path: String, depth: Depth, entry: DirectoryEntry) -> Self {
+    fn new(path: HostPath, depth: Depth, entry: DirectoryEntry) -> Self {
         Self {
             path,
             depth,
@@ -76,11 +77,11 @@ impl Row {
         }
     }
 
-    pub(crate) fn path(&self) -> &str {
+    pub(crate) fn path(&self) -> &HostPath {
         &self.path
     }
 
-    pub(crate) fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &HostPath {
         &self.entry.name
     }
 
@@ -97,8 +98,14 @@ impl Row {
     }
 }
 
-pub(crate) fn child_path(parent: &str, name: &str) -> String {
-    Path::new(parent).join(name).to_string_lossy().into_owned()
+/// Where a child of `parent` sits.
+///
+/// Both sides are escaped and so is the result, which is sound because escaping
+/// composes with joining: the escape never emits a `/` and a name can never contain
+/// one. That is what lets the whole model keep doing path arithmetic without decoding
+/// anything.
+pub(crate) fn child_path(parent: &HostPath, name: &HostPath) -> HostPath {
+    parent.join(name)
 }
 
 /// Entries to build a tree out of in tests, here rather than in each test module

@@ -4,7 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{Client, ConnectionId, ServerLocation, WalkStream};
+use crate::{
+    Client, ConnectionId, ServerLocation, WalkStream, cli::write_path, host_path::HostPath,
+};
 use futures::TryStreamExt as _;
 
 const OUTPUT_FLUSH_INTERVAL: u64 = 1024;
@@ -32,7 +34,9 @@ async fn run_with_connection(
     path: &str,
 ) -> io::Result<()> {
     let started = Instant::now();
-    let mut entries = client.op_walk_dir(connection, path).await?;
+    let mut entries = client
+        .op_walk_dir(connection, &HostPath::from_literal(path))
+        .await?;
     let mut output = io::stdout().lock();
     let stats = write_walk(Path::new(path), &mut entries, &mut output).await?;
     output.flush()?;
@@ -60,7 +64,7 @@ async fn write_walk(
     let mut stats = WalkStats { entries: 0 };
     while let Some(entry) = entries.try_next().await? {
         let path = descendant_path(root, &entry.relative_path)?;
-        writeln!(output, "{}", path.display())?;
+        write_path(output, &path)?;
         stats.entries += 1;
         if stats.entries.is_multiple_of(OUTPUT_FLUSH_INTERVAL) {
             output.flush()?;
@@ -69,11 +73,13 @@ async fn write_walk(
     Ok(stats)
 }
 
-fn descendant_path(root: &Path, relative_path: &str) -> io::Result<PathBuf> {
-    let relative_path = Path::new(relative_path);
-    let valid = !relative_path.as_os_str().is_empty()
-        && !relative_path.is_absolute()
-        && relative_path
+/// Checked on the escaped form, which holds the same components the real path does,
+/// then decoded to join against the real root.
+fn descendant_path(root: &Path, relative_path: &HostPath) -> io::Result<PathBuf> {
+    let escaped = Path::new(relative_path.as_escaped());
+    let valid = !escaped.as_os_str().is_empty()
+        && !escaped.is_absolute()
+        && escaped
             .components()
             .all(|component| matches!(component, Component::Normal(_)));
     if !valid {
@@ -82,6 +88,9 @@ fn descendant_path(root: &Path, relative_path: &str) -> io::Result<PathBuf> {
             "walk returned an invalid relative path",
         ));
     }
+    let relative_path = relative_path
+        .to_path_buf()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     Ok(root.join(relative_path))
 }
 
@@ -212,12 +221,12 @@ mod tests {
     #[test]
     fn relative_paths_stay_below_the_requested_root() {
         assert_eq!(
-            descendant_path(Path::new("~/fixture"), "docs/guide.md").unwrap(),
+            descendant_path(Path::new("~/fixture"), &"docs/guide.md".into()).unwrap(),
             Path::new("~/fixture/docs/guide.md")
         );
         for invalid in ["", "/escape", "../escape", "nested/../../escape"] {
             assert_eq!(
-                descendant_path(Path::new("/fixture"), invalid)
+                descendant_path(Path::new("/fixture"), &invalid.into())
                     .unwrap_err()
                     .kind(),
                 io::ErrorKind::InvalidData

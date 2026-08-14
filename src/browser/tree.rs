@@ -6,7 +6,7 @@ use super::{
     Depth, Expansion, Row, Status, child_path,
     window::{VisibleRow, VisibleRows, in_scope, matches_needle},
 };
-use crate::DirectoryEntry;
+use crate::{DirectoryEntry, host_path::HostPath};
 
 /// Where a still-loading expansion's next group of children lands.
 ///
@@ -39,7 +39,7 @@ struct Placement {
 /// [`Tree::extend_child`], and closes it with the matching `finish`.
 #[derive(Debug)]
 pub(crate) struct Tree {
-    root_path: String,
+    root_path: HostPath,
     rows: Vec<Row>,
     /// In-flight expansions, keyed by the request that will fill them.
     placements: HashMap<u64, Placement>,
@@ -48,7 +48,7 @@ pub(crate) struct Tree {
 }
 
 impl Tree {
-    pub(crate) fn new(root_path: String) -> Self {
+    pub(crate) fn new(root_path: HostPath) -> Self {
         Self {
             root_path,
             rows: Vec::new(),
@@ -58,13 +58,13 @@ impl Tree {
         }
     }
 
-    pub(crate) fn root_path(&self) -> &str {
+    pub(crate) fn root_path(&self) -> &HostPath {
         &self.root_path
     }
 
     /// Restarts at a new root, dropping everything the old one placed. The caller
     /// starts the listing, and aborts the tasks the old root left running.
-    pub(crate) fn reroot(&mut self, root_path: String) {
+    pub(crate) fn reroot(&mut self, root_path: HostPath) {
         self.root_path = root_path;
         self.selected_index = None;
         self.restart();
@@ -149,7 +149,7 @@ impl Tree {
 
     /// The row an in-flight expansion is filling, for the caller to check a
     /// listing against before it feeds the group in.
-    pub(crate) fn expanding_path(&self, request_id: u64) -> Option<&str> {
+    pub(crate) fn expanding_path(&self, request_id: u64) -> Option<&HostPath> {
         let placement = self.placements.get(&request_id)?;
         self.rows.get(placement.parent).map(Row::path)
     }
@@ -196,7 +196,7 @@ impl Tree {
     ///
     /// The caller has already decided the row is worth expanding; a row that is
     /// not [`DirectoryEntry::navigable`] never reaches here.
-    pub(crate) fn begin_expansion(&mut self, index: usize, request_id: u64) -> String {
+    pub(crate) fn begin_expansion(&mut self, index: usize, request_id: u64) -> HostPath {
         self.rows[index].expansion = Expansion::Loading { request_id };
         self.placements.insert(
             request_id,
@@ -291,7 +291,13 @@ impl Tree {
     /// per keystroke and per frame drawn while filtering, which is the same order
     /// as the matching itself, and it means no row mutation anywhere else has to
     /// remember to invalidate anything. An unfiltered browser pays nothing.
-    pub(crate) fn window(&self, query: &str, scope: Option<&str>) -> VisibleRows {
+    /// Matching is against the name a person reads, not its escaped form, and that
+    /// is load-bearing rather than cosmetic. Completion spells a matched name back
+    /// into the query, so matching the escaped form would escape an already-escaped
+    /// query on the next keystroke: `100%.txt` would complete to `100%%.txt`, then
+    /// be escaped again, and stop matching the file it came from. Names read the same
+    /// way they are typed, and `Row::path` stays escaped for addressing.
+    pub(crate) fn window(&self, query: &str, scope: Option<&HostPath>) -> VisibleRows {
         let needle = (!query.is_empty()).then(|| query.to_lowercase());
         if needle.is_none() && scope.is_none() {
             return VisibleRows::All(self.rows.len());
@@ -309,10 +315,10 @@ impl Tree {
             // where the prompt is pointed.
             let entered = scope == Some(row.path());
             let hit = !entered
-                && in_scope(row.path(), scope)
+                && in_scope(row.path().as_escaped(), scope.map(HostPath::as_escaped))
                 && needle
                     .as_ref()
-                    .is_none_or(|needle| matches_needle(row.name(), needle));
+                    .is_none_or(|needle| matches_needle(&row.name().display(), needle));
             if hit || entered {
                 for (ancestor, emitted) in &mut ancestors {
                     if !*emitted {
@@ -346,13 +352,16 @@ mod tests {
     use crate::browser::fixture::entry;
 
     fn names(tree: &Tree) -> Vec<&str> {
-        tree.rows().iter().map(super::Row::name).collect()
+        tree.rows()
+            .iter()
+            .map(|row| row.name().as_escaped())
+            .collect()
     }
 
     fn placed(tree: &Tree) -> Vec<(&str, u16)> {
         tree.rows()
             .iter()
-            .map(|row| (row.name(), row.depth()))
+            .map(|row| (row.name().as_escaped(), row.depth()))
             .collect()
     }
 
@@ -515,7 +524,7 @@ mod tests {
         tree.finish_child(1, Ok(()));
 
         // Two rows are named `note.txt`; only the one inside `first` is in scope.
-        let window = tree.window("note", Some("/root/first"));
+        let window = tree.window("note", Some(&"/root/first".into()));
         assert_eq!(window.matches(), Some(1));
         assert_eq!(window.len(), 2);
         assert_eq!(window.row(0), Some(0));

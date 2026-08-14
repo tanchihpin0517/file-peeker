@@ -14,7 +14,7 @@ use std::{error::Error, sync::Arc};
 
 use clap::Parser;
 
-use crate::{Client, ServerLocation};
+use crate::{Client, ServerLocation, host_path::HostPath};
 
 #[derive(Debug, Eq, Parser, PartialEq)]
 #[command(
@@ -51,8 +51,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let connection = client.open(ServerLocation::Embedded).await?;
         // The server resolves the path, which is what expands `~` and makes the
         // default the *server's* idea of home rather than this process's.
+        // Argv is text a person typed, so it is escaped on its way to the host.
         let root = client
-            .op_resolve_path(&connection, cli.path.as_deref().unwrap_or("~"))
+            .op_resolve_path(
+                &connection,
+                &HostPath::from_literal(cli.path.as_deref().unwrap_or("~")),
+            )
             .await?;
         Ok::<_, std::io::Error>((connection, root))
     })?;

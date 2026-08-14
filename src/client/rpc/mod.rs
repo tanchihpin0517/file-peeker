@@ -21,6 +21,8 @@ pub(crate) use write_file::write_file;
 
 use std::io;
 
+use crate::host_path::HostPath;
+
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -39,12 +41,13 @@ pub(crate) enum WriteConflict {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WriteResult {
-    pub(crate) path: String,
+    pub(crate) path: HostPath,
     pub(crate) bytes_written: u64,
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::host_path::HostPath;
     use std::io;
 
     use bytes::Bytes;
@@ -84,12 +87,19 @@ mod tests {
         tokio::fs::write(fixture.path().join("nested/child.txt"), b"")
             .await
             .unwrap();
-        let root = fixture.path().to_str().unwrap();
+        let root = HostPath::from_path(fixture.path());
         let connection = embedded().await;
 
-        assert!(std::path::Path::new(&resolve_path(&connection, ".").await.unwrap()).is_absolute());
+        assert!(
+            resolve_path(&connection, &".".into())
+                .await
+                .unwrap()
+                .to_path_buf()
+                .unwrap()
+                .is_absolute()
+        );
 
-        let entries = list_dir(&connection, root)
+        let entries = list_dir(&connection, &root)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -97,7 +107,7 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 2);
 
-        let walked = walk_dir(&connection, root)
+        let walked = walk_dir(&connection, &root)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -111,7 +121,7 @@ mod tests {
 
         let contents = read_file(
             &connection,
-            fixture.path().join("entry.txt").to_str().unwrap(),
+            &HostPath::from_path(&fixture.path().join("entry.txt")),
         )
         .await
         .unwrap()
@@ -123,7 +133,7 @@ mod tests {
 
         let written = write_file(
             &connection,
-            root.to_owned(),
+            root.clone(),
             "copy.txt".into(),
             WriteConflict::FailIfExists,
             stream::once(async { Ok(Bytes::from_static(b"payload")) }).boxed(),
@@ -147,7 +157,7 @@ mod tests {
 
         let error = read_file(
             &connection,
-            "/definitely/missing/file-peeker-backend-read-fixture",
+            &"/definitely/missing/file-peeker-backend-read-fixture".into(),
         )
         .await
         .err()
@@ -168,7 +178,7 @@ mod tests {
             .await
             .unwrap();
         let connection = embedded().await;
-        let mut stream = read_file(&connection, path.to_str().unwrap())
+        let mut stream = read_file(&connection, &HostPath::from_path(&path))
             .await
             .unwrap();
 
@@ -198,7 +208,12 @@ mod tests {
         first.shutdown().await.unwrap();
 
         assert!(
-            std::path::Path::new(&resolve_path(&second, ".").await.unwrap()).is_absolute(),
+            resolve_path(&second, &".".into())
+                .await
+                .unwrap()
+                .to_path_buf()
+                .unwrap()
+                .is_absolute(),
             "shutting down one embedded server must not disturb another"
         );
         second.shutdown().await.unwrap();

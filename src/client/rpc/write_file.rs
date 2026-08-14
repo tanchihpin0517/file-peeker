@@ -17,10 +17,13 @@ use crate::protocol::{
 use bytes::Bytes;
 use futures::{FutureExt as _, StreamExt as _, stream};
 
-use super::error::operation_status_error;
-use crate::client::{
-    connection::ServerConnection,
-    rpc::{ReadStream, WriteConflict, WriteFuture, WriteResult},
+use super::{entry::wire_path, error::operation_status_error};
+use crate::{
+    client::{
+        connection::ServerConnection,
+        rpc::{ReadStream, WriteConflict, WriteFuture, WriteResult},
+    },
+    host_path::HostPath,
 };
 
 enum RequestState {
@@ -37,15 +40,15 @@ enum RequestState {
 
 pub(crate) fn write_file(
     connection: &ServerConnection,
-    directory: String,
-    name: String,
+    directory: HostPath,
+    name: HostPath,
     conflict: WriteConflict,
     source: ReadStream,
 ) -> WriteFuture {
     let channel = connection.channel();
     let header = WriteHeader {
-        directory,
-        name,
+        directory: directory.into_escaped(),
+        name: name.into_escaped(),
         conflict: match conflict {
             WriteConflict::FailIfExists => ProtocolWriteConflict::FailIfExists as i32,
             WriteConflict::Replace => ProtocolWriteConflict::Replace as i32,
@@ -89,7 +92,7 @@ pub(crate) fn write_file(
             ));
         }
         Ok(WriteResult {
-            path: response.path,
+            path: wire_path(response.path, "written path")?,
             bytes_written: response.bytes_written,
         })
     }

@@ -4,6 +4,7 @@ use futures::stream::BoxStream;
 
 use super::DirectoryEntry;
 use crate::client::{Client, ConnectionId, rpc};
+use crate::host_path::HostPath;
 
 pub(crate) type EntryStream = BoxStream<'static, io::Result<DirectoryEntry>>;
 
@@ -17,7 +18,7 @@ impl Client {
     pub(crate) async fn op_list_dir(
         &self,
         id: &ConnectionId,
-        path: &str,
+        path: &HostPath,
     ) -> io::Result<EntryStream> {
         let connection = self.connection(id).await?;
         rpc::list_dir(&connection, path).await
@@ -33,7 +34,7 @@ mod tests {
         let (client, id) = Client::closed_for_test();
 
         let error = client
-            .op_list_dir(&id, "/fixture")
+            .op_list_dir(&id, &"/fixture".into())
             .await
             .err()
             .expect("a closed connection should fail");
@@ -49,7 +50,7 @@ mod tests {
         let client = Client::new();
 
         let error = client
-            .op_list_dir(&ConnectionId::new(), "/fixture")
+            .op_list_dir(&ConnectionId::new(), &"/fixture".into())
             .await
             .err()
             .expect("an unknown connection should fail");

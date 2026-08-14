@@ -2,6 +2,8 @@ use std::io;
 
 use thiserror::Error;
 
+use crate::host_path::EscapeError;
+
 const SERVICE_CANCELLED_MESSAGE: &str = "filesystem service is cancelled";
 
 /// Stable category for a filesystem operation failure.
@@ -57,6 +59,17 @@ impl FsError {
             _ => FsErrorKind::Internal,
         };
         Self::new(kind, error.to_string())
+    }
+}
+
+/// A path that does not decode was never produced by this protocol, so it is the
+/// caller's argument that is wrong.
+impl From<EscapeError> for FsError {
+    fn from(error: EscapeError) -> Self {
+        Self::new(
+            FsErrorKind::InvalidArgument,
+            format!("path is not correctly escaped: {error}"),
+        )
     }
 }
 

@@ -3,6 +3,7 @@ use std::io;
 use futures::stream::BoxStream;
 
 use crate::client::{Client, ConnectionId, rpc};
+use crate::host_path::HostPath;
 
 pub(crate) type WalkEntry = crate::fs::WalkEntry;
 pub(crate) type WalkStream = BoxStream<'static, io::Result<WalkEntry>>;
@@ -20,7 +21,7 @@ impl Client {
     pub(crate) async fn op_walk_dir(
         &self,
         id: &ConnectionId,
-        path: &str,
+        path: &HostPath,
     ) -> io::Result<WalkStream> {
         let connection = self.connection(id).await?;
         rpc::walk_dir(&connection, path).await
@@ -29,6 +30,7 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use crate::host_path::HostPath;
     use std::time::Duration;
 
     use crate::fs::{DirectoryEntry, EntryKind};
@@ -41,7 +43,7 @@ mod tests {
         let (client, id) = Client::closed_for_test();
 
         let error = client
-            .op_walk_dir(&id, "/fixture")
+            .op_walk_dir(&id, &"/fixture".into())
             .await
             .err()
             .expect("a closed connection should reject walking");
@@ -63,7 +65,7 @@ mod tests {
         let client = Client::new();
         let id = client.open(ServerLocation::Embedded).await.unwrap();
         let _walk = client
-            .op_walk_dir(&id, fixture.path().to_str().unwrap())
+            .op_walk_dir(&id, &HostPath::from_path(fixture.path()))
             .await
             .unwrap();
 

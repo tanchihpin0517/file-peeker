@@ -19,7 +19,7 @@ use super::dock::{self, Action, Browser, Viewer};
 use super::glyph::{self, Side};
 use super::theme::{self, Mode, Palette};
 use crate::browser::{Expansion, Status, Tree};
-use crate::{Client, ConnectionId, DirectoryEntry};
+use crate::{Client, ConnectionId, DirectoryEntry, host_path::HostPath};
 
 /// How many entries one listing event may carry.
 ///
@@ -68,11 +68,11 @@ pub(crate) struct App {
     /// Actions raised by the chrome, which draws before the frame's actions are
     /// applied.
     pending: Vec<Action>,
-    home: String,
+    home: HostPath,
 }
 
 impl App {
-    pub(crate) fn new(client: Arc<Client>, connection: ConnectionId, root: String) -> Self {
+    pub(crate) fn new(client: Arc<Client>, connection: ConnectionId, root: HostPath) -> Self {
         let (events, incoming) = mpsc::channel(EVENT_CAPACITY);
         let mode = Mode::Light;
         let mut app = Self {
@@ -101,15 +101,18 @@ impl App {
     // ── listings ────────────────────────────────────────────────────────────
 
     fn start_root(&mut self, browser: u64) {
-        let path = self
+        // No tab, nothing to list: better than listing the empty path.
+        let Some(path) = self
             .browser(browser)
             .map(|tab| tab.tree.root_path().to_owned())
-            .unwrap_or_default();
+        else {
+            return;
+        };
         self.spawn_listing(browser, Request::Root, path);
     }
 
     /// Drives one listing to completion, sending its entries a group at a time.
-    fn spawn_listing(&self, browser: u64, request: Request, path: String) {
+    fn spawn_listing(&self, browser: u64, request: Request, path: HostPath) {
         let client = Arc::clone(&self.client);
         let connection = self.connection;
         let events = self.events.clone();
@@ -235,7 +238,7 @@ impl App {
 /// A failed expansion reopens rather than closing, because clicking one again is
 /// a retry -- but it is closed first, so whatever the failed attempt managed to
 /// place is gone before the new listing starts filling the same spot.
-fn toggle(tree: &mut Tree, index: usize, request: u64) -> Option<String> {
+fn toggle(tree: &mut Tree, index: usize, request: u64) -> Option<HostPath> {
     let row = tree.rows().get(index)?;
     if !row.entry().navigable {
         return None;
@@ -278,10 +281,10 @@ impl App {
     fn title_bar(&mut self, root: &mut egui::Ui) {
         let palette = self.palette;
         let ctx = root.ctx().clone();
-        let path = self
-            .focused()
-            .map(|tab| tab.tree.root_path().to_owned())
-            .unwrap_or_default();
+        let path = self.focused().map_or_else(
+            || HostPath::from_escaped_fragment(String::new()),
+            |tab| tab.tree.root_path().to_owned(),
+        );
         let browser = self.focused().map(|tab| tab.id);
         let mut toggle = false;
         let mut jump = None;
@@ -363,9 +366,17 @@ impl App {
                 section(ui, &palette, "Places");
                 let places = [
                     ("Home", home.clone(), "~"),
-                    ("Documents", format!("{home}/Documents"), "~/Documents"),
-                    ("Downloads", format!("{home}/Downloads"), "~/Downloads"),
-                    ("Root", "/".to_owned(), "/"),
+                    (
+                        "Documents",
+                        home.join(&HostPath::from_literal("Documents")),
+                        "~/Documents",
+                    ),
+                    (
+                        "Downloads",
+                        home.join(&HostPath::from_literal("Downloads")),
+                        "~/Downloads",
+                    ),
+                    ("Root", HostPath::from_literal("/"), "/"),
                 ];
                 for (label, path, hint) in places {
                     if place_row(ui, &palette, label, hint)
@@ -450,7 +461,7 @@ impl App {
 
 /// Draws the path, and reports the prefix a click asked to go back to. Opening a
 /// directory replaces the root, so the breadcrumb is the way back out.
-fn breadcrumb(ui: &mut egui::Ui, palette: &Palette, path: &str) -> Option<String> {
+fn breadcrumb(ui: &mut egui::Ui, palette: &Palette, path: &HostPath) -> Option<HostPath> {
     ui.spacing_mut().item_spacing.x = 5.0;
     let mut jump = None;
     if ui
@@ -464,13 +475,13 @@ fn breadcrumb(ui: &mut egui::Ui, palette: &Palette, path: &str) -> Option<String
         )
         .clicked()
     {
-        jump = Some("/".to_owned());
+        jump = Some(HostPath::from_literal("/"));
     }
     for (part, target) in crumbs(path) {
         let last = target.is_none();
         let response = ui.add(
             egui::Label::new(
-                egui::RichText::new(part)
+                egui::RichText::new(&part)
                     .color(if last { palette.text } else { palette.muted })
                     .font(FontId::proportional(if last { 13.5 } else { 13.0 })),
             )
@@ -494,15 +505,23 @@ fn breadcrumb(ui: &mut egui::Ui, palette: &Palette, path: &str) -> Option<String
 /// The last segment is where the browser already is, so it has nowhere to go, and
 /// that is what the renderer reads to draw it as the current one rather than as a
 /// link.
-fn crumbs(path: &str) -> Vec<(&str, Option<String>)> {
-    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+fn crumbs(path: &HostPath) -> Vec<(String, Option<HostPath>)> {
+    // Split on the escaped form, which carries the same components the real path
+    // does. Each label is decoded for reading; each target stays escaped so clicking
+    // it still addresses the directory.
+    let escaped = path.as_escaped();
+    let parts: Vec<&str> = escaped.split('/').filter(|part| !part.is_empty()).collect();
     parts
         .iter()
         .enumerate()
         .map(|(index, part)| {
-            let target =
-                (index + 1 < parts.len()).then(|| format!("/{}", parts[..=index].join("/")));
-            (*part, target)
+            let target = (index + 1 < parts.len()).then(|| {
+                HostPath::from_escaped_fragment(format!("/{}", parts[..=index].join("/")))
+            });
+            let label = HostPath::from_escaped_fragment((*part).to_owned())
+                .display()
+                .into_owned();
+            (label, target)
         })
         .collect()
 }
@@ -615,7 +634,10 @@ fn place_row(ui: &mut egui::Ui, palette: &Palette, label: &str, hint: &str) -> b
 #[cfg(test)]
 mod tests {
     use super::{Tree, crumbs, toggle};
-    use crate::browser::{Expansion, Row, fixture::entry};
+    use crate::{
+        browser::{Expansion, fixture::entry},
+        host_path::HostPath,
+    };
 
     fn tree() -> Tree {
         let mut tree = Tree::new("/root".into());
@@ -625,13 +647,19 @@ mod tests {
     }
 
     fn names(tree: &Tree) -> Vec<&str> {
-        tree.rows().iter().map(Row::name).collect()
+        tree.rows()
+            .iter()
+            .map(|row| row.name().as_escaped())
+            .collect()
     }
 
     #[test]
     fn a_closed_directory_opens_and_reports_the_path_to_list() {
         let mut tree = tree();
-        assert_eq!(toggle(&mut tree, 0, 7).as_deref(), Some("/root/dir"));
+        assert_eq!(
+            toggle(&mut tree, 0, 7).as_ref().map(HostPath::as_escaped),
+            Some("/root/dir")
+        );
         assert_eq!(
             tree.rows()[0].expansion(),
             &Expansion::Loading { request_id: 7 }
@@ -669,7 +697,10 @@ mod tests {
         tree.finish_child(1, Err("permission denied".into()));
         assert_eq!(names(&tree), ["dir", "half.txt", "note.txt"]);
 
-        assert_eq!(toggle(&mut tree, 0, 2).as_deref(), Some("/root/dir"));
+        assert_eq!(
+            toggle(&mut tree, 0, 2).as_ref().map(HostPath::as_escaped),
+            Some("/root/dir")
+        );
         assert_eq!(names(&tree), ["dir", "note.txt"]);
 
         tree.extend_child(2, vec![entry("half.txt", false)]);
@@ -678,11 +709,16 @@ mod tests {
 
     #[test]
     fn every_breadcrumb_but_the_last_points_at_its_own_ancestor() {
+        let crumbs = crumbs(&"/home/user/reports".into());
+        let crumbs: Vec<_> = crumbs
+            .iter()
+            .map(|(label, target)| (label.as_str(), target.as_ref().map(HostPath::as_escaped)))
+            .collect();
         assert_eq!(
-            crumbs("/home/user/reports"),
+            crumbs,
             [
-                ("home", Some("/home".to_owned())),
-                ("user", Some("/home/user".to_owned())),
+                ("home", Some("/home")),
+                ("user", Some("/home/user")),
                 ("reports", None),
             ]
         );
@@ -692,6 +728,6 @@ mod tests {
     /// draws is what goes back to it.
     #[test]
     fn the_root_has_no_segments() {
-        assert!(crumbs("/").is_empty());
+        assert!(crumbs(&"/".into()).is_empty());
     }
 }

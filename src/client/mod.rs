@@ -190,6 +190,7 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use crate::host_path::HostPath;
     use futures::TryStreamExt as _;
 
     use super::{Client, ConnectionId, ServerLocation};
@@ -211,10 +212,16 @@ mod tests {
         let id = open_local(&client).await;
 
         assert!(
-            std::path::Path::new(&client.op_resolve_path(&id, "~").await.unwrap()).is_absolute()
+            client
+                .op_resolve_path(&id, &"~".into())
+                .await
+                .unwrap()
+                .to_path_buf()
+                .unwrap()
+                .is_absolute()
         );
         let entries = client
-            .op_list_dir(&id, fixture.path().to_str().unwrap())
+            .op_list_dir(&id, &HostPath::from_path(fixture.path()))
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -287,7 +294,7 @@ mod tests {
 
         assert_eq!(
             client
-                .op_resolve_path(&id, ".")
+                .op_resolve_path(&id, &".".into())
                 .await
                 .unwrap_err()
                 .to_string(),

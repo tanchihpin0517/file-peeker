@@ -1,6 +1,6 @@
 use std::{
     ffi::OsStr,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -11,8 +11,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::fs::{
-    FsError, FsErrorKind, ReadStream, error::service_cancelled_error, resolve_path::resolve_path,
+use crate::{
+    fs::{
+        FsError, FsErrorKind, ReadStream, error::service_cancelled_error,
+        resolve_path::resolve_path,
+    },
+    host_path::HostPath,
 };
 
 static NEXT_PARTIAL_ID: AtomicU64 = AtomicU64::new(1);
@@ -25,7 +29,7 @@ pub(crate) enum WriteConflict {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WriteResult {
-    pub path: String,
+    pub path: HostPath,
     pub bytes_written: u64,
 }
 
@@ -65,15 +69,18 @@ impl Drop for PartialFileGuard {
 }
 
 pub(crate) async fn write_file(
-    directory: &str,
-    name: &str,
+    directory: &HostPath,
+    name: &HostPath,
     conflict: WriteConflict,
     mut source: ReadStream,
     cancellation_token: CancellationToken,
 ) -> Result<WriteResult, FsError> {
     validate_name(name)?;
     let directory = resolve_path(directory)?;
-    let destination = directory.join(name);
+    // Decoded once here. Everything below joins and opens real paths, so nothing
+    // further down has to know the name arrived escaped.
+    let name = name.to_path_buf()?.into_os_string();
+    let destination = directory.join(&name);
 
     let metadata = cancellable(&cancellation_token, fs::metadata(&directory))
         .await
@@ -101,7 +108,7 @@ pub(crate) async fn write_file(
         }
     }
 
-    let (mut file, partial_path) = create_partial(&directory, name, &cancellation_token).await?;
+    let (mut file, partial_path) = create_partial(&directory, &name, &cancellation_token).await?;
     let mut guard = PartialFileGuard::new(partial_path.clone());
     let result = async {
         let bytes_written =
@@ -120,14 +127,8 @@ pub(crate) async fn write_file(
         )
         .await?;
 
-        let path = destination.into_os_string().into_string().map_err(|_| {
-            FsError::new(
-                FsErrorKind::InvalidArgument,
-                "destination path is not UTF-8",
-            )
-        })?;
         Ok(WriteResult {
-            path,
+            path: HostPath::from_path(&destination),
             bytes_written,
         })
     }
@@ -208,29 +209,33 @@ async fn publish(
     Ok(())
 }
 
-fn validate_name(name: &str) -> Result<(), FsError> {
-    let path = Path::new(name);
-    let mut components = path.components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(component)), None) if component == OsStr::new(name) => Ok(()),
-        _ => Err(FsError::new(
+/// Checks the name before it is decoded, which is safe in both directions: the
+/// escape leaves `.` and `..` alone, and decoding can never introduce a separator
+/// because a sequence below `0x80` is refused.
+fn validate_name(name: &HostPath) -> Result<(), FsError> {
+    if name.is_one_component() {
+        Ok(())
+    } else {
+        Err(FsError::new(
             FsErrorKind::InvalidArgument,
             "destination name must be one non-empty normal path component",
-        )),
+        ))
     }
 }
 
 async fn create_partial(
     directory: &Path,
-    name: &str,
+    name: &OsStr,
     cancellation_token: &CancellationToken,
 ) -> Result<(File, PathBuf), FsError> {
     for _ in 0..128 {
         let id = NEXT_PARTIAL_ID.fetch_add(1, Ordering::Relaxed);
-        let partial_path = directory.join(format!(
-            ".{name}.file-peeker-{}-{id}.partial",
-            std::process::id()
-        ));
+        // Built as an `OsString` rather than through `format!`, so a name the host
+        // holds as bytes keeps them in the partial file too.
+        let mut partial_name = std::ffi::OsString::from(".");
+        partial_name.push(name);
+        partial_name.push(format!(".file-peeker-{}-{id}.partial", std::process::id()));
+        let partial_path = directory.join(partial_name);
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         if cancellation_token.is_cancelled() {
@@ -283,6 +288,7 @@ fn already_exists(path: &Path) -> FsError {
 
 #[cfg(test)]
 mod tests {
+    use crate::host_path::HostPath;
     use bytes::Bytes;
     use futures::{StreamExt as _, stream};
 
@@ -315,8 +321,8 @@ mod tests {
             ),
         ] {
             let result = write_file(
-                fixture.path().to_str().unwrap(),
-                name,
+                &HostPath::from_path(fixture.path()),
+                &name.into(),
                 WriteConflict::FailIfExists,
                 source(input),
                 CancellationToken::new(),
@@ -324,7 +330,12 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(result.bytes_written, u64::try_from(expected.len()).unwrap());
-            assert_eq!(tokio::fs::read(result.path).await.unwrap(), expected);
+            assert_eq!(
+                tokio::fs::read(result.path.to_path_buf().unwrap())
+                    .await
+                    .unwrap(),
+                expected
+            );
         }
     }
 
@@ -333,8 +344,8 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         for name in ["", ".", "..", "/absolute", "nested/name"] {
             let error = write_file(
-                fixture.path().to_str().unwrap(),
-                name,
+                &HostPath::from_path(fixture.path()),
+                &name.into(),
                 WriteConflict::FailIfExists,
                 source(vec![]),
                 CancellationToken::new(),
@@ -351,8 +362,8 @@ mod tests {
         let destination = fixture.path().join("target");
         tokio::fs::write(&destination, b"old").await.unwrap();
         let error = write_file(
-            fixture.path().to_str().unwrap(),
-            "target",
+            &HostPath::from_path(fixture.path()),
+            &"target".into(),
             WriteConflict::FailIfExists,
             source(vec![Ok(b"new")]),
             CancellationToken::new(),
@@ -363,8 +374,8 @@ mod tests {
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"old");
 
         write_file(
-            fixture.path().to_str().unwrap(),
-            "target",
+            &HostPath::from_path(fixture.path()),
+            &"target".into(),
             WriteConflict::Replace,
             source(vec![Ok(b"new")]),
             CancellationToken::new(),
@@ -378,8 +389,8 @@ mod tests {
     async fn source_error_removes_partial_and_publishes_nothing() {
         let fixture = tempfile::tempdir().unwrap();
         let error = write_file(
-            fixture.path().to_str().unwrap(),
-            "target",
+            &HostPath::from_path(fixture.path()),
+            &"target".into(),
             WriteConflict::FailIfExists,
             source(vec![
                 Ok(b"prefix"),
@@ -397,13 +408,13 @@ mod tests {
     #[tokio::test]
     async fn aborting_pending_source_cleans_up_partial() {
         let fixture = tempfile::tempdir().unwrap();
-        let directory = fixture.path().to_str().unwrap().to_owned();
+        let directory = HostPath::from_path(fixture.path());
         let pending: ReadStream =
             stream::once(futures::future::pending::<Result<Bytes, FsError>>()).boxed();
         let task = tokio::spawn(async move {
             write_file(
                 &directory,
-                "target",
+                &"target".into(),
                 WriteConflict::FailIfExists,
                 pending,
                 CancellationToken::new(),
@@ -421,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_cleans_up_a_pending_write() {
         let fixture = tempfile::tempdir().unwrap();
-        let directory = fixture.path().to_str().unwrap().to_owned();
+        let directory = HostPath::from_path(fixture.path());
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let pending: ReadStream =
@@ -429,7 +440,7 @@ mod tests {
         let task = tokio::spawn(async move {
             write_file(
                 &directory,
-                "target",
+                &"target".into(),
                 WriteConflict::FailIfExists,
                 pending,
                 task_cancellation,
@@ -452,7 +463,7 @@ mod tests {
         use futures::SinkExt as _;
 
         let fixture = tempfile::tempdir().unwrap();
-        let directory = fixture.path().to_str().unwrap().to_owned();
+        let directory = HostPath::from_path(fixture.path());
         let (mut sender, receiver) = futures::channel::mpsc::channel(1);
         sender
             .send(Ok(Bytes::from_static(b"prefix")))
@@ -461,7 +472,7 @@ mod tests {
         let task = tokio::spawn(async move {
             write_file(
                 &directory,
-                "target",
+                &"target".into(),
                 WriteConflict::FailIfExists,
                 receiver.boxed(),
                 CancellationToken::new(),

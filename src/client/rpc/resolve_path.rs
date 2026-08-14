@@ -2,13 +2,16 @@ use std::{io, path::Path};
 
 use crate::protocol::v1::{ResolvePathRequest, file_peeker_client::FilePeekerClient};
 
-use super::error::operation_status_error;
-use crate::client::connection::ServerConnection;
+use super::{entry::wire_path, error::operation_status_error};
+use crate::{client::connection::ServerConnection, host_path::HostPath};
 
-pub(crate) async fn resolve_path(connection: &ServerConnection, path: &str) -> io::Result<String> {
+pub(crate) async fn resolve_path(
+    connection: &ServerConnection,
+    path: &HostPath,
+) -> io::Result<HostPath> {
     let channel = connection.channel();
     let request = connection.request(ResolvePathRequest {
-        path: path.to_owned(),
+        path: path.as_escaped().to_owned(),
     })?;
 
     let path = FilePeekerClient::new(channel)
@@ -17,11 +20,12 @@ pub(crate) async fn resolve_path(connection: &ServerConnection, path: &str) -> i
         .map_err(|status| operation_status_error(&status))?
         .into_inner()
         .path;
-    validate_absolute_path(path, "resolved path")
+    validate_absolute_path(wire_path(path, "resolved path")?, "resolved path")
 }
 
-fn validate_absolute_path(path: String, description: &str) -> io::Result<String> {
-    if Path::new(&path).is_absolute() {
+/// Checked on the escaped form, which holds the same components the real path does.
+fn validate_absolute_path(path: HostPath, description: &str) -> io::Result<HostPath> {
+    if Path::new(path.as_escaped()).is_absolute() {
         Ok(path)
     } else {
         Err(io::Error::new(
@@ -37,7 +41,11 @@ mod tests {
 
     #[test]
     fn rejects_non_absolute_path_responses() {
-        let error = validate_absolute_path("relative/path".into(), "resolved path").unwrap_err();
+        let error = validate_absolute_path(
+            crate::host_path::HostPath::from_literal("relative/path"),
+            "resolved path",
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(
             error.to_string(),

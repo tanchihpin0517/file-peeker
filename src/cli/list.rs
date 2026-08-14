@@ -1,10 +1,12 @@
 use std::{
     io::{self, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::Instant,
 };
 
-use crate::{Client, ConnectionId, EntryStream, ServerLocation};
+use crate::{
+    Client, ConnectionId, EntryStream, ServerLocation, cli::write_path, host_path::HostPath,
+};
 use futures::TryStreamExt as _;
 
 const OUTPUT_FLUSH_INTERVAL: u64 = 1024;
@@ -32,7 +34,9 @@ async fn run_with_connection(
     path: &str,
 ) -> io::Result<()> {
     let started = Instant::now();
-    let mut entries = client.op_list_dir(connection, path).await?;
+    let mut entries = client
+        .op_list_dir(connection, &HostPath::from_literal(path))
+        .await?;
     let mut output = io::stdout().lock();
     let stats = write_listing(Path::new(path), &mut entries, &mut output).await?;
     output.flush()?;
@@ -65,7 +69,7 @@ async fn write_listing(
     let mut stats = ListStats { entries: 0 };
     while let Some(entry) = entries.try_next().await? {
         let path = child_path(parent, &entry.name)?;
-        writeln!(output, "{}", path.display())?;
+        write_path(output, &path)?;
         stats.entries += 1;
         if stats.entries.is_multiple_of(OUTPUT_FLUSH_INTERVAL) {
             output.flush()?;
@@ -74,16 +78,22 @@ async fn write_listing(
     Ok(stats)
 }
 
-fn child_path(parent: &Path, name: &str) -> io::Result<PathBuf> {
-    let mut components = Path::new(name).components();
-    let valid =
-        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
-    if !valid {
+/// Where a listed child sits, checking the server sent a single component and not a
+/// path. Checked before decoding, which is sound: the escape leaves `.` and `..`
+/// alone and cannot introduce a separator.
+fn child_path(parent: &Path, name: &HostPath) -> io::Result<PathBuf> {
+    if !name.is_one_component() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("server returned an invalid child name: {name:?}"),
+            format!(
+                "server returned an invalid child name: {:?}",
+                name.as_escaped()
+            ),
         ));
     }
+    let name = name
+        .to_path_buf()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     Ok(parent.join(name))
 }
 
@@ -200,10 +210,10 @@ mod tests {
     #[test]
     fn child_names_are_single_components() {
         assert_eq!(
-            child_path(Path::new("/fixture"), "notes.txt").unwrap(),
+            child_path(Path::new("/fixture"), &"notes.txt".into()).unwrap(),
             Path::new("/fixture/notes.txt")
         );
-        assert!(child_path(Path::new("/fixture"), "../escape").is_err());
-        assert!(child_path(Path::new("/fixture"), "nested/name").is_err());
+        assert!(child_path(Path::new("/fixture"), &"../escape".into()).is_err());
+        assert!(child_path(Path::new("/fixture"), &"nested/name".into()).is_err());
     }
 }

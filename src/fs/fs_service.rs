@@ -1,11 +1,14 @@
 use tokio_util::sync::CancellationToken;
 
-use crate::fs::{
-    directory::{EntryStream, WalkStream, list_dir, walk_dir},
-    error::{FsError, FsErrorKind, service_cancelled_error},
-    read::{ReadStream, read_file},
-    resolve_path::resolve_path,
-    write::{WriteConflict, WriteResult, write_file},
+use crate::{
+    fs::{
+        directory::{EntryStream, WalkStream, list_dir, walk_dir},
+        error::{FsError, service_cancelled_error},
+        read::{ReadStream, read_file},
+        resolve_path::resolve_path,
+        write::{WriteConflict, WriteResult, write_file},
+    },
+    host_path::HostPath,
 };
 
 /// A clonable filesystem service whose clones share one terminal cancellation state.
@@ -20,7 +23,7 @@ impl FsService {
         Self::default()
     }
 
-    /// Expands and lexically normalizes a path into an absolute UTF-8 path.
+    /// Expands and lexically normalizes a path into an absolute one.
     ///
     /// This operation does not access the target path, require it to exist, or
     /// resolve symbolic links.
@@ -28,14 +31,12 @@ impl FsService {
     /// # Errors
     ///
     /// Returns an error when shell expansion fails, the working directory cannot
-    /// be read, the resolved path cannot be represented as UTF-8, or the service
-    /// has been cancelled.
-    pub(crate) fn resolve_path(&self, path: &str) -> Result<String, FsError> {
+    /// be read, the path is not correctly escaped, or the service has been
+    /// cancelled. A resolved path that is not UTF-8 is no longer a failure: it comes
+    /// back escaped like any other.
+    pub(crate) fn resolve_path(&self, path: &HostPath) -> Result<HostPath, FsError> {
         self.ensure_active()?;
-        resolve_path(path)?
-            .into_os_string()
-            .into_string()
-            .map_err(|_| FsError::new(FsErrorKind::InvalidArgument, "Resolved path is not UTF-8"))
+        Ok(HostPath::from_path(&resolve_path(path)?))
     }
 
     /// Starts a stream of directory entries.
@@ -45,7 +46,7 @@ impl FsService {
     /// Returns an error when the path cannot be expanded or opened as a
     /// directory, or when the service has been cancelled. Enumeration and
     /// cancellation errors can also be emitted by the returned stream.
-    pub(crate) async fn list_dir(&self, path: &str) -> Result<EntryStream, FsError> {
+    pub(crate) async fn list_dir(&self, path: &HostPath) -> Result<EntryStream, FsError> {
         self.ensure_active()?;
         list_dir(path, self.cancellation_token.clone()).await
     }
@@ -60,7 +61,7 @@ impl FsService {
     /// Returns an error when the root cannot be opened as a directory or the
     /// service is cancelled. Descendant and cancellation errors are emitted
     /// terminally after any earlier entries.
-    pub(crate) async fn walk_dir(&self, path: &str) -> Result<WalkStream, FsError> {
+    pub(crate) async fn walk_dir(&self, path: &HostPath) -> Result<WalkStream, FsError> {
         self.ensure_active()?;
         walk_dir(path, self.cancellation_token.clone()).await
     }
@@ -76,7 +77,7 @@ impl FsService {
     /// or the file cannot be opened as a regular file, or when the service has
     /// already been cancelled. Later filesystem and cancellation failures are
     /// emitted once by the stream before it terminates.
-    pub(crate) async fn read_file(&self, path: &str) -> Result<ReadStream, FsError> {
+    pub(crate) async fn read_file(&self, path: &HostPath) -> Result<ReadStream, FsError> {
         self.ensure_active()?;
         read_file(path, self.cancellation_token.clone()).await
     }
@@ -90,8 +91,8 @@ impl FsService {
     /// never publish a partial destination.
     pub(crate) async fn write_file(
         &self,
-        directory: &str,
-        name: &str,
+        directory: &HostPath,
+        name: &HostPath,
         conflict: WriteConflict,
         source: ReadStream,
     ) -> Result<WriteResult, FsError> {
@@ -125,13 +126,19 @@ impl FsService {
 
 #[cfg(test)]
 mod tests {
-    use super::{FsErrorKind, FsService};
+    use super::{FsService, HostPath};
+    use crate::fs::FsErrorKind;
+
+    /// A path written the way a person would write it.
+    fn path(path: &str) -> HostPath {
+        HostPath::from_literal(path)
+    }
 
     #[test]
-    fn service_exposes_resolved_utf8_paths() {
+    fn service_exposes_resolved_absolute_paths() {
         let service = FsService::new();
-        let resolved = service.resolve_path(".").unwrap();
-        assert!(std::path::Path::new(&resolved).is_absolute());
+        let resolved = service.resolve_path(&path(".")).unwrap();
+        assert!(resolved.to_path_buf().unwrap().is_absolute());
     }
 
     #[tokio::test]
@@ -142,12 +149,12 @@ mod tests {
         service.cancel();
 
         assert_eq!(
-            clone.resolve_path(".").unwrap_err().kind(),
+            clone.resolve_path(&path(".")).unwrap_err().kind(),
             FsErrorKind::Cancelled
         );
         assert_eq!(
             clone
-                .list_dir(".")
+                .list_dir(&path("."))
                 .await
                 .err()
                 .expect("listing after cancellation should fail")
@@ -156,7 +163,7 @@ mod tests {
         );
         assert_eq!(
             clone
-                .walk_dir(".")
+                .walk_dir(&path("."))
                 .await
                 .err()
                 .expect("walking after cancellation should fail")
@@ -165,7 +172,7 @@ mod tests {
         );
         assert_eq!(
             clone
-                .read_file(".")
+                .read_file(&path("."))
                 .await
                 .err()
                 .expect("reading after cancellation should fail")

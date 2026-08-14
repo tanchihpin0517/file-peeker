@@ -70,7 +70,7 @@ fn convert_chunk(entries: Vec<Result<CoreWalkEntry, FsError>>) -> Vec<Result<Wal
 
 fn convert_walk_entry(entry: CoreWalkEntry) -> Result<WalkEntry, Status> {
     Ok(WalkEntry {
-        relative_path: entry.relative_path,
+        relative_path: entry.relative_path.into_escaped(),
         entry: Some(convert_entry(entry.entry)),
         depth: u64::try_from(entry.depth)
             .map_err(|_| Status::out_of_range("walk depth exceeds protocol range"))?,
@@ -80,31 +80,32 @@ fn convert_walk_entry(entry: CoreWalkEntry) -> Result<WalkEntry, Status> {
 #[cfg(test)]
 mod tests {
     use crate::fs::{DirectoryEntry, EntryKind, FsError, FsErrorKind, WalkEntry as CoreWalkEntry};
+    use crate::host_path::HostPath;
     use futures::{StreamExt as _, TryStreamExt as _, stream};
     use prost::Message as _;
     use tonic::Code;
 
     use super::{GRPC_BATCH_MAX_BYTES, GRPC_BATCH_MAX_ENTRIES, convert_chunk, walk_batches};
 
-    fn entry(relative_path: String, depth: usize) -> CoreWalkEntry {
+    fn entry(relative_path: &str, depth: usize) -> CoreWalkEntry {
         CoreWalkEntry {
             entry: DirectoryEntry {
                 name: relative_path
                     .rsplit('/')
                     .next()
-                    .unwrap_or(&relative_path)
+                    .unwrap_or(relative_path)
                     .into(),
                 kind: EntryKind::File,
                 navigable: false,
             },
-            relative_path,
+            relative_path: HostPath::from_literal(relative_path),
             depth,
         }
     }
 
     #[test]
     fn converts_paths_entries_and_depths() {
-        let batches = convert_chunk(vec![Ok(entry("nested/file.txt".into(), 2))]);
+        let batches = convert_chunk(vec![Ok(entry("nested/file.txt", 2))]);
         let converted = &batches[0].as_ref().unwrap().entries[0];
         assert_eq!(converted.relative_path, "nested/file.txt");
         assert_eq!(converted.depth, 2);
@@ -113,7 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn splits_batches_at_the_entry_count_limit() {
-        let entries = (0..=GRPC_BATCH_MAX_ENTRIES).map(|index| Ok(entry(index.to_string(), 1)));
+        let entries = (0..=GRPC_BATCH_MAX_ENTRIES).map(|index| Ok(entry(&index.to_string(), 1)));
         let batches = walk_batches(stream::iter(entries).boxed())
             .try_collect::<Vec<_>>()
             .await
@@ -128,7 +129,7 @@ mod tests {
         let entries = (0..3)
             .map(|index| {
                 Ok(entry(
-                    format!("{index}-{}", "x".repeat(GRPC_BATCH_MAX_BYTES / 3)),
+                    &format!("{index}-{}", "x".repeat(GRPC_BATCH_MAX_BYTES / 3)),
                     1,
                 ))
             })
@@ -157,7 +158,7 @@ mod tests {
 
     #[test]
     fn rejects_oversized_entries_and_emits_no_empty_batches() {
-        let error = convert_chunk(vec![Ok(entry("x".repeat(GRPC_BATCH_MAX_BYTES), 1))])
+        let error = convert_chunk(vec![Ok(entry(&"x".repeat(GRPC_BATCH_MAX_BYTES), 1))])
             .pop()
             .unwrap()
             .unwrap_err();
@@ -168,7 +169,7 @@ mod tests {
     #[test]
     fn flushes_entries_before_terminal_core_errors() {
         let results = convert_chunk(vec![
-            Ok(entry("kept".into(), 1)),
+            Ok(entry("kept", 1)),
             Err(FsError::new(FsErrorKind::PermissionDenied, "denied")),
         ]);
         assert_eq!(results.len(), 2);

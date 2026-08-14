@@ -32,7 +32,7 @@ impl App {
         let header_text = self.active_context_id.and_then(|id| {
             let tab = self.contexts.get(&id)?;
             let label = &self.connections.get(&tab.connection_id)?.label;
-            Some(format!("{label}  {}", tab.context.root_path()))
+            Some(format!("{label}  {}", tab.context.root_path().display()))
         });
         frame.render_widget(
             Paragraph::new(header_text.as_deref().unwrap_or("No active browser")).block(
@@ -225,7 +225,7 @@ impl App {
             || "Ready".into(),
             |context| {
                 if let Some((path, error)) = context.selected_expansion_error() {
-                    format!("Error expanding {path}: {error}")
+                    format!("Error expanding {}: {error}", path.display())
                 } else {
                     match context.status() {
                         ListingStatus::Loading => "Loading…".into(),
@@ -395,9 +395,12 @@ impl App {
             &[
                 Line::from(format!(
                     "\"{}\" already exists in connection \"{label}\".",
-                    request.source_name
+                    request.source_name.display()
                 )),
-                Line::from(format!("Destination: {}", request.destination_root)),
+                Line::from(format!(
+                    "Destination: {}",
+                    request.destination_root.display()
+                )),
                 Line::from(""),
                 Line::from("Press Enter or y to overwrite it."),
             ],
@@ -406,14 +409,16 @@ impl App {
 }
 
 fn tab_label(connection_label: &str, tab: &BrowserTab) -> String {
-    let path = tab.context.root_path();
+    // The last component, taken off what a person reads rather than the escaped
+    // form, so a tab is labelled the way its directory is named.
+    let path = tab.context.root_path().display();
     let compact = if path == "/" {
         "/"
     } else {
         path.trim_end_matches('/')
             .rsplit('/')
             .find(|part| !part.is_empty())
-            .unwrap_or(path)
+            .unwrap_or(&path)
     };
     format!("{connection_label}:{compact}")
 }
@@ -462,7 +467,7 @@ fn row_list_item(row: &BrowserRow) -> ListItem<'static> {
         format!(
             "{}{prefix}{}",
             "  ".repeat(usize::from(row.depth())),
-            row.entry().name
+            row.entry().name.display()
         ),
         style,
     ))

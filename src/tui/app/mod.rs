@@ -3,7 +3,9 @@ mod view;
 
 use std::{collections::HashMap, error::Error, io, sync::Arc, time::Duration};
 
-use crate::{Client, ConnectionId, CopyConflict, CopyResult, EntryKind, ServerLocation};
+use crate::{
+    Client, ConnectionId, CopyConflict, CopyResult, EntryKind, ServerLocation, host_path::HostPath,
+};
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
@@ -63,18 +65,18 @@ struct BrowserTab {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TransferSelection {
     connection_id: ConnectionRecordId,
-    path: String,
-    name: String,
+    path: HostPath,
+    name: HostPath,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TransferRequest {
     source_connection_id: ConnectionRecordId,
-    source_path: String,
-    source_name: String,
+    source_path: HostPath,
+    source_name: HostPath,
     destination_connection_id: ConnectionRecordId,
     destination_context_id: BrowserContextId,
-    destination_root: String,
+    destination_root: HostPath,
 }
 
 #[derive(Debug)]
@@ -112,7 +114,7 @@ enum LifecycleEvent {
     PathResolved {
         record_id: ConnectionRecordId,
         request_id: Uuid,
-        result: Result<String, String>,
+        result: Result<HostPath, String>,
     },
     ConnectionClosed {
         record_id: ConnectionRecordId,
@@ -195,7 +197,10 @@ impl App {
             record.connection = Some(connection);
             record.status = ConnectionStatus::Ready;
         }
-        let root_path = self.client.op_resolve_path(&connection, path).await?;
+        let root_path = self
+            .client
+            .op_resolve_path(&connection, &HostPath::from_literal(path))
+            .await?;
         let context_id = self.add_context(record_id, connection, root_path);
         self.activate_context(context_id);
         self.overlay = Overlay::None;
@@ -241,7 +246,7 @@ impl App {
         &mut self,
         connection_id: ConnectionRecordId,
         connection: ConnectionId,
-        root_path: String,
+        root_path: HostPath,
     ) -> BrowserContextId {
         let context = BrowserContext::new(
             Arc::clone(&self.client),
@@ -416,11 +421,12 @@ impl App {
                 self.status_error = None;
                 self.status_message = Some(format!(
                     "Copied {} bytes to {}",
-                    result.bytes_copied, result.destination_path
+                    result.bytes_copied,
+                    result.destination_path.display()
                 ));
                 if let Some(tab) = self.contexts.get_mut(&request.destination_context_id)
                     && tab.connection_id == request.destination_connection_id
-                    && tab.context.root_path() == request.destination_root
+                    && *tab.context.root_path() == request.destination_root
                 {
                     tab.context.refresh();
                 }
@@ -429,11 +435,15 @@ impl App {
                 if error.kind() == io::ErrorKind::AlreadyExists
                     && conflict == CopyConflict::FailIfExists =>
             {
-                self.status_message = Some(format!("{} already exists", request.source_name));
+                self.status_message =
+                    Some(format!("{} already exists", request.source_name.display()));
                 self.overlay = Overlay::TransferOverwriteConfirmation(request);
             }
             Err(error) => {
-                self.status_error = Some(format!("Error copying {}: {error}", request.source_name));
+                self.status_error = Some(format!(
+                    "Error copying {}: {error}",
+                    request.source_name.display()
+                ));
             }
         }
     }
@@ -595,7 +605,7 @@ impl App {
         };
         self.overlay = Overlay::NewBrowser(NewBrowserDialog {
             connection_id: tab.connection_id,
-            input: tab.context.root_path().to_owned(),
+            input: tab.context.root_path().display().into_owned(),
             request_id: None,
             error: None,
             return_mode: ReturnMode::Main,
@@ -612,7 +622,10 @@ impl App {
             .get(&connection_id)
             .and_then(|record| record.last_active_context_id)
             .and_then(|id| self.contexts.get(&id))
-            .map_or_else(|| "~".into(), |tab| tab.context.root_path().to_owned());
+            .map_or_else(
+                || "~".to_owned(),
+                |tab| tab.context.root_path().display().into_owned(),
+            );
         self.overlay = Overlay::NewBrowser(NewBrowserDialog {
             connection_id,
             input: default_path,
@@ -657,8 +670,10 @@ impl App {
         self.path_tasks.insert(
             request_id,
             tokio::spawn(async move {
+                // The dialog holds text a person typed, so it is escaped here on
+                // its way to the host.
                 let result = client
-                    .op_resolve_path(&connection, &path)
+                    .op_resolve_path(&connection, &HostPath::from_literal(&path))
                     .await
                     .map_err(|error| error.to_string());
                 let _ = sender.send(LifecycleEvent::PathResolved {
@@ -908,7 +923,7 @@ impl App {
         if selection.kind != EntryKind::File {
             self.status_message = Some(format!(
                 "Cannot copy {}: only regular files are supported",
-                selection.name
+                selection.name.display()
             ));
             return;
         }
@@ -919,7 +934,7 @@ impl App {
             name: selection.name.clone(),
         });
         self.status_error = None;
-        self.status_message = Some(format!("Yanked {} from {label}", selection.name));
+        self.status_message = Some(format!("Yanked {} from {label}", selection.name.display()));
     }
 
     pub(crate) fn paste_into_active_context(&mut self) {
@@ -991,7 +1006,7 @@ impl App {
             });
         });
         self.status_error = None;
-        self.status_message = Some(format!("Copying {}…", request.source_name));
+        self.status_message = Some(format!("Copying {}…", request.source_name.display()));
         self.transfer_task = Some(TransferTask {
             id: transfer_id,
             request,
@@ -1297,7 +1312,7 @@ mod tests {
             app.active_context()
                 .and_then(BrowserContext::selected_entry)
                 .map(|entry| entry.name),
-            Some("beta.txt".to_owned())
+            Some("beta.txt".into())
         );
 
         // The first Enter spells out what was narrowed to; the second takes it.
@@ -1377,7 +1392,7 @@ mod tests {
         assert_eq!(
             app.transfer_selection
                 .as_ref()
-                .map(|selection| selection.name.as_str()),
+                .map(|selection| selection.name.as_escaped()),
             Some("payload.txt")
         );
         let source_context_id = app.active_context_id.unwrap();

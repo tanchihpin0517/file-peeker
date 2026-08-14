@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures::{StreamExt as _, stream};
 use tonic::{Request, Response, Status};
 
-use super::status::fs_status;
+use super::status::{fs_status, wire_path};
 
 pub(super) async fn write_file(
     fs: &FsService,
@@ -30,13 +30,16 @@ pub(super) async fn write_file(
         _ => return Err(Status::invalid_argument("unknown write conflict policy")),
     };
 
+    let directory = wire_path(header.directory)?;
+    let name = wire_path(header.name)?;
+
     let source = validated_data_stream(frames);
     let result = fs
-        .write_file(&header.directory, &header.name, conflict, source)
+        .write_file(&directory, &name, conflict, source)
         .await
         .map_err(|error| fs_status(&error))?;
     Ok(Response::new(WriteResponse {
-        path: result.path,
+        path: result.path.into_escaped(),
         bytes_written: result.bytes_written,
     }))
 }

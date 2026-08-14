@@ -5,13 +5,16 @@ use tokio::fs;
 use tokio_util::sync::CancellationToken;
 
 use super::entry::inspect_entry;
-use crate::fs::{
-    DirectoryEntry, FsError, error::service_cancelled_error, resolve_path::resolve_path,
+use crate::{
+    fs::{DirectoryEntry, FsError, error::service_cancelled_error, resolve_path::resolve_path},
+    host_path::HostPath,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WalkEntry {
-    pub relative_path: String,
+    /// Escaped, for the same reason [`DirectoryEntry::name`] is: a component of it
+    /// may be bytes no `String` can hold.
+    pub relative_path: HostPath,
     pub entry: DirectoryEntry,
     pub depth: usize,
 }
@@ -26,18 +29,22 @@ struct WalkState {
 
 struct DirectoryFrame {
     entries: fs::ReadDir,
-    relative_dir: PathBuf,
+    /// Escaped and root-relative, which is what the entries report. Not a real path
+    /// — see [`PendingDirectory::path`] for that.
+    relative_dir: HostPath,
     child_depth: usize,
 }
 
 struct PendingDirectory {
+    /// The real path on this host, which is what gets opened.
     path: PathBuf,
-    relative_dir: PathBuf,
+    /// The escaped root-relative path, which is what gets reported.
+    relative_dir: HostPath,
     child_depth: usize,
 }
 
 pub(crate) async fn walk_dir(
-    path: &str,
+    path: &HostPath,
     cancellation: CancellationToken,
 ) -> Result<WalkStream, FsError> {
     let root = resolve_path(path)?;
@@ -45,7 +52,7 @@ pub(crate) async fn walk_dir(
     let initial = WalkState {
         stack: vec![DirectoryFrame {
             entries,
-            relative_dir: PathBuf::new(),
+            relative_dir: HostPath::from_literal(""),
             child_depth: 1,
         }],
         pending_descent: None,
@@ -93,30 +100,20 @@ pub(crate) async fn walk_dir(
                     Err(error) => return Some((Err(error), None)),
                 },
             };
+            // Escaped throughout: joining escaped halves is the escape of the joined
+            // path, so a descendant whose name is not UTF-8 no longer ends the walk.
             let relative_path = frame.relative_dir.join(&inspected.entry.name);
-            let relative_path_string = match relative_path.to_str() {
-                Some(path) if !path.is_empty() => path.to_owned(),
-                _ => {
-                    return Some((
-                        Err(FsError::new(
-                            crate::fs::FsErrorKind::InvalidArgument,
-                            "Encountered a non-UTF-8 relative path",
-                        )),
-                        None,
-                    ));
-                }
-            };
             let depth = frame.child_depth;
             if inspected.descend {
                 state.pending_descent = Some(PendingDirectory {
                     path: inspected.path,
-                    relative_dir: relative_path,
+                    relative_dir: relative_path.clone(),
                     child_depth: depth + 1,
                 });
             }
             return Some((
                 Ok(WalkEntry {
-                    relative_path: relative_path_string,
+                    relative_path,
                     entry: inspected.entry,
                     depth,
                 }),
@@ -151,17 +148,23 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::walk_dir;
-    use crate::fs::{EntryKind, FsErrorKind};
+    use crate::{
+        fs::{EntryKind, FsErrorKind},
+        host_path::HostPath,
+    };
 
     #[tokio::test]
     async fn empty_roots_yield_no_entries() {
         let fixture = tempfile::tempdir().unwrap();
-        let entries = walk_dir(fixture.path().to_str().unwrap(), CancellationToken::new())
-            .await
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
+        let entries = walk_dir(
+            &HostPath::from_path(fixture.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
         assert!(entries.is_empty());
     }
 
@@ -181,15 +184,18 @@ mod tests {
             .await
             .unwrap();
 
-        let entries = walk_dir(fixture.path().to_str().unwrap(), CancellationToken::new())
-            .await
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
+        let entries = walk_dir(
+            &HostPath::from_path(fixture.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
         let by_path = entries
             .iter()
-            .map(|entry| (entry.relative_path.as_str(), entry))
+            .map(|entry| (entry.relative_path.as_escaped(), entry))
             .collect::<HashMap<_, _>>();
 
         assert_eq!(by_path.len(), 5);
@@ -199,9 +205,9 @@ mod tests {
         assert_eq!(by_path["one/two"].depth, 2);
         assert_eq!(by_path["one/two/deep.txt"].depth, 3);
         assert!(entries.iter().all(|entry| {
-            std::path::Path::new(&entry.relative_path)
+            std::path::Path::new(entry.relative_path.as_escaped())
                 .file_name()
-                .is_some_and(|name| name == entry.entry.name.as_str())
+                .is_some_and(|name| name == entry.entry.name.as_escaped())
         }));
         let one = entries
             .iter()
@@ -237,12 +243,15 @@ mod tests {
             .unwrap();
         symlink("target", fixture.path().join("linked")).unwrap();
 
-        let entries = walk_dir(fixture.path().to_str().unwrap(), CancellationToken::new())
-            .await
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
+        let entries = walk_dir(
+            &HostPath::from_path(fixture.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
         let linked = entries
             .iter()
             .find(|entry| entry.relative_path == "linked")
@@ -259,17 +268,20 @@ mod tests {
     #[tokio::test]
     async fn rejects_non_directory_roots_before_returning_a_stream() {
         let fixture = tempfile::NamedTempFile::new().unwrap();
-        let error = walk_dir(fixture.path().to_str().unwrap(), CancellationToken::new())
-            .await
-            .err()
-            .unwrap();
+        let error = walk_dir(
+            &HostPath::from_path(fixture.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap();
         assert_eq!(error.kind(), FsErrorKind::NotDirectory);
     }
 
     #[tokio::test]
     async fn missing_roots_fail_before_returning_a_stream() {
         let error = walk_dir(
-            "/definitely/missing/file-peeker-walk-fixture",
+            &"/definitely/missing/file-peeker-walk-fixture".into(),
             CancellationToken::new(),
         )
         .await
@@ -288,7 +300,7 @@ mod tests {
             .await
             .unwrap();
         let cancellation = CancellationToken::new();
-        let mut stream = walk_dir(fixture.path().to_str().unwrap(), cancellation.clone())
+        let mut stream = walk_dir(&HostPath::from_path(fixture.path()), cancellation.clone())
             .await
             .unwrap();
         assert!(stream.next().await.unwrap().is_ok());
@@ -303,9 +315,12 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let child = fixture.path().join("child");
         tokio::fs::create_dir(&child).await.unwrap();
-        let mut stream = walk_dir(fixture.path().to_str().unwrap(), CancellationToken::new())
-            .await
-            .unwrap();
+        let mut stream = walk_dir(
+            &HostPath::from_path(fixture.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let emitted = stream.next().await.unwrap().unwrap();
         assert_eq!(emitted.relative_path, "child");
         tokio::fs::remove_dir(&child).await.unwrap();
@@ -323,14 +338,14 @@ mod tests {
             .unwrap();
         let service = crate::fs::FsService::new();
         let walk = service
-            .walk_dir(fixture.path().to_str().unwrap())
+            .walk_dir(&HostPath::from_path(fixture.path()))
             .await
             .unwrap();
         drop(walk);
 
         assert_eq!(
             service
-                .list_dir(fixture.path().to_str().unwrap())
+                .list_dir(&HostPath::from_path(fixture.path()))
                 .await
                 .unwrap()
                 .try_collect::<Vec<_>>()
@@ -341,7 +356,7 @@ mod tests {
         );
         assert_eq!(
             service
-                .walk_dir(fixture.path().to_str().unwrap())
+                .walk_dir(&HostPath::from_path(fixture.path()))
                 .await
                 .unwrap()
                 .try_collect::<Vec<_>>()
@@ -352,27 +367,47 @@ mod tests {
         );
     }
 
+    /// A descendant whose name is not UTF-8 used to end the walk on the spot. It is
+    /// escaped instead, so the traversal carries on and the entry is still reported
+    /// by a relative path that addresses it.
+    ///
+    /// Skips itself where the filesystem refuses to create such a name at all, which
+    /// is what APFS does.
     #[cfg(unix)]
     #[tokio::test]
-    async fn non_utf8_descendants_fail_terminally() {
+    async fn non_utf8_descendants_are_escaped_rather_than_terminal() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
 
         let fixture = tempfile::tempdir().unwrap();
-        let write_result = tokio::fs::write(
-            fixture.path().join(OsString::from_vec(vec![0xff, 0xfe])),
-            b"",
-        )
-        .await;
-        if write_result.is_err() {
+        let directory = OsString::from_vec(vec![b'd', 0xff]);
+        if tokio::fs::create_dir(fixture.path().join(&directory))
+            .await
+            .is_err()
+        {
             return;
         }
-        let error = walk_dir(fixture.path().to_str().unwrap(), CancellationToken::new())
+        tokio::fs::write(fixture.path().join(&directory).join("child.txt"), b"")
             .await
-            .unwrap()
-            .next()
-            .await
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(error.kind(), FsErrorKind::InvalidArgument);
+            .unwrap();
+
+        let entries = walk_dir(
+            &HostPath::from_path(fixture.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("an unusual name should no longer end the walk");
+
+        // Both the directory and the child beneath it: the walk descended through a
+        // name it cannot spell.
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| entry.relative_path == "d%FF"));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.relative_path == "d%FF/child.txt" && entry.depth == 2)
+        );
     }
 }
