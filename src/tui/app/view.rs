@@ -10,7 +10,10 @@ use ratatui::{
 use super::{
     App, BrowserTab, ConnectionRecordId, NewBrowserDialog, Overlay, connection::ConnectionStatus,
 };
-use crate::tui::browser_context::{BrowserRow, ExpansionStatus, ListingStatus};
+use crate::{
+    browser::format_size,
+    tui::browser_context::{BrowserRow, ExpansionStatus, ListingStatus},
+};
 
 impl App {
     pub(crate) fn render(&mut self, frame: &mut Frame<'_>) {
@@ -49,7 +52,11 @@ impl App {
         let mut matches = None;
         if self.active_context().is_some() {
             let block = file_list_block();
-            let height = usize::from(block.inner(body).height);
+            let inner = block.inner(body);
+            let height = usize::from(inner.height);
+            // The list draws a two-column highlight symbol, so a row has that much
+            // less to lay values out in.
+            let row_width = inner.width.saturating_sub(2);
             let context = self
                 .active_context_mut()
                 .expect("active context was checked before rendering");
@@ -61,7 +68,11 @@ impl App {
                 frame,
                 body,
                 block,
-                viewport.rows.iter().copied().map(row_list_item),
+                viewport
+                    .rows
+                    .iter()
+                    .copied()
+                    .map(|row| row_list_item(row, row_width)),
                 viewport.selected,
             );
         } else {
@@ -453,7 +464,14 @@ fn render_file_list<'a>(
     );
 }
 
-fn row_list_item(row: &BrowserRow) -> ListItem<'static> {
+/// The width a row needs before it can spare a `size` column, from the TUI layout
+/// contract. Below it the row is names and indentation, which is its skeleton.
+const SIZE_COLUMN_BREAKPOINT: u16 = 52;
+
+/// How wide the size column is, including the gap that keeps it off the name.
+const SIZE_COLUMN_WIDTH: u16 = 10;
+
+fn row_list_item(row: &BrowserRow, width: u16) -> ListItem<'static> {
     let (_, style) = entry_appearance(row.entry().kind);
     // An entry that could not be inspected gets a glyph of its own. Without one it
     // would fall through to its kind glyph, and a directory's kind glyph is the same
@@ -470,14 +488,36 @@ fn row_list_item(row: &BrowserRow) -> ListItem<'static> {
     } else {
         entry_appearance(row.entry().kind).0
     };
-    ListItem::new(Line::styled(
-        format!(
-            "{}{prefix}{}",
-            "  ".repeat(usize::from(row.depth())),
-            row.entry().name.display()
-        ),
-        style,
-    ))
+    let name = format!(
+        "{}{prefix}{}",
+        "  ".repeat(usize::from(row.depth())),
+        row.entry().name.display()
+    );
+
+    // A directory's own size says nothing about what is in it, and an entry that
+    // could not be inspected has no size to report.
+    let size = row
+        .entry()
+        .metadata
+        .as_ref()
+        .filter(|_| row.entry().kind != EntryKind::Directory)
+        .map(|metadata| format_size(metadata.size));
+    let Some(size) = size.filter(|_| width >= SIZE_COLUMN_BREAKPOINT) else {
+        return ListItem::new(Line::styled(name, style));
+    };
+
+    // Right-aligned by padding, because a `List` item is one line rather than a
+    // table row: the name is clipped to what is left, so a long name gives way to
+    // the value rather than pushing it off the edge.
+    let available = usize::from(width.saturating_sub(SIZE_COLUMN_WIDTH));
+    let mut name: String = name.chars().take(available).collect();
+    let gap = available.saturating_sub(name.chars().count())
+        + usize::from(SIZE_COLUMN_WIDTH).saturating_sub(size.chars().count());
+    name.push_str(&" ".repeat(gap));
+    ListItem::new(Line::from(vec![
+        Span::styled(name, style),
+        Span::styled(size, Style::default().fg(Color::DarkGray)),
+    ]))
 }
 
 fn entry_appearance(kind: EntryKind) -> (&'static str, Style) {
@@ -638,6 +678,54 @@ mod tests {
             .rposition(|line| line.contains('└'))
             .expect("the file list border is closed");
         (top + 1, bottom - 1)
+    }
+
+    /// The size column appears once a row is wide enough for it and gives way to the
+    /// name when it is not, which is the breakpoint the layout contract sets.
+    #[tokio::test]
+    async fn the_size_column_appears_only_once_a_row_is_wide_enough() {
+        let fixture = tempfile::tempdir().unwrap();
+        tokio::fs::write(fixture.path().join("sized.txt"), vec![b'x'; 2048])
+            .await
+            .unwrap();
+        let mut app = listed(fixture.path()).await;
+
+        let wide = rendered(&mut app, 78, 14);
+        assert!(wide.contains("2.0 K"), "a wide row reports the size");
+        assert!(wide.contains("sized.txt"));
+
+        let narrow = rendered(&mut app, 40, 14);
+        assert!(
+            !narrow.contains("2.0 K"),
+            "a narrow row spends its width on names instead"
+        );
+        assert!(narrow.contains("sized.txt"));
+
+        app.shutdown().await.unwrap();
+    }
+
+    /// A directory's own size says nothing about what is inside it, so the column
+    /// stays empty rather than reporting the size of the directory entry itself.
+    #[tokio::test]
+    async fn a_directory_reports_no_size() {
+        let fixture = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir(fixture.path().join("subdirectory"))
+            .await
+            .unwrap();
+        let mut app = listed(fixture.path()).await;
+
+        let lines = rendered_lines(&mut app, 78, 14);
+        let row = lines
+            .iter()
+            .find(|line| line.contains("subdirectory"))
+            .expect("the directory should be listed");
+        // Inside the block's borders, the name is the last thing on the row.
+        assert!(
+            row.trim_matches('│').trim_end().ends_with("subdirectory"),
+            "nothing should follow the name: {row:?}"
+        );
+
+        app.shutdown().await.unwrap();
     }
 
     /// An armed confirmation takes the footer, since the press only counts while it

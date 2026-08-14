@@ -14,7 +14,7 @@ use egui_extras::{Column, TableBuilder};
 use super::glyph::{self, Side};
 use super::theme::{INDENT, Palette, ROW_HEIGHT};
 use crate::EntryKind;
-use crate::browser::{Expansion, Row, Status, Tree, VisibleRows};
+use crate::browser::{Expansion, Row, Status, Tree, VisibleRows, format_modified, format_size};
 use crate::host_path::HostPath;
 
 /// One browser: a root being listed, and the filter narrowing it.
@@ -246,9 +246,13 @@ fn table(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser, actions: &mut 
         .sense(Sense::click())
         .resizable(true)
         .column(Column::remainder().at_least(180.0).clip(true))
+        .column(Column::initial(76.0).at_least(52.0))
+        .column(Column::initial(124.0).at_least(76.0))
         .column(Column::initial(88.0).at_least(56.0))
+        // `Status` stays last: it is where a refused expansion says so, so it is the
+        // one column that must survive every narrowing.
         .header(24.0, |mut header| {
-            for label in ["Name", "Status"] {
+            for label in ["Name", "Size", "Modified", "Status"] {
                 header.col(|ui| header_label(ui, palette, label));
             }
         })
@@ -271,6 +275,32 @@ fn table(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser, actions: &mut 
 
                 let mut chevron = None;
                 table_row.col(|ui| chevron = name_cell(ui, palette, row, tint, alpha));
+                // Values, in `faint` as the palette's own role table says. An entry
+                // that could not be inspected has nothing to put here, and says so in
+                // `Status` rather than showing a zero that would read as a fact.
+                let metadata = row.entry().metadata.as_ref();
+                table_row.col(|ui| {
+                    let size = metadata
+                        .filter(|_| row.entry().kind != EntryKind::Directory)
+                        .map_or_else(String::new, |metadata| format_size(metadata.size));
+                    cell(
+                        ui,
+                        &size,
+                        FontId::monospace(10.5),
+                        palette.faint.gamma_multiply(alpha),
+                    );
+                });
+                table_row.col(|ui| {
+                    let modified = metadata
+                        .and_then(|metadata| metadata.modified)
+                        .map_or_else(String::new, format_modified);
+                    cell(
+                        ui,
+                        &modified,
+                        FontId::monospace(10.5),
+                        palette.faint.gamma_multiply(alpha),
+                    );
+                });
                 table_row.col(|ui| {
                     let (text, colour) = state_label(palette, row);
                     cell(

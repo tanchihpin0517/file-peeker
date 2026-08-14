@@ -14,11 +14,18 @@
 //! group is quadratic in the size of the directory.
 
 mod tree;
+mod value;
 mod window;
 
 use crate::{DirectoryEntry, host_path::HostPath};
 
 pub(crate) use tree::Tree;
+pub(crate) use value::format_size;
+// Only the desktop front end shows a timestamp: the terminal's layout contract has a
+// breakpoint for `size` and none for `modified`, so a narrow terminal spends the
+// width on names instead.
+#[cfg(feature = "gui")]
+pub(crate) use value::format_modified;
 pub(crate) use window::{VisibleRows, in_scope, matches_needle};
 
 /// How far a row is from the root. `u16` rather than `usize` so the indent
