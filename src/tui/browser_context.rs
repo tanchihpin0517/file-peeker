@@ -752,9 +752,7 @@ impl BrowserContext {
     }
 
     fn change_root_path(&mut self, root_path: &Path) {
-        self.tree
-            .set_root_path(root_path.to_string_lossy().into_owned());
-        self.tree.set_selected_index(None);
+        self.tree.reroot(root_path.to_string_lossy().into_owned());
         self.viewport_offset = 0;
         self.start_root_listing();
     }

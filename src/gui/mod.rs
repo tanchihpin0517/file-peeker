@@ -9,7 +9,6 @@ mod app;
 mod dock;
 mod glyph;
 mod theme;
-mod tree;
 
 use std::{error::Error, sync::Arc};
 

@@ -13,24 +13,43 @@ use egui_extras::{Column, TableBuilder};
 
 use super::glyph::{self, Side};
 use super::theme::{INDENT, Palette, ROW_HEIGHT};
-use super::tree::{Expansion, Row, Status, Tree};
 use crate::EntryKind;
+use crate::browser::{Expansion, Row, Status, Tree, VisibleRows};
 
-/// One browser: a root being listed.
+/// One browser: a root being listed, and the filter narrowing it.
+///
+/// The query lives here rather than in the tree because the field owns its own
+/// text: the tree is asked what a query leaves on screen, and keeps no prompt
+/// state of its own.
 pub(crate) struct Browser {
     pub(crate) tree: Tree,
     pub(crate) id: u64,
+    filter: String,
 }
 
 impl Browser {
     pub(crate) fn new(tree: Tree, id: u64) -> Self {
-        Self { tree, id }
+        Self {
+            tree,
+            id,
+            filter: String::new(),
+        }
+    }
+
+    /// The rows the filter leaves on screen, recomputed once per frame that
+    /// needs them.
+    fn window(&self) -> VisibleRows {
+        self.tree.window(&self.filter, None)
+    }
+
+    fn loading(&self) -> bool {
+        matches!(self.tree.status(), Status::Loading)
     }
 
     /// The tab's label: the last component of its root, which is what the user
     /// recognises it by.
     fn label(&self) -> String {
-        let root = self.tree.root.trim_end_matches('/');
+        let root = self.tree.root_path().trim_end_matches('/');
         root.rsplit('/')
             .find(|part| !part.is_empty())
             .unwrap_or("/")
@@ -71,7 +90,7 @@ impl TabViewer for Viewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         ui.spacing_mut().item_spacing.y = 0.0;
-        if tab.tree.loading() {
+        if tab.loading() {
             loading_bar(ui, self.palette);
         }
         // Always on screen: with the keyboard gone there is nothing left to open
@@ -165,7 +184,7 @@ fn filter_row(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser) {
         FontId::monospace(13.0),
         palette.accent,
     );
-    let matches = tab.tree.matches();
+    let matches = tab.window().matches();
     let field = Rect::from_center_size(
         Pos2::new(
             (rect.min.x + 26.0 + rect.max.x - 96.0) / 2.0,
@@ -173,7 +192,7 @@ fn filter_row(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser) {
         ),
         Vec2::new(rect.width() - 122.0, 18.0),
     );
-    let mut query = tab.tree.filter().to_owned();
+    let mut query = tab.filter.clone();
     ui.scope_builder(egui::UiBuilder::new().max_rect(field), |ui| {
         ui.add(
             egui::TextEdit::singleline(&mut query)
@@ -187,7 +206,7 @@ fn filter_row(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser) {
                 .font(FontId::proportional(13.0)),
         );
     });
-    tab.tree.set_filter(query);
+    tab.filter = query;
     if let Some(count) = matches {
         painter.text(
             Pos2::new(rect.max.x - 14.0, rect.center().y),
@@ -212,8 +231,9 @@ fn table(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser, actions: &mut 
     ui.style_mut().visuals.widgets.noninteractive.bg_stroke =
         Stroke::new(1.0, palette.border.gamma_multiply(0.35));
 
-    let total = tab.tree.visible_len();
-    let selected = tab.tree.selected();
+    let window = tab.window();
+    let total = window.len();
+    let selected = tab.tree.effective_selection();
     let browser = tab.id;
     let mut clicked = None;
 
@@ -231,18 +251,19 @@ fn table(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser, actions: &mut 
         .body(|body| {
             body.rows(ROW_HEIGHT, total, |mut table_row| {
                 let position = table_row.index();
-                let Some((index, matched)) = tab.tree.at(position) else {
+                let Some(index) = window.row(position) else {
                     return;
                 };
                 let Some(row) = tab.tree.rows().get(index) else {
                     return;
                 };
+                let matched = window.matched(index);
                 // One background and one click target for the whole row, which
                 // is what a file row needs and what cell-by-cell painting makes
                 // awkward.
-                table_row.set_selected(index == selected);
+                table_row.set_selected(Some(index) == selected);
                 let alpha = if matched { 1.0 } else { 0.45 };
-                let tint = kind_colour(palette, row.entry.kind).gamma_multiply(alpha);
+                let tint = kind_colour(palette, row.entry().kind).gamma_multiply(alpha);
 
                 let mut chevron = None;
                 table_row.col(|ui| chevron = name_cell(ui, palette, row, tint, alpha));
@@ -278,17 +299,17 @@ fn table(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser, actions: &mut 
                 }
                 // Opening a directory replaces the browser's root; the expander
                 // is the way to see inside one without leaving where you are.
-                if response.double_clicked() && !on_chevron && row.entry.navigable {
+                if response.double_clicked() && !on_chevron && row.entry().navigable {
                     actions.push(Action::Enter {
                         browser,
-                        path: row.path.clone(),
+                        path: row.path().to_owned(),
                     });
                 }
             });
         });
 
     if let Some(index) = clicked {
-        tab.tree.select(index);
+        tab.tree.set_selected_index(Some(index));
     }
 }
 
@@ -341,17 +362,17 @@ fn name_cell(
     let painter = ui.painter();
     let mut x = rect.min.x;
 
-    for level in 0..row.depth {
+    for level in 0..row.depth() {
         let guide = x + f32::from(level) * INDENT + 3.0;
         painter.line_segment(
             [Pos2::new(guide, rect.min.y), Pos2::new(guide, rect.max.y)],
             Stroke::new(1.0, palette.faint.gamma_multiply(0.45)),
         );
     }
-    x += f32::from(row.depth) * INDENT;
+    x += f32::from(row.depth()) * INDENT;
 
     // Widened past the arrow itself so it is comfortable to hit at 13px.
-    let chevron = row.entry.navigable.then(|| {
+    let chevron = row.entry().navigable.then(|| {
         Rect::from_center_size(
             Pos2::new(x + 5.0, rect.center().y),
             Vec2::new(18.0, rect.height()),
@@ -369,21 +390,26 @@ fn name_cell(
             } else {
                 palette.muted.gamma_multiply(alpha)
             },
-            row.expansion == Expansion::Expanded,
+            matches!(row.expansion(), Expansion::Expanded { .. }),
         );
     }
     x += 15.0;
 
     let icon = Rect::from_min_size(Pos2::new(x, rect.center().y - 6.5), Vec2::new(14.0, 13.0));
-    if row.entry.navigable {
-        glyph::folder(painter, icon, tint, row.expansion == Expansion::Expanded);
+    if row.entry().navigable {
+        glyph::folder(
+            painter,
+            icon,
+            tint,
+            matches!(row.expansion(), Expansion::Expanded { .. }),
+        );
     } else {
         glyph::file(painter, icon, tint);
     }
     x += 24.0;
 
     let galley = painter.layout_no_wrap(
-        row.name.clone(),
+        row.name().to_owned(),
         FontId::proportional(12.5),
         palette.text.gamma_multiply(alpha),
     );
@@ -405,7 +431,7 @@ fn footer(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser) {
         _ => (
             tab.tree
                 .selected_row()
-                .map(|row| row.path.clone())
+                .map(|row| row.path().to_owned())
                 .unwrap_or_default(),
             palette.muted,
         ),
@@ -422,11 +448,7 @@ fn footer(ui: &mut egui::Ui, palette: &Palette, tab: &mut Browser) {
         Align2::RIGHT_CENTER,
         format!(
             "{}{} rows",
-            if tab.tree.loading() {
-                "Loading · "
-            } else {
-                ""
-            },
+            if tab.loading() { "Loading · " } else { "" },
             tab.tree.rows().len()
         ),
         FontId::monospace(10.5),
@@ -444,7 +466,7 @@ fn kind_colour(palette: &Palette, kind: EntryKind) -> Color32 {
 }
 
 fn kind_label(row: &Row) -> &'static str {
-    match row.entry.kind {
+    match row.entry().kind {
         EntryKind::Directory => "",
         EntryKind::Symlink => "link",
         EntryKind::File => "file",
@@ -455,9 +477,9 @@ fn kind_label(row: &Row) -> &'static str {
 /// What the second column says: how an expansion is going when something is
 /// happening to it, and otherwise what kind of entry it is.
 fn state_label(palette: &Palette, row: &Row) -> (&'static str, Color32) {
-    match row.expansion {
-        Expansion::Loading => ("loading", palette.muted),
-        Expansion::Failed => ("unreadable", palette.warn),
+    match row.expansion() {
+        Expansion::Loading { .. } => ("loading", palette.muted),
+        Expansion::Failed { .. } => ("unreadable", palette.warn),
         _ => (kind_label(row), palette.muted),
     }
 }

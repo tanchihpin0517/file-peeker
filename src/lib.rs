@@ -10,6 +10,8 @@
 //! `--no-default-features --features server`:
 //!
 //! - `client` (implied by `cli` and `tui`) adds `Client` and its connections.
+//! - `browser` (implied by `tui` and `gui`) holds the headless model of a browsed
+//!   root, so the two front ends place a streaming listing the same way.
 //! - `cli`, `server`, `tui`, and `gui` each add one binary's logic, exposed as a
 //!   single `run` entry point that the matching `src/bin` shim calls. `gui` is
 //!   the only one left out of `default`, because eframe brings a window system

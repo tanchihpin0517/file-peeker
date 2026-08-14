@@ -62,8 +62,12 @@ impl Tree {
         &self.root_path
     }
 
-    pub(crate) fn set_root_path(&mut self, root_path: String) {
+    /// Restarts at a new root, dropping everything the old one placed. The caller
+    /// starts the listing, and aborts the tasks the old root left running.
+    pub(crate) fn reroot(&mut self, root_path: String) {
         self.root_path = root_path;
+        self.selected_index = None;
+        self.restart();
     }
 
     pub(crate) fn rows(&self) -> &[Row] {
@@ -333,5 +337,201 @@ impl Tree {
     /// Every row, for a browser with no filter open at all.
     pub(crate) fn unfiltered(&self) -> VisibleRows {
         VisibleRows::All(self.rows.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Expansion, Tree};
+    use crate::{DirectoryEntry, EntryKind};
+
+    fn entry(name: &str, navigable: bool) -> DirectoryEntry {
+        DirectoryEntry {
+            name: name.into(),
+            kind: if navigable {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            navigable,
+        }
+    }
+
+    fn names(tree: &Tree) -> Vec<&str> {
+        tree.rows().iter().map(super::Row::name).collect()
+    }
+
+    fn placed(tree: &Tree) -> Vec<(&str, u16)> {
+        tree.rows()
+            .iter()
+            .map(|row| (row.name(), row.depth()))
+            .collect()
+    }
+
+    fn tree() -> Tree {
+        let mut tree = Tree::new("/root".into());
+        tree.extend_root(vec![
+            entry("first", true),
+            entry("second", true),
+            entry("note.txt", false),
+        ]);
+        tree.finish_root(Ok(()));
+        tree
+    }
+
+    /// The insertion point is carried across groups, so a second group lands
+    /// after the first rather than on top of it.
+    #[test]
+    fn groups_of_one_expansion_land_in_order() {
+        let mut tree = tree();
+        assert_eq!(tree.begin_expansion(0, 1), "/root/first");
+        tree.extend_child(1, vec![entry("a.txt", false)]);
+        tree.extend_child(1, vec![entry("b.txt", false)]);
+        tree.finish_child(1, Ok(()));
+
+        assert_eq!(
+            names(&tree),
+            ["first", "a.txt", "b.txt", "second", "note.txt"]
+        );
+        assert_eq!(
+            tree.rows()[0].expansion(),
+            &Expansion::Expanded { request_id: 1 }
+        );
+    }
+
+    /// A second expansion further down keeps its own children when the first one
+    /// is still streaming into the rows above it.
+    #[test]
+    fn an_earlier_expansion_pushes_a_later_one_down() {
+        let mut tree = tree();
+        tree.begin_expansion(0, 1);
+        tree.extend_child(1, vec![entry("a.txt", false)]);
+        // `second` has moved to row 2 by now.
+        assert_eq!(tree.rows()[2].name(), "second");
+        tree.begin_expansion(2, 2);
+        tree.extend_child(1, vec![entry("b.txt", false)]);
+        tree.extend_child(2, vec![entry("c.txt", false)]);
+
+        assert_eq!(
+            names(&tree),
+            ["first", "a.txt", "b.txt", "second", "c.txt", "note.txt"]
+        );
+    }
+
+    /// A root group arriving at the very index an expansion's next group is due
+    /// at is a sibling of that expansion's parent, not of its children, so the
+    /// children still land ahead of it. Depth is the only thing that tells the
+    /// two apart.
+    #[test]
+    fn a_root_group_lands_after_the_subtree_of_a_directory_expanded_mid_stream() {
+        let mut tree = Tree::new("/root".into());
+        tree.extend_root(vec![entry("dir", true)]);
+        tree.begin_expansion(0, 1);
+        tree.extend_child(1, vec![entry("a.txt", false)]);
+        // The root listing is still streaming, and its next group appends at the
+        // index the expansion is about to fill.
+        tree.extend_root(vec![entry("sibling.txt", false)]);
+        tree.extend_child(1, vec![entry("b.txt", false)]);
+
+        assert_eq!(
+            placed(&tree),
+            [("dir", 0), ("a.txt", 1), ("b.txt", 1), ("sibling.txt", 0)]
+        );
+    }
+
+    /// The mirror case: rows deeper than an expansion's children belong inside
+    /// the subtree they landed in, so the parent's next group goes after them.
+    #[test]
+    fn a_nested_expansions_children_land_ahead_of_its_parents_later_groups() {
+        let mut tree = Tree::new("/root".into());
+        tree.extend_root(vec![entry("dir", true)]);
+        tree.begin_expansion(0, 1);
+        tree.extend_child(1, vec![entry("nested", true)]);
+        tree.begin_expansion(1, 2);
+        tree.extend_child(2, vec![entry("deep.txt", false)]);
+        tree.extend_child(1, vec![entry("later.txt", false)]);
+
+        assert_eq!(
+            placed(&tree),
+            [("dir", 0), ("nested", 1), ("deep.txt", 2), ("later.txt", 1)]
+        );
+    }
+
+    /// Collapsing takes the placements inside the subtree with it, so groups
+    /// already in flight for them are dropped rather than misplaced.
+    #[test]
+    fn collapsing_drops_the_expansions_inside_it() {
+        let mut tree = tree();
+        tree.begin_expansion(0, 1);
+        tree.extend_child(1, vec![entry("nested", true)]);
+        tree.begin_expansion(1, 2);
+
+        // Collapsing `first` takes `nested` with it, and reports both so their
+        // listing tasks can be aborted.
+        assert_eq!(tree.collapse(0), [1, 2]);
+        tree.extend_child(2, vec![entry("ghost.txt", false)]);
+        assert_eq!(names(&tree), ["first", "second", "note.txt"]);
+    }
+
+    /// A collapse above a still-streaming expansion walks its insertion point
+    /// back by what was removed, so its next group still lands under it.
+    #[test]
+    fn collapsing_above_a_live_expansion_walks_its_insertion_point_back() {
+        let mut tree = tree();
+        tree.begin_expansion(0, 1);
+        tree.extend_child(1, vec![entry("a.txt", false), entry("b.txt", false)]);
+        tree.finish_child(1, Ok(()));
+        // `second` sits at row 3 now, behind the two children of `first`.
+        tree.begin_expansion(3, 2);
+        tree.extend_child(2, vec![entry("c.txt", false)]);
+
+        tree.collapse(0);
+        tree.extend_child(2, vec![entry("d.txt", false)]);
+
+        assert_eq!(
+            placed(&tree),
+            [
+                ("first", 0),
+                ("second", 0),
+                ("c.txt", 1),
+                ("d.txt", 1),
+                ("note.txt", 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_filter_keeps_matches_and_their_ancestors() {
+        let mut tree = tree();
+        tree.begin_expansion(0, 1);
+        tree.extend_child(1, vec![entry("target.txt", false)]);
+        tree.finish_child(1, Ok(()));
+
+        let window = tree.window("target", None);
+        assert_eq!(window.len(), 2);
+        // The directory is carried along only to place the match under it.
+        assert_eq!(window.row(0), Some(0));
+        assert!(!window.matched(0));
+        assert_eq!(window.row(1), Some(1));
+        assert!(window.matched(1));
+        assert_eq!(window.matches(), Some(1));
+    }
+
+    /// A scope confines matching to one directory, and keeps that directory on
+    /// screen whatever the query does.
+    #[test]
+    fn a_scope_confines_matching_to_the_directory_it_names() {
+        let mut tree = tree();
+        tree.begin_expansion(0, 1);
+        tree.extend_child(1, vec![entry("note.txt", false)]);
+        tree.finish_child(1, Ok(()));
+
+        // Two rows are named `note.txt`; only the one inside `first` is in scope.
+        let window = tree.window("note", Some("/root/first"));
+        assert_eq!(window.matches(), Some(1));
+        assert_eq!(window.len(), 2);
+        assert_eq!(window.row(0), Some(0));
+        assert!(!window.matched(0));
+        assert_eq!(window.row(1), Some(1));
     }
 }

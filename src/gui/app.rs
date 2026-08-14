@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use super::dock::{self, Action, Browser, Viewer};
 use super::glyph::{self, Side};
 use super::theme::{self, Mode, Palette};
-use super::tree::{Status, Tree};
+use crate::browser::{Expansion, Status, Tree};
 use crate::{Client, ConnectionId, DirectoryEntry};
 
 /// How many entries one listing event may carry.
@@ -103,7 +103,7 @@ impl App {
     fn start_root(&mut self, browser: u64) {
         let path = self
             .browser(browser)
-            .map(|tab| tab.tree.root.clone())
+            .map(|tab| tab.tree.root_path().to_owned())
             .unwrap_or_default();
         self.spawn_listing(browser, Request::Root, path);
     }
@@ -187,7 +187,7 @@ impl App {
                     if let Some(tab) = self.browser(browser) {
                         match request {
                             Request::Root => tab.tree.finish_root(result),
-                            Request::Child(id) => tab.tree.finish_child(id, &result),
+                            Request::Child(id) => tab.tree.finish_child(id, result),
                         }
                     }
                 }
@@ -213,7 +213,7 @@ impl App {
                     let request = self.id();
                     let path = self
                         .browser(browser)
-                        .and_then(|tab| tab.tree.toggle(row, request));
+                        .and_then(|tab| toggle(&mut tab.tree, row, request));
                     if let Some(path) = path {
                         self.spawn_listing(browser, Request::Child(request), path);
                     }
@@ -225,6 +225,30 @@ impl App {
                     self.start_root(browser);
                 }
             }
+        }
+    }
+}
+
+/// Opens a closed directory or closes an open one, reporting the path to list
+/// when it opens.
+///
+/// A failed expansion reopens rather than closing, because clicking one again is
+/// a retry -- but it is closed first, so whatever the failed attempt managed to
+/// place is gone before the new listing starts filling the same spot.
+fn toggle(tree: &mut Tree, index: usize, request: u64) -> Option<String> {
+    let row = tree.rows().get(index)?;
+    if !row.entry().navigable {
+        return None;
+    }
+    match row.expansion() {
+        Expansion::Collapsed => Some(tree.begin_expansion(index, request)),
+        Expansion::Failed { .. } => {
+            tree.collapse(index);
+            Some(tree.begin_expansion(index, request))
+        }
+        Expansion::Loading { .. } | Expansion::Expanded { .. } => {
+            tree.collapse(index);
+            None
         }
     }
 }
@@ -256,7 +280,7 @@ impl App {
         let ctx = root.ctx().clone();
         let path = self
             .focused()
-            .map(|tab| tab.tree.root.clone())
+            .map(|tab| tab.tree.root_path().to_owned())
             .unwrap_or_default();
         let browser = self.focused().map(|tab| tab.id);
         let mut toggle = false;

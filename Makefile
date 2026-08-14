@@ -21,9 +21,11 @@ lint:
 slim-server:
 	cargo check --no-default-features --features server --bin file-peeker-server
 
+# The desktop front end has no tests of its own: the model both front ends drive
+# lives in `browser`, which a default build compiles, and what is left in `gui` is
+# drawing. `make lint` still builds its test targets so they cannot rot.
 test:
 	cargo test
-	cargo test --features gui gui::
 
 docs-check:
 	bash scripts/check-docs.sh

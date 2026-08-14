@@ -96,7 +96,8 @@ the rule is now written down and only partly enforced. A module may name:
 | `protocol` | nothing else in the crate |
 | `client` | `fs`, `protocol`, `server` |
 | `server` | `fs`, `protocol` — never `client` |
-| `tui`, `cli` | the crate-root facade (`Client`, the entry types) |
+| `browser` | the crate-root entry types — never a front end, a client or a runtime |
+| `tui`, `gui`, `cli` | the crate-root facade (`Client`, the entry types), and `browser` |
 
 `client` naming `server` is the point: a local connection embeds one. The
 reverse stays forbidden and stays enforced. `client` and the facade are gated on
@@ -252,6 +253,42 @@ and its operations belong to `Client`, and callers name a connection with a
 `ConnectionId` rather than holding a handle. A type earns its place by owning an
 invariant; that one owned none.
 
+### Browser model
+
+Status: implemented.
+
+```text
+src/browser/
+├── mod.rs
+├── tree.rs
+└── window.rs
+```
+
+The headless model of one browsed root, driven by both front ends. It knows how
+to place a listing that arrives in groups and what a filter leaves on screen; it
+knows nothing about frames, terminals or servers.
+
+- `tree.rs` owns `Tree`: rows in pre-order, the in-flight expansions filling
+  them, and the selection index. The owner starts a listing, feeds each group in
+  with `extend_root`/`extend_child`, and closes it with the matching `finish`.
+  `collapse` hands back the requests it dropped, so whoever holds the tasks can
+  abort them.
+- `window.rs` owns `VisibleRows`: the matches a query leaves on screen plus the
+  ancestors that place them. Filtering never removes rows, because every
+  insertion addresses rows by index.
+- `mod.rs` holds `Row`, `Expansion` and `Status`.
+
+The seam with the front ends is the viewport. A terminal owns a scroll offset and
+a height it only learns at render time; a desktop scroll area owns its own
+virtualisation and asks for rows by position. Neither belongs to the model, so
+both ask it the same two questions — how many rows are visible, and which row
+sits at a position.
+
+`Tree` takes the query and the scope as arguments rather than storing them. The
+TUI's prompt is a keystroke-at-a-time state machine with directory descents; the
+GUI's is a text field. Only the resulting query is common, so only the query
+crosses down.
+
 ### TUI
 
 Status: implemented.
@@ -276,9 +313,10 @@ src/tui/
   exists in `Starting` before a connection does, and outlives a failed open.
 - `app/view.rs` renders application state without owning async tasks or mutating
   browser state.
-- `browser_context.rs` is the deep browsing module: selected listing source,
-  current path, entries, selection, listing generation, task cancellation,
-  stale-result rejection and terminal listing state.
+- `browser_context.rs` is the deep browsing module: it holds a `browser::Tree`
+  and adds everything the terminal puts around one — the viewport, the filter
+  prompt with its directory descents and tab completion, the listing tasks,
+  listing generation, task cancellation and stale-result rejection.
 
 This split keeps high-level orchestration visible without fragmenting
 `BrowserContext` into state, event and task files that would need to understand
