@@ -614,19 +614,20 @@ crate changes along the way.
 | 1 | **An empty server** — see below | **A server that outlives its client** |
 | 2 | **An empty TUI client** — see below | **A front end that attaches, detaches and survives its server** |
 | 3 | The task runtime, with test kinds only | Lifecycle, tree, cancellation, admission, events |
-| 4 | `fs` and `host_path` | The filesystem core, with its own tests |
-| 5 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
-| 6 | Views and actions in the client protocol; the TUI renders a tab through them | **Local walking skeleton** |
-| 7 | Persistence: `sessions/default.json`, snapshots, backups, restore | Reattach and restart |
-| 8 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
-| 9 | Machines: bridge, ControlMaster, approval-based install, remote reconnect, aggregation in the TUI | Several machines in one client |
+| 4 | **Machines** — see below: releases, approval-based install, the bridge, ControlMaster, several machines in the TUI, `--machine` | **Several machines in one client** |
+| 5 | `fs` and `host_path` | The filesystem core, with its own tests |
+| 6 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
+| 7 | Views and actions in the client protocol; the TUI renders a tab through them | **Local walking skeleton** |
+| 8 | Persistence: `sessions/default.json`, snapshots, backups, restore | Reattach and restart |
+| 9 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
 | 10 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
 | 11 | `Preview`, `DirSize`, `Refresh` | TODO items 11, 12 and 13 |
 | 12 | The desktop front end, as a second client | TODO items 6 and 9 |
 | 13 | Cutover: `fpk` becomes `file-peeker`, and `old/` is deleted | One crate again |
 
-Steps 3 and 4 do not depend on each other. Step 6 is the first one a person can
-use to browse.
+Step 7 is the first one a person can use to browse. Machines come before
+browsing so that everything after them is built against several machines from
+the start, rather than against one and widened later.
 
 ### Step 1: an empty server
 
@@ -671,7 +672,7 @@ already attaches, detaches and reconnects.
   server's version and pid, a sidebar, an empty body that says there is nothing
   to browse yet, and a status line with the keys.
 - **The sidebar lists machines, as herdr's does.** It holds `local` and only
-  `local` until step 9 reads `machines.toml`; the list is a list from the start,
+  `local` until step 4 reads `machines.toml`; the list is a list from the start,
   so adding machines adds rows rather than a layout. Each row shows the machine's
   label and a state — attaching, attached, disconnected — and the selected row is
   the one the body and the title describe. `j`/`k` and the arrow keys move the
@@ -721,8 +722,90 @@ After step 3, the sidebar gained its lower half, as herdr splits its sidebar:
 - **The server holds a task runtime** from here on, and cancels every task when
   it stops. Its one kind so far is `demo.count`, started by `fpk task demo`
   through the API's `task.demo`: it counts for a while, reports progress, and
-  fails halfway when asked, so the pane has something to show before step 5's
+  fails halfway when asked, so the pane has something to show before step 6's
   real kinds. It is `Background`, so a second one queues behind the first.
+
+### Step 4: machines
+
+Several machines in one client, as herdr's 0.9 has them. Nothing browses yet, so
+what a remote machine shows is its own server's tasks — which is enough to prove
+the connection, the reconnects and the aggregation everything later rides on.
+
+- **Releases, as herdr publishes them.** Pushing a `v*` tag builds `fpk` for
+  Linux and macOS on x86_64 and aarch64 and publishes the four binaries to
+  GitHub releases as `fpk-<os>-<arch>`, with a `SHA256SUMS`, as herdr publishes
+  `herdr-<os>-<arch>`. The Linux builds are static (musl), so one binary runs on
+  any distribution's C library, old cluster nodes included. A tag that does not
+  match the crate's version fails the release. Releases are only what release
+  builds install; nothing in development waits on one.
+- **Install is approval-based, and follows how the client was built.**
+  `fpk machine add <label> <ssh-target>` probes the host for
+  `~/.file-peeker/bin/fpk` and what it is. When none is there, or it is not the
+  build this client needs, setup says what it found and asks before installing.
+  Declined or failed, the machine is not saved. Running `machine add` again on a
+  saved label probes again and offers to update. Where the binary comes from is
+  decided by the client's own build profile, which Rust fixes at compile time:
+
+  | | A release build | A dev build |
+  | --- | --- | --- |
+  | Is | `cargo build --release`, and every published binary | `cargo build`, `cargo run` |
+  | Installs by | Downloading the release of **this client's version** from GitHub, as herdr does | Uploading **the source tree this binary was built from** and building it on the host |
+  | The host needs | Outbound HTTPS, and `curl` or `wget` | A Rust toolchain |
+  | Reinstalls when | The host's version differs | The source differs: a hash of the uploaded files, recorded beside the binary |
+
+  A **release** install runs a short script on the host over SSH: `uname` picks
+  the asset, the download is checked against `SHA256SUMS`, and the binary lands
+  at `~/.file-peeker/bin/fpk` — never on the host's `PATH`, never anywhere else.
+  A version with no release cannot be installed this way, and setup says so
+  rather than guessing at another; a local `--release` build of an unreleased
+  version is the one place that bites.
+
+  A **dev** install uploads the files `git ls-files` lists under the directory
+  the binary was compiled in — recorded at build time from
+  `CARGO_MANIFEST_DIR` — and runs `cargo install --debug --locked` on them into
+  `~/.file-peeker/bin/`, debug because it builds far faster and a dev host is
+  for trying things. The client hashes what it uploads, the host records that
+  hash once the build succeeds, and a later probe that finds a different hash
+  offers to rebuild. Editing the source and running `machine add` again is how
+  a remote host catches up. This is the shipping crate's source install, made
+  the rule for dev builds rather than a flag.
+
+  Either way one host holds one `fpk`, and the probe says which it is:
+  `release v0.1.0`, or `dev, source a1b2c3d4`.
+- **`machines.toml`** holds what `machine add` saved: an ID, the label, the SSH
+  target, and whether it is enabled. `fpk machine list` shows them and
+  `fpk machine remove <label>` forgets one, leaving its server and tasks
+  running.
+- **The bridge.** The client runs `ssh <target> ~/.file-peeker/bin/fpk bridge`,
+  and speaks the client protocol over that process's standard input and
+  output; on the host, the bridge relays them to `file-peeker-client.sock`. No
+  port listens anywhere and no socket path is forwarded. **A bridge never
+  installs and starts a server only when asked**: `fpk bridge --start` starts
+  one first, and setup is the one caller that passes it.
+- **SSH is shared, as herdr shares it.** With `[remote] manage_ssh_config =
+  true` in `config.toml` — the default — the client adds `ControlMaster=auto`, a
+  `ControlPath` under `~/.file-peeker/ssh/` and `ControlPersist=600`, so setup,
+  every reconnect and `--machine` ride one authenticated connection. Set it to
+  `false` to use your own SSH configuration unchanged. This is the first thing
+  v2 reads from `config.toml`.
+- **A reconnect never prompts.** Setup and `fpk machine login <label>` run SSH
+  interactively, so a password or a keyboard-interactive login can be answered
+  there. Background reconnects run it with `BatchMode=yes`; a host that wants an
+  answer shows as needing a login until the user runs `machine login`.
+- **The TUI lists every machine.** `local` first, then each enabled saved
+  machine in the order it was added, each with its own connection and backoff.
+  `local` opens at once rather than waiting for the remote ones. Selecting a
+  machine shows its tasks in the lower half. Besides attaching, attached and
+  disconnected, a machine can **need attention** — not installed, incompatible,
+  or needing a login — and the main pane says which and what to run. `s` on a
+  disconnected remote machine reconnects with `bridge --start`.
+- **`--machine <label>` runs a command on a saved machine**: `fpk --machine
+  workbox task demo` runs `~/.file-peeker/bin/fpk task demo` there over the
+  shared connection and passes its output through.
+
+Left for later: closing an idle bridge, named sessions, and herdr's version
+negotiation — here a host whose protocol differs is updated, not negotiated
+with.
 
 ## What this replaces at cutover
 

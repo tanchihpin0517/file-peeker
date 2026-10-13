@@ -119,8 +119,8 @@ after.
   A public JSON API sits beside the private client protocol, and the CLI is a
   client of the API. Built at the repository root in fourteen steps, 0 to 13,
   ending in cutover. Step 1 is an empty server — started, found, answering and stopped,
-  with nothing inside — step 2 an empty TUI client attached to it, and step 6 a
-  local walking skeleton. The binary is
+  with nothing inside — step 2 an empty TUI client attached to it, step 4 several
+  machines in one client, and step 7 a local walking skeleton. The binary is
   `fpk` until cutover. Open: whether round-tripped input needs an optimistic
   cursor over SSH.
   Step 0 is done: v2 is the package `file-peeker` at the repository root, and the
@@ -214,13 +214,13 @@ items is now built in v2 rather than against the current crate.
 
    | Item | v2 step |
    | --- | --- |
-   | 4 and 5 — sorting and segmented rows | 5, sessions on the server |
-   | 7 — configuration | 6, client-side `config.toml`; the server reads no UI settings |
-   | 9 — several connections | 9, machines |
+   | 9 — several connections | 4, machines |
+   | 4 and 5 — sorting and segmented rows | 6, sessions on the server |
+   | 7 — configuration | 4 reads `config.toml` first, for `[remote]`; 7 adds the UI's settings; the server reads none |
    | 10 — transfer progress and queue | 10, copies |
    | 11, 12, 13 — preview read, refresh, directory sizes | 11 |
    | 6 — desktop keyboard and focus | 12, the desktop client |
-   | 18 — the collapse leak | 5, by construction: a collapse cancels on the server |
+   | 18 — the collapse leak | 6, by construction: a collapse cancels on the server |
 
 4. The palette and drawing items — 14 to 17 and 19 — belong to the desktop client,
    step 12. The current GUI is replaced rather than ported, so work on them there

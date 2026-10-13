@@ -9,7 +9,7 @@ is the proposal this implements and still owns everything not built yet.
 
 Implemented in [`src/task/`](../src/task/mod.rs). The server holds one runtime
 from startup to shutdown. Its only kind so far is `demo.count`; the filesystem
-kinds arrive in step 5 of the build order.
+kinds arrive in step 6 of the build order.
 
 ## The rule
 
