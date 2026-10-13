@@ -199,8 +199,10 @@ reads them from configuration yet.
 
 `Runtime::cancel(id)` cancels a task and its subtree. It is idempotent, and a
 no-op for an unknown or already settled task, so a caller holding an ID past its
-task's end need not check first. `cancel_all` cancels every unsettled task; the
-server calls it when it stops.
+task's end need not check first. `cancel_all` cancels every unsettled task, and
+`idle()` resolves once none is left unsettled; a stopping server calls the one,
+then waits on the other, so its clients see how each task ended before their
+streams close.
 
 | Cancelled while | Happens |
 | --- | --- |

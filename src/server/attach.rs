@@ -24,19 +24,16 @@ use crate::{
 pub(super) struct Attach {
     info: Arc<ServerInfo>,
     runtime: Runtime,
-    shutdown: CancellationToken,
+    /// Cancelled once a stopping server's tasks have settled.
+    closing: CancellationToken,
 }
 
 impl Attach {
-    pub(super) fn new(
-        info: Arc<ServerInfo>,
-        runtime: Runtime,
-        shutdown: CancellationToken,
-    ) -> Self {
+    pub(super) fn new(info: Arc<ServerInfo>, runtime: Runtime, closing: CancellationToken) -> Self {
         Self {
             info,
             runtime,
-            shutdown,
+            closing,
         }
     }
 }
@@ -69,10 +66,10 @@ impl ClientProtocol for Attach {
         }))
     }
 
-    /// Sends `Hello`, then holds the stream until the client lets go or the
-    /// server stops. Ending it on stop is also what lets the transport's graceful
-    /// shutdown finish: it waits for open streams, and this one would never end
-    /// on its own.
+    /// Sends `Hello`, then holds the stream until the client lets go or a
+    /// stopping server closes it, once its tasks have settled. Closing it is
+    /// also what lets the transport's graceful shutdown finish: that waits for
+    /// open streams, and this one would never end on its own.
     async fn watch(
         &self,
         _request: Request<WatchRequest>,
@@ -88,14 +85,18 @@ impl ClientProtocol for Attach {
         tokio::spawn(forward_tasks(
             self.runtime.clone(),
             events,
-            self.shutdown.clone(),
+            self.closing.clone(),
         ));
         Ok(Response::new(ReceiverStream::new(stream)))
     }
 }
 
 /// Sends a snapshot, then every change, until the client lets go or the server
-/// stops.
+/// closes the stream.
+///
+/// A stopping server closes its streams only once its tasks have settled, and
+/// each stream's last event is a fresh snapshot: every task as it ended, without
+/// depending on the forwarder having drained the changes still queued for it.
 ///
 /// Subscribed before the snapshot is taken, so nothing falls between the two.
 /// Each change is sent as the task is *now* rather than as the event described
@@ -104,7 +105,7 @@ impl ClientProtocol for Attach {
 async fn forward_tasks(
     runtime: Runtime,
     events: mpsc::Sender<Result<ServerEvent, Status>>,
-    shutdown: CancellationToken,
+    closing: CancellationToken,
 ) {
     let mut changes = runtime.subscribe();
     if events.send(Ok(snapshot(&runtime))).await.is_err() {
@@ -112,7 +113,10 @@ async fn forward_tasks(
     }
     loop {
         let change = tokio::select! {
-            () = shutdown.cancelled() => return,
+            () = closing.cancelled() => {
+                let _ = events.send(Ok(snapshot(&runtime))).await;
+                return;
+            }
             () = events.closed() => {
                 info!("client detached");
                 return;

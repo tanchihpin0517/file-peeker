@@ -189,6 +189,9 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
 
     let info = Arc::new(ServerInfo::new(home));
     let runtime = Runtime::new(task::Config::default());
+    // Ends the `Watch` streams. Separate from `shutdown`, which starts the stop:
+    // the streams outlive it until the tasks they report have settled.
+    let closing = CancellationToken::new();
     info!(
         pid = info.pid,
         version = VERSION,
@@ -209,7 +212,7 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
         .add_service(ClientProtocolServer::new(attach::Attach::new(
             Arc::clone(&info),
             runtime.clone(),
-            shutdown.clone(),
+            closing.clone(),
         )))
         .serve_with_incoming_shutdown(
             UnixListenerStream::new(client_listener),
@@ -219,10 +222,20 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
 
     shutdown.cancelled().await;
     info!("server stopping");
-    // Tasks do not survive the server: cancelled now, they get the shutdown
-    // timeout to clean up rather than being cut off mid-write.
+    // One budget for the whole stop, so waiting on tasks never makes it longer.
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+    // Tasks do not survive the server. Cancelled now, they get the budget to
+    // clean up rather than being cut off mid-write, and the clients watching
+    // them see how each ended before their streams close.
     runtime.cancel_all();
-    let finished = tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+    if tokio::time::timeout_at(deadline, runtime.idle())
+        .await
+        .is_err()
+    {
+        warn!("tasks did not finish cancelling in time; closing anyway");
+    }
+    closing.cancel();
+    let finished = tokio::time::timeout_at(deadline, async {
         let api = api.await;
         let client = client.await;
         (api, client)

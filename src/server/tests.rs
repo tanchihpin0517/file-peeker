@@ -347,3 +347,42 @@ async fn stopping_the_server_cancels_its_tasks() {
         started.elapsed()
     );
 }
+
+#[tokio::test]
+async fn a_stopping_server_shows_its_watchers_how_each_task_ended() {
+    use crate::{
+        client::tasks::{TaskStatus, TaskUpdate},
+        protocol::api::DemoParams,
+    };
+
+    let server = Running::start().await;
+    let mut watching = client::watch(&server.home).await.unwrap();
+    watching.next().await;
+    let id = ApiClient::connect(&server.home)
+        .await
+        .unwrap()
+        .submit_demo(&DemoParams {
+            seconds: 60,
+            fail: false,
+        })
+        .await
+        .unwrap();
+    while let Some(TaskUpdate::Changed(task)) = watching.next().await {
+        if task.status == TaskStatus::Running {
+            break;
+        }
+    }
+
+    server.shutdown.cancel();
+    let mut last = None;
+    while let Some(update) = watching.next().await {
+        last = Some(update);
+    }
+    // The stream's last word is a snapshot of every task as it ended.
+    let Some(TaskUpdate::Snapshot(tasks)) = last else {
+        panic!("the stream did not end on a snapshot: {last:?}");
+    };
+    let demo = tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(demo.status, TaskStatus::Cancelled);
+    server.task.await.unwrap().unwrap();
+}

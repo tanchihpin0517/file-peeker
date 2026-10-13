@@ -61,6 +61,8 @@ A client that attaches calls `Watch` and holds the stream open. The server
 1. **`Hello`**, so the client knows the stream is live.
 2. **`TaskSnapshot`**: every task the runtime retains.
 3. **`TaskChanged`**, once per runtime event, for as long as the stream is open.
+4. On a stopping server, once its tasks have settled, a last **`TaskSnapshot`**,
+   and the stream ends.
 
 Three rules keep the client's copy right:
 
@@ -71,9 +73,9 @@ Three rules keep the client's copy right:
 | On `Lagged`, send a **fresh snapshot** | A watcher that fell more than 1024 events behind cannot be told what it missed one change at a time |
 
 A change for a task evicted since its event was sent is skipped: there is
-nothing current to say about it. The stream ends when the client lets go or the
-server stops; ending it on stop is also what lets the transport's graceful
-shutdown finish quickly.
+nothing current to say about it. The stream ends when the client lets go, or
+when a stopping server closes it after its tasks have settled; closing it is also
+what lets the transport's graceful shutdown finish.
 
 ## 4. The wire
 
@@ -162,19 +164,28 @@ again.
 
 ## When the server stops
 
-`fpk server stop`, or `SIGTERM`, takes the same tasks down another way:
+`fpk server stop`, or `SIGTERM`, takes the same tasks down another way, inside
+one five-second budget:
 
 1. The server calls `Runtime::cancel_all`. A running task becomes `Cancelling`,
-   then `Cancelled`; a queued one settles `Cancelled` without running.
-2. Every `Watch` stream ends at the same moment, without forwarding those
-   changes: the forwarder stops on the server's shutdown, not on its tasks
-   settling. The server waits up to five seconds for its tasks and clients to
-   finish before it closes anyway.
-3. Each TUI sees its stream end, dims the machine and its last-known tasks — a
-   running one still shows as running — and backs off reconnecting from one
-   second, doubling up to two minutes. It starts a server again only when the
-   user presses `s`, and that server's first snapshot is empty, which clears the
-   pane.
+   then `Cancelled`; a queued one settles `Cancelled` without running. These
+   changes reach open `Watch` streams like any other.
+2. It waits, with `Runtime::idle`, for every task to settle. A body that ignores
+   cancellation is waited for only until the budget runs out.
+3. Then it closes the `Watch` streams. Each one's last event is a fresh
+   **snapshot**: every task as it ended, whether or not the forwarder had drained
+   the changes still queued for it. The rest of the budget goes to clients
+   letting go.
+4. Each TUI applies that snapshot — a task it saw running now shows
+   `cancelled`, and starts its five seconds — then sees the stream end, dims
+   the machine, and backs off reconnecting from one second, doubling up to two
+   minutes. It starts a server again only when the user presses `s`.
+
+```text
+ fpk · local · disconnected
+ Tasks───────────────────┤
+ – demo.count  cancelled │
+```
 
 Tasks do not survive a server restart: a new server starts with an empty
 runtime, and its first snapshot is empty.
@@ -188,5 +199,5 @@ runtime, and its first snapshot is empty.
 | Event buffer before a watcher lags | 1024 events | `task::Config::event_buffer` |
 | TUI redraw and expiry tick | 250 ms | `tui` |
 | Settled task lingers | 5 s | `tui::app::SETTLED_LINGER` |
-| Shutdown waits for clients | 5 s | `server` |
+| Stop budget: tasks settling, then clients letting go | 5 s in all | `server` |
 | Reconnect backoff | 1 s doubling to 120 s | `tui::connection::Backoff` |

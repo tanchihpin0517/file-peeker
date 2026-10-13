@@ -791,3 +791,32 @@ async fn a_snapshot_is_in_submission_order() {
     let listed: Vec<TaskId> = runtime.tasks().into_iter().map(|info| info.id).collect();
     assert_eq!(listed, ids);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_waits_for_every_task_to_settle() {
+    let runtime = runtime();
+    tokio::time::timeout(PATIENCE, runtime.idle())
+        .await
+        .expect("an empty runtime is idle at once");
+
+    let wait = Wait::new(AdmissionClass::Interactive);
+    let gate = Arc::clone(&wait.gate);
+    let handle = runtime.submit(wait);
+    until(&runtime, handle.id(), |state| {
+        matches!(state, TaskState::Running)
+    })
+    .await;
+    let idle = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.idle().await }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!idle.is_finished(), "idle while a task still ran");
+
+    gate.notify_one();
+    tokio::time::timeout(PATIENCE, idle)
+        .await
+        .expect("never idle after the last task settled")
+        .unwrap();
+    handle.await.unwrap();
+}

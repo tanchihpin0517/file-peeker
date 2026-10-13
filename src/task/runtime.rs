@@ -171,6 +171,25 @@ impl Runtime {
         }
     }
 
+    /// Resolves once no task is unsettled: every one has succeeded, failed or
+    /// been cancelled. Resolves at once when there are none.
+    pub(crate) async fn idle(&self) {
+        loop {
+            let notified = self.inner.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let busy = self
+                .lock()
+                .tasks
+                .values()
+                .any(|entry| !entry.info.state.is_terminal());
+            if !busy {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Every retained task, in submission order.
     pub(crate) fn tasks(&self) -> Vec<TaskInfo> {
         let registry = self.lock();
