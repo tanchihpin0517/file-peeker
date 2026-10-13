@@ -14,10 +14,11 @@ A proposal for rebuilding File Peeker from scratch around two ideas:
 ## Status
 
 This is a **future possibility**, not current behavior. What is built is
-described by [Architecture](../architecture.md) and the documents beside it,
+described by [Architecture](../../old/docs/architecture.md) and the documents beside it,
 and those stay true of the current crate while it ships.
 
-v2 is a **rewrite, not a migration**. It starts as a new crate, carries no
+v2 is a **rewrite, not a migration**. It lives at the repository root and the
+current crate lives in `old/`, a workspace of its own. v2 carries no
 compatibility with the current crate's wire protocol, layering or document
 boundaries, and replaces the current crate when it does everything that crate
 does. The current crate is a behavior reference: code may be copied from it where
@@ -505,12 +506,11 @@ the few server settings there are — admission caps and the save debounce.
 
 ## Module structure
 
-The new crate is `crates/next/`, a second workspace member that depends on
-nothing in the current crate. `next` is a working name; it becomes `file-peeker`
-at cutover.
+v2 is the package `file-peeker` at the repository root. It depends on nothing in
+`old/`, the shipping crate's own workspace, renamed `file-peeker-old`.
 
 ```text
-crates/next/src/
+src/
 ├── task/          the runtime: ids, kinds, lifecycle, tree, admission, resources, events
 ├── fs/            host-local filesystem work; task-agnostic, takes a CancellationToken
 ├── host_path.rs   lossless names and paths
@@ -578,7 +578,7 @@ crate changes along the way.
 
 | Step | Lands | Proves |
 | --- | --- | --- |
-| 0 | `crates/next` in the workspace, under `make check` and CI | The second crate cannot rot |
+| 0 | v2 at the repository root and the shipping crate in `old/`, both under `make verify` and CI | Neither crate can rot |
 | 1 | **An empty server** — see below | **A server that outlives its client** |
 | 2 | The task runtime, with test kinds only | Lifecycle, tree, cancellation, admission, events |
 | 3 | `fs` and `host_path` | The filesystem core, with its own tests |
@@ -590,7 +590,7 @@ crate changes along the way.
 | 9 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
 | 10 | `Preview`, `DirSize`, `Refresh` | TODO items 11, 12 and 13 |
 | 11 | The desktop front end, as a second client | TODO items 6 and 9 |
-| 12 | Cutover: v2 takes the `file-peeker` name, the current crate and its documents go | One crate again |
+| 12 | Cutover: `fpk` becomes `file-peeker`, and `old/` is deleted | One crate again |
 
 Steps 2 and 3 do not depend on each other. Step 5 is the first one a person can
 use to browse.
@@ -627,7 +627,7 @@ server running, and the next `file-peeker` finds it.
 
 ## What this replaces at cutover
 
-Every current document under `docs/` describes the current crate and is replaced,
+Every document under `old/docs/` describes the current crate and is replaced,
 not amended. v2 grows its own documents as each step lands: architecture, the
 task runtime, sessions and views, machines, the client protocol and the API
 reference.

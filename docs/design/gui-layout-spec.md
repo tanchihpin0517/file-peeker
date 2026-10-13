@@ -12,7 +12,7 @@ restate.
 ## Status
 
 **Future possibility.** None of this is implemented. `crate::gui` renders one
-layout with one palette in `theme.rs`; [Code structure](../code-structure.md)
+layout with one palette in `theme.rs`; [Code structure](../../old/docs/code-structure.md)
 owns where that code lives.
 
 ## What must not change

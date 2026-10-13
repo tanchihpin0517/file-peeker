@@ -1,59 +1,39 @@
-//! File Peeker: browse and open files on a local or remote host.
+//! File Peeker v2: a persistent server per machine, run by tasks.
 //!
-//! One package, four binaries. The shared layers are always compiled:
+//! This crate is the rewrite proposed in `docs/design/v2-architecture.md`. It
+//! grows one build step at a time; it depends on nothing in the shipping crate in
+//! `old/`, and replaces it at cutover.
 //!
-//! - [`fs`] performs host-local filesystem work, transport-neutral.
-//! - [`protocol`] is the generated wire contract both sides of the gRPC hop use.
+//! One binary, `fpk`, runs in one of two roles:
 //!
-//! The remaining layers are feature-gated so a slim build can leave them out —
-//! the remote installer provisions a server with
-//! `--no-default-features --features server`:
+//! - [`server`] is the persistent per-user server: `fpk server`.
+//! - [`cli`] is everything else, a client of that server through [`client`].
 //!
-//! - `client` (implied by `cli` and `tui`) adds `Client` and its connections.
-//! - `browser` (implied by `tui` and `gui`) holds the headless model of a browsed
-//!   root, so the two front ends place a streaming listing the same way.
-//! - `cli`, `server`, `tui`, and `gui` each add one binary's logic, exposed as a
-//!   single `run` entry point that the matching `src/bin` shim calls. `gui` is
-//!   the only one left out of `default`, because eframe brings a window system
-//!   and a GPU backend with it.
+//! They share only [`home`], which says where the server's files live, and
+//! [`protocol`], the two surfaces between them. `client` never names `server`:
+//! the only way from one to the other is a socket.
 
-#[cfg(any(feature = "tui", feature = "gui"))]
-mod browser;
-#[cfg(feature = "client")]
+mod cli;
 mod client;
-mod fs;
-mod host_path;
-pub(crate) mod protocol;
-#[cfg(all(test, feature = "client"))]
-mod test_support;
+mod home;
+mod protocol;
+mod server;
 
-#[cfg(feature = "cli")]
-pub mod cli;
-#[cfg(feature = "gui")]
-pub mod gui;
-#[cfg(feature = "server-core")]
-pub mod server;
-#[cfg(feature = "tui")]
-pub mod tui;
+use std::process::ExitCode;
 
-#[cfg(feature = "client")]
-pub(crate) use client::connection::ServerLocation;
-#[cfg(feature = "client")]
-pub(crate) use client::directory::{DirectoryEntry, EntryKind, EntryStream, WalkEntry, WalkStream};
-#[cfg(feature = "client")]
-pub(crate) use client::{Client, ConnectionId, CopyConflict, CopyResult};
-
-#[cfg(all(test, feature = "client"))]
-mod tests {
-    use std::sync::Arc;
-
-    use super::Client;
-
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    #[test]
-    fn shared_objects_are_thread_safe() {
-        assert_send_sync::<Client>();
-        assert_send_sync::<Arc<Client>>();
+/// Runs `fpk` with the process's arguments.
+#[must_use]
+pub fn run() -> ExitCode {
+    let invocation = cli::parse();
+    let home = match home::Home::from_env() {
+        Ok(home) => home,
+        Err(error) => {
+            eprintln!("fpk: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match invocation {
+        cli::Invocation::Server => server::run(&home),
+        cli::Invocation::Client(command) => cli::execute(&home, command),
     }
 }

@@ -65,7 +65,7 @@ enum TestCommand {
 #[tokio::main]
 pub async fn run() -> io::Result<()> {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn,file_peeker=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("warn,file_peeker_old=debug"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

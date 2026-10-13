@@ -1,99 +1,40 @@
-[workspace]
-# The root package is the shipping crate. `crates/next` is v2, the rewrite
-# proposed in docs/design/v2-architecture.md; it depends on nothing here and
-# replaces this package at cutover. The root stays the only default member, so a
-# bare `cargo build` here still means the shipping crate.
-members = ["crates/next"]
-# Kept explicit: an edition 2024 package outside a workspace would default to
-# resolver 3 and rewrite Cargo.lock.
-resolver = "2"
-
-# Shared by both members, so v2 starts under the same lint bar.
-[workspace.lints.rust]
-unreachable_pub = "warn"
-unsafe_code = "forbid"
-
-[workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+# File Peeker v2. The shipping crate it replaces lives in `old/` as a workspace of
+# its own until cutover; nothing here names it, and cargo never reaches it from
+# here.
 
 [package]
 name = "file-peeker"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
-rust-version = "1.88"
+# `File::try_lock` is what holds the single-instance lock.
+rust-version = "1.89"
 license = "Apache-2.0"
 publish = false
 autobins = false
 
-[features]
-default = ["cli", "server", "tui"]
-# Each binary target carries its feature as `required-features`, so a slim build
-# such as `--no-default-features --features server` skips the other two entirely.
-# That is how the remote installer provisions a server without building the
-# front ends. `protocol` and `fs` stay unconditional: both sides of the wire use
-# them, which is also why prost and tonic cannot be gated.
-cli = ["client", "dep:tracing-subscriber"]
-server = ["server-core"]
-tui = ["client", "dep:crossterm", "dep:ratatui"]
-# The desktop front end. Left out of `default` because eframe pulls in a window
-# system, a GPU backend and their dependency trees; `make lint` still compiles it
-# so it cannot rot. Run it with `cargo run --features gui --bin file-peeker-gui`.
-gui = ["client", "dep:eframe", "dep:egui_dock", "dep:egui_extras"]
-# Internal: the Client layer the two front ends share. Enable it through `cli`
-# or `tui` rather than directly. It pulls in `server-core` because a local
-# connection runs its own server in-process.
-client = [
-    "server-core",
-    "dep:async-trait",
-    "dep:hyper-util",
-    "dep:serde",
-    "dep:tower",
-    "dep:tracing",
-    "dep:uuid",
-]
-# Internal: the gRPC service and its loopback listener. Both front ends embed it
-# and the server binary wraps it, so enable it through `client` or `server`.
-server-core = []
-
 [dependencies]
-async-trait = { version = "0.1.91", optional = true }
-bytes = "1.12.1"
 clap = { version = "4.6.2", features = ["derive"] }
-crossterm = { version = "0.29.0", features = ["event-stream"], optional = true }
-eframe = { version = "0.36.1", optional = true }
-egui_dock = { version = "0.21.1", optional = true }
-egui_extras = { version = "0.36.1", optional = true }
-getrandom = "0.3.3"
-futures = "0.3.33"
-hyper-util = { version = "0.1.17", features = ["tokio"], optional = true }
+hyper-util = { version = "0.1.17", features = ["tokio"] }
 prost = "0.14.4"
-ratatui = { version = "0.30.0", optional = true }
-serde = { version = "1.0.219", features = ["derive"], optional = true }
+serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-shellexpand = { version = "3.1.2", default-features = false, features = ["full"] }
 thiserror = "2.0.12"
 tokio = { version = "1.52.4", features = [
-    "fs",
     "io-util",
-    "io-std",
     "macros",
     "net",
-    "process",
     "rt-multi-thread",
     "signal",
     "sync",
     "time",
 ] }
-tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-tonic = { version = "0.14.6", features = ["transport"] }
-tonic-health = "0.14.6"
-tonic-prost = "0.14.6"
 tokio-stream = { version = "0.1.17", features = ["net"] }
-tokio-util = { version = "0.7.16", features = ["io"] }
-tower = { version = "0.5.2", optional = true }
-uuid = { version = "1.24.0", features = ["v4"], optional = true }
+tokio-util = { version = "0.7.16", features = ["rt"] }
+tonic = { version = "0.14.6", features = ["transport"] }
+tonic-prost = "0.14.6"
+tower = { version = "0.5.2", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
 prost-build = "0.14.4"
@@ -104,24 +45,13 @@ tonic-prost-build = "0.14.6"
 tempfile = "3.27.0"
 
 [[bin]]
-name = "file-peeker"
-path = "src/bin/file-peeker.rs"
-required-features = ["tui"]
+name = "fpk"
+path = "src/bin/fpk.rs"
 
-[[bin]]
-name = "file-peeker-gui"
-path = "src/bin/file-peeker-gui.rs"
-required-features = ["gui"]
+[lints.rust]
+unreachable_pub = "warn"
+unsafe_code = "forbid"
 
-[[bin]]
-name = "file-peeker-client"
-path = "src/bin/file-peeker-client.rs"
-required-features = ["cli"]
-
-[[bin]]
-name = "file-peeker-server"
-path = "src/bin/file-peeker-server.rs"
-required-features = ["server"]
-
-[lints]
-workspace = true
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

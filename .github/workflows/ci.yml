@@ -21,7 +21,9 @@ env:
   CARGO_INCREMENTAL: 0
 
 # Every job runs a `make` target, so a failure here is reproducible with one
-# command locally. `make verify` is the same set in sequence.
+# command locally. `make verify` is the same set in sequence. Each Rust job runs
+# its target twice: once for v2 at the root, once for the shipping crate in
+# `old/`, which is a workspace of its own with its own Makefile.
 jobs:
   format:
     name: Format
@@ -33,6 +35,7 @@ jobs:
         with:
           cache-key: format
       - run: make fmt
+      - run: make -C old fmt
 
   lint:
     name: Lint
@@ -47,6 +50,7 @@ jobs:
       # Locally clippy findings stay warnings so a half-finished edit still
       # compiles; here the same findings fail the job.
       - run: make lint LINT_DENY=-Dwarnings
+      - run: make -C old lint LINT_DENY=-Dwarnings
 
   test:
     name: Test (${{ matrix.os }})
@@ -66,6 +70,7 @@ jobs:
           cache-key: test-gui
           gui: 'true'
       - run: make test
+      - run: make -C old test
 
   slim-server:
     name: Slim server build
@@ -78,7 +83,7 @@ jobs:
           cache-key: slim-server
       # What the remote installer builds. Kept separate from `test` because its
       # point is the feature set nothing else compiles: server only, no client.
-      - run: make slim-server
+      - run: make -C old slim-server
 
   docs:
     name: Docs

@@ -12,7 +12,7 @@ restate.
 ## Status
 
 **Future possibility.** None of this is implemented. `crate::tui` renders one
-layout with colors written into `app/view.rs`; [TUI implementation](../tui.md)
+layout with colors written into `app/view.rs`; [TUI implementation](../../old/docs/tui.md)
 owns what it does today.
 
 ## What must not change
@@ -276,7 +276,7 @@ tab strip and a modal connection manager. Step 3 below keeps it as the first
 `Layout` implementation rather than retrofitting it into one of the ten, so the
 seam lands before any redesign does.
 
-Per [Code structure](../code-structure.md), `tui` may depend on the crate-root
+Per [Code structure](../../old/docs/code-structure.md), `tui` may depend on the crate-root
 facade and `browser`, and nothing new is needed here: layouts read `App` and
 `BrowserContext` and write to a `Frame`. Keep `tui/mod.rs`'s key mapping pure and
 untouched -- input routing is not part of this change.

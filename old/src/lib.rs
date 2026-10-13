@@ -1,0 +1,59 @@
+//! File Peeker: browse and open files on a local or remote host.
+//!
+//! One package, four binaries. The shared layers are always compiled:
+//!
+//! - [`fs`] performs host-local filesystem work, transport-neutral.
+//! - [`protocol`] is the generated wire contract both sides of the gRPC hop use.
+//!
+//! The remaining layers are feature-gated so a slim build can leave them out —
+//! the remote installer provisions a server with
+//! `--no-default-features --features server`:
+//!
+//! - `client` (implied by `cli` and `tui`) adds `Client` and its connections.
+//! - `browser` (implied by `tui` and `gui`) holds the headless model of a browsed
+//!   root, so the two front ends place a streaming listing the same way.
+//! - `cli`, `server`, `tui`, and `gui` each add one binary's logic, exposed as a
+//!   single `run` entry point that the matching `src/bin` shim calls. `gui` is
+//!   the only one left out of `default`, because eframe brings a window system
+//!   and a GPU backend with it.
+
+#[cfg(any(feature = "tui", feature = "gui"))]
+mod browser;
+#[cfg(feature = "client")]
+mod client;
+mod fs;
+mod host_path;
+pub(crate) mod protocol;
+#[cfg(all(test, feature = "client"))]
+mod test_support;
+
+#[cfg(feature = "cli")]
+pub mod cli;
+#[cfg(feature = "gui")]
+pub mod gui;
+#[cfg(feature = "server-core")]
+pub mod server;
+#[cfg(feature = "tui")]
+pub mod tui;
+
+#[cfg(feature = "client")]
+pub(crate) use client::connection::ServerLocation;
+#[cfg(feature = "client")]
+pub(crate) use client::directory::{DirectoryEntry, EntryKind, EntryStream, WalkEntry, WalkStream};
+#[cfg(feature = "client")]
+pub(crate) use client::{Client, ConnectionId, CopyConflict, CopyResult};
+
+#[cfg(all(test, feature = "client"))]
+mod tests {
+    use std::sync::Arc;
+
+    use super::Client;
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn shared_objects_are_thread_safe() {
+        assert_send_sync::<Client>();
+        assert_send_sync::<Arc<Client>>();
+    }
+}

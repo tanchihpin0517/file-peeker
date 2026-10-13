@@ -17,7 +17,7 @@ sent to someone else.
 ## Status
 
 This gallery is a **future possibility**, not current behavior. The TUI has one
-layout and one hard-coded set of colors today; [TUI implementation](../tui.md)
+layout and one hard-coded set of colors today; [TUI implementation](../../old/docs/tui.md)
 owns what it actually renders.
 
 ## What is being shown

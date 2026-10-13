@@ -1,7 +1,7 @@
 # TODO
 
 File Peeker's tracked work list. Everything outstanding lives here; the
-documents under [docs/](docs/README.md) describe what is built, not what is
+documents under [docs/](old/docs/README.md) describe what is built, not what is
 planned.
 
 The list is currently dominated by one theme: the two layout and palette
@@ -45,7 +45,7 @@ Legend: `[ ]` open, `[~]` in progress, `[x]` done.
 Landing these late means reworking every layout that reads them.
 
 - [x] **1. Report listing failures per entry, not per stream.**
-  [`inspect_entry`](src/fs/directory/entry.rs) is now infallible: an entry it
+  [`inspect_entry`](old/src/fs/directory/entry.rs) is now infallible: an entry it
   cannot describe is reported with `metadata: None` and the reason in `defect`.
   The stream item type did not change; what changed is which conditions produce
   `Err`, now only iterating the directory failing and cancellation. `browser::Row`
@@ -53,7 +53,7 @@ Landing these late means reworking every layout that reads them.
   new field and no placement invariant was touched. A degraded row draws as
   `unknown` in the desktop table and `×` in the terminal.
 - [x] **2. Tolerate non-UTF-8 names and paths.**
-  [`host_path`](src/host_path.rs) carries them through an invertible escape —
+  [`host_path`](old/src/host_path.rs) carries them through an invertible escape —
   `%%` for a literal marker, `%XX` for a byte outside UTF-8 — so a protobuf
   `string` holds any name without losing a byte and the name still addresses its
   file. The `HostPath` newtype keeps the escaped and displayed forms from being
@@ -117,14 +117,15 @@ after.
   server's top layer is a task runtime: every asynchronous, fallible operation is
   a task kind in a structured tree, and filesystem access is one family of kinds.
   A public JSON API sits beside the private client protocol, and the CLI is a
-  client of the API. Built as `crates/next` in thirteen steps, 0 to 12, ending in
-  cutover. Step 1 is an empty server — started, found, answering and stopped,
+  client of the API. Built at the repository root in thirteen steps, 0 to 12,
+  ending in cutover. Step 1 is an empty server — started, found, answering and stopped,
   with nothing inside — and step 5 is a local walking skeleton. The binary is
   `fpk` until cutover. Open: whether round-tripped input needs an optimistic
   cursor over SSH.
-  Step 0 is done: `crates/next` is a workspace member, named `file-peeker-next`,
-  sharing the root's lints and covered by `make lint` and `make test`. Step 1 is
-  done: `fpk` starts, finds, attaches to and stops a detached per-user server.
+  Step 0 is done: v2 is the package `file-peeker` at the repository root, and the
+  shipping crate is `file-peeker-old` in `old/`, a workspace of its own; `make
+  verify` and CI cover both. Step 1 is done: `fpk` starts, finds, attaches to and
+  stops a detached per-user server.
 
 ### Tier 3 — states the proposals draw
 
@@ -135,7 +136,7 @@ after.
   this is lifting a proven model into shared code rather than inventing one.
 - [ ] **10. Report transfer progress, queue transfers, and cancel them.**
   *Unblocked: 3 is done, so the source size a determinate bar needs is available.*
-  [`Client::op_copy_file`](src/client/file/copy.rs) is a
+  [`Client::op_copy_file`](old/src/client/file/copy.rs) is a
   single await returning a final byte count. The proposal draws a transfer track
   and an inspector queue; a determinate bar also needs the source size.
 - [ ] **11. Expose a bounded, cancellable file read.** `read_file` is private and
@@ -163,7 +164,7 @@ exist.
   the list row semantics.
 - [ ] **15. Decide whether the dock or the layout seam owns pane arrangement.**
   The GUI proposal already raises this: four of its layouts place panes in ways
-  [`gui::dock`](src/gui/dock.rs) owns today, and a layout seam fighting the
+  [`gui::dock`](old/src/gui/dock.rs) owns today, and a layout seam fighting the
   dock is worse than no layout seam.
 
 ### Tier 5 — safe to start today
@@ -171,7 +172,7 @@ exist.
 None of these touch the data layer.
 
 - [ ] **16. Widen `Palette` with `sel`, `on_sel`, `bad` and `shadow`.**
-  [`gui::theme`](src/gui/theme.rs) derives the selection ground from the
+  [`gui::theme`](old/src/gui/theme.rs) derives the selection ground from the
   accent, which cannot be tuned per palette and disappears in the darker ones;
   the shadow is a constant chosen by mode; and `warn` means both a refused
   expansion and a dead connection. This is the GUI proposal's first build phase.

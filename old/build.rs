@@ -5,9 +5,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tonic_prost_build::configure().compile_with_config(
         prost,
-        &["proto/file_peeker/client/v1/client.proto"],
+        &["proto/file_peeker.proto"],
         &["proto"],
     )?;
-    println!("cargo:rerun-if-changed=proto");
+    println!("cargo:rerun-if-changed=proto/file_peeker.proto");
     Ok(())
 }

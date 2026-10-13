@@ -2,7 +2,7 @@
 
 This directory is the entry point for File Peeker's maintained design and usage
 documentation. It describes what is built. What is planned lives in the
-repository's [TODO](../TODO.md).
+repository's [TODO](../../TODO.md).
 
 ## Reading paths
 
@@ -27,7 +27,7 @@ repository's [TODO](../TODO.md).
 - [TUI implementation](tui.md)
 - [Client and UI state ownership](state-ownership.md)
 - [Client test CLI](client-cli.md)
-- [Layout and palette galleries](design/README.md), browsable proposals for
+- [Layout and palette galleries](../../docs/design/README.md), browsable proposals for
   making a frontend's arrangement and its colors selectable
 
 ## Document responsibilities
@@ -44,12 +44,12 @@ and link to that owner rather than duplicate implementation details.
 | [Client API](api.md) | Caller-visible Rust surface |
 | [Copy file](operations/copy-file.md) | Connection-to-connection routes, streaming, conflicts, atomic publication and cancellation |
 | [TUI implementation](tui.md) | TUI state, tasks, events, input and rendering behavior |
-| [Layout and palette galleries](design/README.md) | The shared layout-and-palette seam, and how the two frontends' galleries differ |
-| [TUI layout and palette gallery](design/tui-layouts.md) | The TUI's ten layouts, ten palettes and terminal-size rungs |
-| [GUI layout and palette gallery](design/gui-layouts.md) | The desktop front end's ten layouts, ten palettes and window-size rungs |
-| [TUI layout and palette system](design/tui-layout-spec.md) | The TUI proposal's implementation contract |
-| [GUI layout and palette system](design/gui-layout-spec.md) | The GUI proposal's implementation contract: types, component metrics, palette values, build order |
-| [v2 architecture](design/v2-architecture.md) | The proposed rewrite: a persistent server per machine, a task runtime as its top layer, sessions and views, machines, protocols and build order |
+| [Layout and palette galleries](../../docs/design/README.md) | The shared layout-and-palette seam, and how the two frontends' galleries differ |
+| [TUI layout and palette gallery](../../docs/design/tui-layouts.md) | The TUI's ten layouts, ten palettes and terminal-size rungs |
+| [GUI layout and palette gallery](../../docs/design/gui-layouts.md) | The desktop front end's ten layouts, ten palettes and window-size rungs |
+| [TUI layout and palette system](../../docs/design/tui-layout-spec.md) | The TUI proposal's implementation contract |
+| [GUI layout and palette system](../../docs/design/gui-layout-spec.md) | The GUI proposal's implementation contract: types, component metrics, palette values, build order |
+| [v2 architecture](../../docs/design/v2-architecture.md) | The proposed rewrite: a persistent server per machine, a task runtime as its top layer, sessions and views, machines, protocols and build order |
 | [State ownership](state-ownership.md) | Cross-client and cross-UI ownership comparison |
 | [Client test CLI](client-cli.md) | Test CLI commands and output behavior |
 

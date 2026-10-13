@@ -1,3 +1,3 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    file_peeker::gui::run()
+    file_peeker_old::tui::run()
 }

@@ -1,3 +1,3 @@
 fn main() -> std::io::Result<()> {
-    file_peeker::cli::run()
+    file_peeker_old::cli::run()
 }

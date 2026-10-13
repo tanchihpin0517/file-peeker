@@ -32,7 +32,7 @@ checklist.
 ## Status
 
 Both galleries are a **future possibility**, not current behavior. Each frontend
-has one layout and one set of colors today; [TUI implementation](../tui.md) and
+has one layout and one set of colors today; [TUI implementation](../../old/docs/tui.md) and
 `crate::gui` own what they actually render.
 
 ## The shared idea

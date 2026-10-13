@@ -1,62 +1,49 @@
 # File Peeker
 
-File Peeker is a native macOS file browser with a Ratatui frontend backed by a
-shared Rust client and filesystem core.
+File Peeker is a file browser for local and remote hosts. This repository is in
+the middle of a rewrite.
 
-Local connections run a File Peeker server inside the application, reading the
-client host's filesystem. Remote connections install and start the matching
-server over SSH, reading that host's filesystem. Either way the client talks to
-its server over authenticated gRPC, so the only difference is where the server
-runs. The TUI starts with an interactive Connection Manager; passing a path
-still immediately opens that path in a local connection. Use `a` in Connection
-Manager to add local or SSH connections and `n` to add a browser tab. Use
-`[`/`]` to switch tabs, `x` to close one, and `S` to return to Connection
-Manager. Within a browser, `j`/`k` selects entries, `l` enters a navigable
-directory, `h` leaves it, `o` expands or collapses, and `R` refreshes. Press `/`
-to filter the visible tree by name: typing narrows it to the matches and the
-directories holding them, `Tab` completes the query as far as those matches
-agree, a further `/` steps into the directory the query names outright without
-moving the root, backspace walks back out again, `Enter` spells the selected match
-out and then
-keeps it, and `Esc` puts the selection back. `Ctrl-N`/`Ctrl-P` walk the matches,
-`Ctrl-D`/`Ctrl-U` scroll them, and `Ctrl-W` clears the last segment of the query.
-Press
-`y` on a regular file and `p` in any browser to stream it between connections.
-Remote-to-local copy/paste is the download workflow; an existing destination
-requires explicit overwrite confirmation. `q`, `Esc`, and `Ctrl-C` leave the browser
-on a second press, which any other key or a couple of seconds stands down.
+- **v2**, at the repository root, is the rewrite: a persistent server on every
+  machine that owns the tasks and the browsing session, with front ends as
+  clients that attach, render and detach. Its design is
+  [v2 architecture](docs/design/v2-architecture.md); every decision defaults to
+  how [herdr](https://herdr.dev) does it. It is being built one step at a time and
+  does not browse yet.
+- **The shipping crate**, in [`old/`](old/README.md), is File Peeker as it works
+  today: a terminal and desktop browser over local and SSH connections. It takes
+  bug fixes only, and is deleted when v2 does everything it does.
 
-## Build
+## v2
 
 A stable Rust toolchain is required; see [rust-toolchain.toml](rust-toolchain.toml).
 
 ```text
-make check
-scripts/run-tui.sh
+cargo run --bin fpk                  # attach to this machine's server, starting one if needed
+cargo run --bin fpk -- status        # versions, pid, protocol compatibility, uptime
+cargo run --bin fpk -- server stop   # stop the server
 ```
 
-`make check` runs formatting, Clippy, a slim server-only build, and the test
-suite. `make verify` adds the documentation and shell script checks; the latter
-needs [ShellCheck](https://www.shellcheck.net).
+The server keeps running after `fpk` exits. Its sockets, lock and logs live in
+`~/.file-peeker/`; set `FILE_PEEKER_HOME` to an absolute path to use another
+directory. The binary is `fpk` until cutover, because the shipping crate's
+`file-peeker` holds that name.
 
-The package builds four binaries: `file-peeker` (the TUI), `file-peeker-gui`
-(the desktop front end), `file-peeker-client` (a test CLI), and
-`file-peeker-server`. Pass `--bin` to select one, since `cargo install` would
-otherwise place them all. `file-peeker-gui` is outside `default`; build it with
-`--features gui`.
+## Checks
+
+```text
+make check       # v2: formatting, Clippy, tests
+make old-check   # the shipping crate's own checks
+make verify      # both, plus the documentation and shell script checks
+```
+
+The shell script check needs [ShellCheck](https://www.shellcheck.net).
 
 ## Documentation
 
-- [TODO](TODO.md), the tracked work list
-- [Documentation index](docs/README.md)
-- [Architecture](docs/architecture.md)
-- [Code structure](docs/code-structure.md)
-- [Client API](docs/api.md)
-- [Copy file](docs/operations/copy-file.md)
-- [TUI implementation](docs/tui.md)
-- [Layout and palette galleries](docs/design/README.md), for the
-  [TUI](docs/design/tui-layouts.md) and the [GUI](docs/design/gui-layouts.md)
-- [Client and UI state ownership](docs/state-ownership.md)
+- [TODO](TODO.md), the tracked work list for both crates
+- [v2 architecture](docs/design/v2-architecture.md), the rewrite and its build order
+- [Design proposals](docs/design/README.md), including the layout and palette galleries
+- [The shipping crate's documentation](old/docs/README.md)
 
 ## License
 

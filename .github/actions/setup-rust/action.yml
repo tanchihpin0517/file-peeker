@@ -40,13 +40,20 @@ runs:
           libxcb-xfixes0-dev \
           libxkbcommon-dev
 
+    # Two workspaces: v2 at the root and the shipping crate in `old/`, each with
+    # its own target directory.
     - name: Restore the build cache
       uses: Swatinem/rust-cache@v2
       with:
         key: ${{ inputs.cache-key }}
+        workspaces: |
+          . -> target
+          old -> target
 
     # A resolution that Cargo.lock cannot satisfy fails here, before a job spends
     # minutes compiling, and it fails loudly instead of quietly updating the lock.
     - name: Check Cargo.lock is current
       shell: bash
-      run: cargo fetch --locked
+      run: |
+        cargo fetch --locked
+        cargo fetch --locked --manifest-path old/Cargo.toml

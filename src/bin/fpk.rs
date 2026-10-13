@@ -1,3 +1,3 @@
 fn main() -> std::process::ExitCode {
-    file_peeker_next::run()
+    file_peeker::run()
 }
