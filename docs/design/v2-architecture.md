@@ -535,7 +535,7 @@ one stays stable.
 ## Configuration
 
 Client-side only, in `config.toml`: theme and palette, layout, keybindings,
-`[remote]` options. The server reads no UI configuration; it has none. That
+`[ui]` options such as `mouse_capture`, `[remote]` options. The server reads no UI configuration; it has none. That
 answers TODO item 7 by construction. `file-peeker server reload-config` exists for
 the few server settings there are — admission caps and the save debounce.
 
@@ -605,6 +605,13 @@ session": a front end can only reach browsing state through a view.
   shared tree is the alternative.
 - **Task identity across a retry.** The leaning is a new task with
   `retry_of: TaskId`.
+- **Servers that talk to each other.** Later operations will have one server
+  reach another, which herdr never does. For now the client keeps owning SSH:
+  each front end opens its own bridges, and the ControlMaster is OpenSSH's,
+  shared by socket path. When server-to-server work arrives, the server running
+  it opens its own connections — reusing a master a client already opened,
+  since a server cannot answer a login — rather than the local server becoming
+  every client's hub.
 
 ## Build order
 
@@ -618,6 +625,7 @@ crate changes along the way.
 | 2 | **An empty TUI client** — see below | **A front end that attaches, detaches and survives its server** |
 | 3 | The task runtime, with test kinds only | Lifecycle, tree, cancellation, admission, events |
 | 4 | **Machines** — see below: releases, approval-based install, the bridge, ControlMaster, several machines in the TUI, `--machine` | **Several machines in one client** |
+| 4b | The mouse in the TUI, as herdr's — see after step 4 | Clicks land on what was drawn |
 | 5 | `fs` and `host_path` | The filesystem core, with its own tests |
 | 6 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
 | 7 | Views and actions in the client protocol; the TUI renders a tab through them | **Local walking skeleton** |
@@ -809,6 +817,23 @@ the connection, the reconnects and the aggregation everything later rides on.
 Left for later: closing an idle bridge, named sessions, and herdr's version
 negotiation — here a host whose protocol differs is updated, not negotiated
 with.
+
+After step 4, the TUI took the mouse, as herdr's is mouse-first:
+
+- **Clicking a machine selects it**, and the wheel over the machine list moves
+  the selection as `j` and `k` do.
+- **A key hint under the main pane is a button**: clicking `q detach` or
+  `s start the server` presses that key. A hint draws only when its key does
+  something, so a button is never there to press for nothing.
+- **Drawing and hit testing share one layout**, so a click lands on what was
+  drawn under it, at any terminal size.
+- **`[ui] mouse_capture`**, default `true` as herdr's is, turns it off for
+  keyboard-only use, keeping the terminal's own selection and scrollback. The
+  mouse is given back on every exit path, a panic included.
+
+Clicking a task, and herdr's right-click menu, wait for something to act on:
+there is nothing to do to a task until cancelling one, and the menu's actions
+are machine operations the CLI holds for now.
 
 ## What this replaces at cutover
 

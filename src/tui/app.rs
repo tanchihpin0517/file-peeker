@@ -9,7 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 
 use crate::client::tasks::{TaskUpdate, TaskView};
 
@@ -58,6 +60,24 @@ pub(super) enum Attention {
 /// What the UI asks one machine's connection to do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Command {
+    StartServer,
+}
+
+/// What lies under the mouse, as [`super::view::spot`] finds it on screen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Spot {
+    /// A machine's row in the sidebar.
+    Machine(usize),
+    /// The machine list's empty space below its last row.
+    Machines,
+    /// A key hint under the main pane; clicking it presses its key.
+    Hint(Hint),
+}
+
+/// A key hint that does something when clicked, as herdr's visible controls do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Hint {
+    Detach,
     StartServer,
 }
 
@@ -152,23 +172,53 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.quit = true;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.selected = (self.selected + 1).min(self.machines.len() - 1);
+            KeyCode::Char('j') | KeyCode::Down => self.select_next(),
+            KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
+            KeyCode::Char('s') => return self.start_server(),
+            _ => {}
+        }
+        None
+    }
+
+    /// Applies one mouse event over `spot`, and returns the command it asks of
+    /// the selected machine's connection, if any. A click acts on press, and
+    /// the wheel over the machine list moves the selection as `j` and `k` do.
+    pub(super) fn on_mouse(&mut self, kind: MouseEventKind, spot: Option<Spot>) -> Option<Command> {
+        match (kind, spot?) {
+            (MouseEventKind::Down(MouseButton::Left), Spot::Machine(index)) => {
+                self.selected = index.min(self.machines.len() - 1);
             }
-            KeyCode::Char('k') | KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            // Only a disconnected machine has a server to start; anywhere else
-            // the key does nothing rather than start a second one.
-            KeyCode::Char('s')
-                if matches!(
-                    self.selected_machine().state,
-                    MachineState::Disconnected { .. }
-                ) =>
-            {
-                return Some(Command::StartServer);
+            (MouseEventKind::Down(MouseButton::Left), Spot::Hint(Hint::Detach)) => {
+                self.quit = true;
+            }
+            (MouseEventKind::Down(MouseButton::Left), Spot::Hint(Hint::StartServer)) => {
+                return self.start_server();
+            }
+            (MouseEventKind::ScrollDown, Spot::Machine(_) | Spot::Machines) => self.select_next(),
+            (MouseEventKind::ScrollUp, Spot::Machine(_) | Spot::Machines) => {
+                self.select_previous();
             }
             _ => {}
         }
         None
+    }
+
+    fn select_next(&mut self) {
+        self.selected = (self.selected + 1).min(self.machines.len() - 1);
+    }
+
+    fn select_previous(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Only a disconnected machine has a server to start; anywhere else this
+    /// does nothing rather than start a second one.
+    fn start_server(&self) -> Option<Command> {
+        matches!(
+            self.selected_machine().state,
+            MachineState::Disconnected { .. }
+        )
+        .then_some(Command::StartServer)
     }
 
     /// Applies what machine `index`'s connection reported, as of now.
@@ -355,6 +405,60 @@ mod tests {
         release.kind = KeyEventKind::Release;
         app.on_key(release);
         assert!(!app.should_quit());
+    }
+
+    fn click(app: &mut App, spot: Spot) -> Option<Command> {
+        app.on_mouse(MouseEventKind::Down(MouseButton::Left), Some(spot))
+    }
+
+    #[test]
+    fn clicking_a_machine_selects_it() {
+        let mut app = App::new(&[
+            ("workbox".to_owned(), "me@workbox".to_owned()),
+            ("nano4".to_owned(), "nano4".to_owned()),
+        ]);
+        click(&mut app, Spot::Machine(2));
+        assert_eq!(app.selected_machine().label, "nano4");
+        click(&mut app, Spot::Machine(0));
+        assert_eq!(app.selected_machine().label, "local");
+        // Another button, or a release, selects nothing.
+        app.on_mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            Some(Spot::Machine(1)),
+        );
+        app.on_mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            Some(Spot::Machine(1)),
+        );
+        assert_eq!(app.selected(), 0);
+    }
+
+    #[test]
+    fn the_wheel_over_the_machines_moves_the_selection() {
+        let mut app = App::new(&[("workbox".to_owned(), "me@workbox".to_owned())]);
+        app.on_mouse(MouseEventKind::ScrollDown, Some(Spot::Machines));
+        assert_eq!(app.selected(), 1);
+        app.on_mouse(MouseEventKind::ScrollDown, Some(Spot::Machine(0)));
+        assert_eq!(app.selected(), 1);
+        app.on_mouse(MouseEventKind::ScrollUp, Some(Spot::Machine(1)));
+        assert_eq!(app.selected(), 0);
+        // Anywhere else the wheel leaves it.
+        app.on_mouse(MouseEventKind::ScrollDown, None);
+        assert_eq!(app.selected(), 0);
+    }
+
+    #[test]
+    fn clicking_a_hint_presses_its_key() {
+        let mut app = App::new(&[]);
+        assert_eq!(click(&mut app, Spot::Hint(Hint::StartServer)), None);
+        disconnected(&mut app);
+        assert_eq!(
+            click(&mut app, Spot::Hint(Hint::StartServer)),
+            Some(Command::StartServer)
+        );
+        assert!(!app.should_quit());
+        click(&mut app, Spot::Hint(Hint::Detach));
+        assert!(app.should_quit());
     }
 
     fn task(id: &str, submitted: i64, status: TaskStatus) -> TaskView {

@@ -188,7 +188,8 @@ says what it is:
 | The server not running | `retry`: "its server is not running" | Reconnects on the backoff; `s` starts it |
 | A running server | `attached`, after the bridge's handshake | Its tasks in the lower half |
 
-Selecting a machine with `j`/`k` shows its tasks. `s` on a disconnected machine
+Selecting a machine with `j`/`k`, the arrow keys, a click or the wheel shows
+its tasks; clicking a key hint presses its key. `s` on a disconnected machine
 starts its server — on a remote one, `fpk server start` over SSH. Nothing in the
 terminal UI ever installs anything, and the bridge itself never starts a server:
 a reconnect must not bring back a server someone stopped.

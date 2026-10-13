@@ -136,7 +136,9 @@ after.
   done: `fpk machine add` saves SSH machines and installs `fpk` on them — a
   release build downloads its release, a dev build uploads and builds its own
   source — the TUI lists and reconnects every machine over an SSH bridge, and
-  `--machine` runs a command on one. Releases publish from `v*` tags.
+  `--machine` runs a command on one. Releases publish from `v*` tags. The TUI
+  takes the mouse, as herdr's does: clicks select machines and press key hints,
+  the wheel moves the selection, and `[ui] mouse_capture = false` turns it off.
 
 ### Tier 3 — states the proposals draw
 

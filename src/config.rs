@@ -14,6 +14,7 @@ use crate::home::Home;
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
     pub remote: RemoteConfig,
+    pub ui: UiConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -30,6 +31,23 @@ impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             manage_ssh_config: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct UiConfig {
+    /// Take the mouse, so the terminal UI can be clicked and scrolled, as
+    /// herdr's `ui.mouse_capture`. Turn it off to keep the terminal's own
+    /// selection and scrollback, for keyboard-only use.
+    pub mouse_capture: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            mouse_capture: true,
         }
     }
 }
@@ -69,6 +87,7 @@ mod tests {
         let (_root, home) = home_with(None);
         let config = Config::load(&home).unwrap();
         assert!(config.remote.manage_ssh_config);
+        assert!(config.ui.mouse_capture);
     }
 
     #[test]
@@ -77,6 +96,10 @@ mod tests {
         assert!(!Config::load(&home).unwrap().remote.manage_ssh_config);
         let (_root, home) = home_with(Some("# nothing yet\n"));
         assert!(Config::load(&home).unwrap().remote.manage_ssh_config);
+        let (_root, home) = home_with(Some("[ui]\nmouse_capture = false\n"));
+        let config = Config::load(&home).unwrap();
+        assert!(!config.ui.mouse_capture);
+        assert!(config.remote.manage_ssh_config);
     }
 
     #[test]

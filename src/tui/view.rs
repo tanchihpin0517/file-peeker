@@ -12,25 +12,80 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use super::app::{App, Attention, Machine, MachineState};
+use super::app::{App, Attention, Hint, Machine, MachineState, Spot};
 use crate::client::tasks::{Measure, TaskStatus, TaskView};
 
 const SIDEBAR_WIDTH: u16 = 26;
 
-pub(super) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
-    let [title, body] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(frame.area());
-    let [sidebar, pane] =
-        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
-    // The key hints belong to the main pane and sit under it alone; the sidebar
-    // runs the full height beside them.
-    let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(pane);
+/// Where each part of the screen is. Drawing and finding what the mouse is
+/// over both work from this, so a click lands on what was drawn there.
+struct Areas {
+    title: Rect,
+    machines: Rect,
+    tasks: Rect,
+    main: Rect,
+    status: Rect,
+}
 
+impl Areas {
+    fn of(screen: Rect) -> Self {
+        let [title, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(screen);
+        let [sidebar, pane] =
+            Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
+        // Split in half as herdr's is: machines above, the selected machine's
+        // tasks below.
+        let [machines, tasks] =
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(sidebar);
+        // The key hints belong to the main pane and sit under it alone; the
+        // sidebar runs the full height beside them.
+        let [main, status] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(pane);
+        Self {
+            title,
+            machines,
+            tasks,
+            main,
+            status,
+        }
+    }
+}
+
+pub(super) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
+    let areas = Areas::of(frame.area());
     let machine = app.selected_machine();
-    frame.render_widget(title_line(machine), title);
-    draw_sidebar(frame, app, now, sidebar);
-    draw_main(frame, machine, now, main);
-    frame.render_widget(status_line(machine), status);
+    frame.render_widget(title_line(machine), areas.title);
+    draw_machines(frame, app, now, areas.machines);
+    draw_tasks(frame, machine, areas.tasks);
+    draw_main(frame, machine, now, areas.main);
+    frame.render_widget(status_line(machine), areas.status);
+}
+
+/// What lies at `column`, `row` on a `screen`-sized terminal showing `app`.
+pub(super) fn spot(app: &App, screen: Rect, column: u16, row: u16) -> Option<Spot> {
+    let areas = Areas::of(screen);
+    let at = ratatui::layout::Position::new(column, row);
+    let machines = machines_block().inner(areas.machines);
+    if machines.contains(at) {
+        let index = usize::from(row - machines.y);
+        return Some(if index < app.machines().len() {
+            Spot::Machine(index)
+        } else {
+            Spot::Machines
+        });
+    }
+    if areas.status.contains(at) {
+        let mut x = areas.status.x;
+        for (span, hint) in hints(app.selected_machine()) {
+            let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
+            if column < x.saturating_add(width) {
+                return hint.map(Spot::Hint);
+            }
+            x = x.saturating_add(width);
+        }
+    }
+    None
 }
 
 fn title_line(machine: &Machine) -> Paragraph<'static> {
@@ -51,17 +106,17 @@ fn title_line(machine: &Machine) -> Paragraph<'static> {
     .style(Style::new().add_modifier(Modifier::REVERSED))
 }
 
-/// Split in half as herdr's is: machines above, the selected machine's tasks
-/// below.
-fn draw_sidebar(frame: &mut Frame<'_>, app: &App, now: Instant, area: Rect) {
-    let [machines, tasks] =
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-
-    let block = Block::new()
+fn machines_block() -> Block<'static> {
+    Block::new()
         .borders(Borders::RIGHT)
-        .title(Span::styled(" Machines", BOLD));
-    let inner = block.inner(machines);
-    frame.render_widget(block, machines);
+        .title(Span::styled(" Machines", BOLD))
+}
+
+/// One row per machine, its first just under the title, as [`spot`] counts.
+fn draw_machines(frame: &mut Frame<'_>, app: &App, now: Instant, area: Rect) {
+    let block = machines_block();
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let rows: Vec<Line<'_>> = app
         .machines()
         .iter()
@@ -69,8 +124,9 @@ fn draw_sidebar(frame: &mut Frame<'_>, app: &App, now: Instant, area: Rect) {
         .map(|(index, machine)| machine_row(machine, now, index == app.selected()))
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
+}
 
-    let machine = app.selected_machine();
+fn draw_tasks(frame: &mut Frame<'_>, machine: &Machine, tasks: Rect) {
     // The divider meets the right edge that runs on above it, so it joins it
     // rather than turning a corner.
     let block = Block::new()
@@ -231,11 +287,23 @@ fn draw_main(frame: &mut Frame<'_>, machine: &Machine, now: Instant, area: Rect)
 }
 
 fn status_line(machine: &Machine) -> Paragraph<'static> {
-    let mut keys = String::from(" j/k move · q detach");
+    let spans: Vec<Span<'static>> = hints(machine).into_iter().map(|(span, _)| span).collect();
+    Paragraph::new(Line::from(spans)).style(Style::new().add_modifier(Modifier::DIM))
+}
+
+/// The key hints, left to right, each with what clicking it does. [`spot`]
+/// measures the same spans [`status_line`] draws.
+fn hints(machine: &Machine) -> Vec<(Span<'static>, Option<Hint>)> {
+    let mut hints = vec![
+        (Span::raw(" j/k move"), None),
+        (Span::raw(" · "), None),
+        (Span::raw("q detach"), Some(Hint::Detach)),
+    ];
     if matches!(machine.state, MachineState::Disconnected { .. }) {
-        keys.push_str(" · s start the server");
+        hints.push((Span::raw(" · "), None));
+        hints.push((Span::raw("s start the server"), Some(Hint::StartServer)));
     }
-    Paragraph::new(keys).style(Style::new().add_modifier(Modifier::DIM))
+    hints
 }
 
 /// Whole seconds until `at`, rounded up so a countdown never shows `0s` while
@@ -451,6 +519,59 @@ mod tests {
         );
         let screen = render(&app, now);
         assert!(screen.contains("its server is not running"), "{screen}");
+    }
+
+    /// The column and row where `text` is drawn, counted in cells.
+    fn find(screen: &str, text: &str) -> (u16, u16) {
+        for (row, line) in screen.lines().enumerate() {
+            if let Some(byte) = line.find(text) {
+                let column = line[..byte].chars().count();
+                return (u16::try_from(column).unwrap(), u16::try_from(row).unwrap());
+            }
+        }
+        panic!("{text:?} is not on screen:\n{screen}");
+    }
+
+    #[test]
+    fn the_mouse_finds_what_was_drawn_under_it() {
+        let now = Instant::now();
+        let screen_area = Rect::new(0, 0, 72, 12);
+        let mut app = App::new(&[("workbox".to_owned(), "me@workbox".to_owned())]);
+        app.on_connection(
+            0,
+            ConnectionEvent::Disconnected {
+                retry_at: now + Duration::from_secs(1),
+                reason: None,
+            },
+        );
+        let screen = render(&app, now);
+        let at = |text: &str| {
+            let (column, row) = find(&screen, text);
+            spot(&app, screen_area, column, row)
+        };
+
+        assert_eq!(at("● local"), Some(Spot::Machine(0)));
+        assert_eq!(at("● workbox"), Some(Spot::Machine(1)));
+        let (column, row) = find(&screen, "● workbox");
+        assert_eq!(
+            spot(&app, screen_area, column, row + 1),
+            Some(Spot::Machines)
+        );
+        assert_eq!(at("Machines"), None);
+        assert_eq!(at("Tasks"), None);
+
+        assert_eq!(at("q detach"), Some(Spot::Hint(Hint::Detach)));
+        assert_eq!(
+            at("s start the server"),
+            Some(Spot::Hint(Hint::StartServer))
+        );
+        let (column, row) = find(&screen, "s start the server");
+        assert_eq!(
+            spot(&app, screen_area, column + 17, row),
+            Some(Spot::Hint(Hint::StartServer))
+        );
+        assert_eq!(at("j/k move"), None);
+        assert_eq!(spot(&app, screen_area, 71, row), None);
     }
 
     #[test]

@@ -19,8 +19,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{Event, EventStream};
-use ratatui::DefaultTerminal;
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
+    execute,
+};
+use ratatui::{DefaultTerminal, layout::Rect};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
 
@@ -59,7 +62,14 @@ pub(crate) fn run(home: &Home) -> ExitCode {
         }
     };
     // Read before the terminal is taken, so a broken file says so plainly.
-    let targets = match targets(home) {
+    let config = match Config::load(home) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("fpk: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let targets = match targets(home, &config) {
         Ok(targets) => targets,
         Err(error) => {
             eprintln!("fpk: {error}");
@@ -85,7 +95,14 @@ pub(crate) fn run(home: &Home) -> ExitCode {
 
         // `init` also installs a panic hook that restores the terminal first.
         let mut terminal = ratatui::init();
+        let mouse = config.ui.mouse_capture;
+        if mouse {
+            capture_mouse();
+        }
         let outcome = event_loop(&mut terminal, targets).await;
+        if mouse {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+        }
         ratatui::restore();
 
         match outcome {
@@ -101,10 +118,21 @@ pub(crate) fn run(home: &Home) -> ExitCode {
     })
 }
 
+/// Takes the mouse, as herdr does unless `ui.mouse_capture` is off, and gives
+/// it back before a panic's message as `init`'s hook gives back the rest.
+fn capture_mouse() {
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        restore(info);
+    }));
+    // A terminal that cannot report the mouse is still usable by keyboard.
+    let _ = execute!(io::stdout(), EnableMouseCapture);
+}
+
 /// `local`, then each enabled saved machine, with the label and SSH target
 /// the app lists for each.
-fn targets(home: &Home) -> Result<Vec<(String, String, Target)>, String> {
-    let config = Config::load(home)?;
+fn targets(home: &Home, config: &Config) -> Result<Vec<(String, String, Target)>, String> {
     let mut targets = vec![(
         "local".to_owned(),
         String::new(),
@@ -114,7 +142,7 @@ fn targets(home: &Home) -> Result<Vec<(String, String, Target)>, String> {
         .into_iter()
         .filter(|machine| machine.enabled)
     {
-        let ssh = Ssh::new(home, &config, &machine.ssh, Prompt::Never)
+        let ssh = Ssh::new(home, config, &machine.ssh, Prompt::Never)
             .map_err(|error| error.to_string())?;
         targets.push((machine.label, machine.ssh, Target::Remote(ssh)));
     }
@@ -170,6 +198,14 @@ async fn event_loop(
             event = input.next() => match event {
                 Some(Ok(Event::Key(key))) => {
                     if let Some(command) = app.on_key(key) {
+                        let _ = commands[app.selected()].try_send(command);
+                    }
+                }
+                Some(Ok(Event::Mouse(mouse))) => {
+                    let size = terminal.size()?;
+                    let screen = Rect::new(0, 0, size.width, size.height);
+                    let spot = view::spot(&app, screen, mouse.column, mouse.row);
+                    if let Some(command) = app.on_mouse(mouse.kind, spot) {
                         let _ = commands[app.selected()].try_send(command);
                     }
                 }
