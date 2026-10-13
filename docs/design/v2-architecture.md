@@ -13,9 +13,12 @@ A proposal for rebuilding File Peeker from scratch around two ideas:
 
 ## Status
 
-This is a **future possibility**, not current behavior. What is built is
-described by [Architecture](../../old/docs/architecture.md) and the documents beside it,
-and those stay true of the current crate while it ships.
+This is a **future possibility**, not current behavior. What the shipping crate
+does is described by [Architecture](../../old/docs/architecture.md) and the
+documents beside it. What v2 has built so far is described under
+[docs/](../README.md) — [task architecture](../task-architecture.md) and
+[task pipeline](../task-pipeline.md) — and those documents, not this one, own
+it.
 
 v2 is a **rewrite, not a migration**. It lives at the repository root and the
 current crate lives in `old/`, a workspace of its own. v2 carries no

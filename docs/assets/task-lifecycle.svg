@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="420" viewBox="0 0 1040 420" role="img" aria-labelledby="title description">
+  <title id="title">Task lifecycle</title>
+  <desc id="description">A submitted task starts Queued. Admitted, it runs; a required resource that is gone fails it at admission, and a cancel while queued cancels it without running. A running task reports progress, and settles Succeeded when its body returns Ok, or Failed on another error or a panic. A cancel while running makes it Cancelling; from there an Interrupted error settles it Cancelled, another error Failed, and Ok Succeeded. Succeeded, Failed and Cancelled are terminal.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-head"/>
+    </marker>
+    <style>
+      :root {
+        --text: #172033;
+        --muted-text: #526078;
+        --surface: #f7f9fc;
+        --border: #8491a8;
+        --live-surface: #e5efff;
+        --live-border: #3478c8;
+        --busy-surface: #fff3dc;
+        --busy-border: #b7791f;
+        --good-surface: #e4f6ec;
+        --good-border: #27875b;
+        --bad-surface: #fde8e8;
+        --bad-border: #c53030;
+        --quiet-surface: #eef0f4;
+        --quiet-border: #8491a8;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --text: #eef3fb;
+          --muted-text: #b5c0d3;
+          --surface: #202938;
+          --border: #8390a6;
+          --live-surface: #193a62;
+          --live-border: #72aef2;
+          --busy-surface: #4a3612;
+          --busy-border: #f0b44c;
+          --good-surface: #173d30;
+          --good-border: #5bc792;
+          --bad-surface: #4a1f22;
+          --bad-border: #f08080;
+          --quiet-surface: #2b3443;
+          --quiet-border: #8390a6;
+        }
+      }
+      text { fill: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 16px; text-anchor: middle; }
+      .secondary { fill: var(--muted-text); font-size: 13px; }
+      .edge-label { fill: var(--muted-text); font-size: 13px; }
+      .start-label { text-anchor: start; }
+      .end-label { text-anchor: end; }
+      .queued { fill: var(--surface); stroke: var(--border); stroke-width: 2; }
+      .running { fill: var(--live-surface); stroke: var(--live-border); stroke-width: 2; }
+      .cancelling { fill: var(--busy-surface); stroke: var(--busy-border); stroke-width: 2; }
+      .succeeded { fill: var(--good-surface); stroke: var(--good-border); stroke-width: 3; }
+      .failed { fill: var(--bad-surface); stroke: var(--bad-border); stroke-width: 3; }
+      .cancelled { fill: var(--quiet-surface); stroke: var(--quiet-border); stroke-width: 3; }
+      .start { fill: var(--text); }
+      .edge { fill: none; stroke: var(--border); stroke-width: 2; marker-end: url(#arrow); }
+      .arrow-head { fill: var(--border); }
+    </style>
+  </defs>
+
+  <!-- Edges first, so the boxes sit on top of their ends. -->
+  <path class="edge" d="M 40 110 H 93"/>
+  <text class="edge-label" x="62" y="98">submit</text>
+
+  <path class="edge" d="M 245 110 H 363"/>
+  <text class="edge-label" x="305" y="100">admitted</text>
+
+  <path class="edge" d="M 245 128 L 363 270"/>
+  <text class="edge-label end-label" x="290" y="222">resource gone</text>
+
+  <path class="edge" d="M 170 137 V 380 H 940 V 319"/>
+  <text class="edge-label" x="555" y="372">cancel while queued</text>
+
+  <path class="edge" d="M 420 83 C 420 38, 460 38, 460 81"/>
+  <text class="edge-label" x="440" y="32">progress</text>
+
+  <path class="edge" d="M 515 110 H 633"/>
+  <text class="edge-label" x="575" y="100">Ok</text>
+
+  <path class="edge" d="M 440 137 V 261"/>
+  <text class="edge-label start-label" x="450" y="204">other error, panic</text>
+
+  <path class="edge" d="M 515 137 L 633 262"/>
+  <text class="edge-label start-label" x="585" y="190">cancel</text>
+
+  <path class="edge" d="M 710 263 V 139"/>
+  <text class="edge-label start-label" x="720" y="204">Ok</text>
+
+  <path class="edge" d="M 635 290 H 517"/>
+  <text class="edge-label" x="576" y="280">other error</text>
+
+  <path class="edge" d="M 785 290 H 863"/>
+  <text class="edge-label" x="825" y="280">Interrupted</text>
+
+  <!-- States. -->
+  <circle class="start" cx="32" cy="110" r="8"/>
+
+  <rect class="queued" x="95" y="83" width="150" height="54" rx="10"/>
+  <text x="170" y="106">Queued</text>
+  <text class="secondary" x="170" y="125">resource or admission</text>
+
+  <rect class="running" x="365" y="83" width="150" height="54" rx="10"/>
+  <text x="440" y="106">Running</text>
+  <text class="secondary" x="440" y="125">body executing</text>
+
+  <rect class="succeeded" x="635" y="83" width="150" height="54" rx="10"/>
+  <text x="710" y="106">Succeeded</text>
+  <text class="secondary" x="710" y="125">terminal</text>
+
+  <rect class="failed" x="365" y="263" width="150" height="54" rx="10"/>
+  <text x="440" y="286">Failed</text>
+  <text class="secondary" x="440" y="305">terminal</text>
+
+  <rect class="cancelling" x="635" y="263" width="150" height="54" rx="10"/>
+  <text x="710" y="286">Cancelling</text>
+  <text class="secondary" x="710" y="305">body cleaning up</text>
+
+  <rect class="cancelled" x="865" y="263" width="150" height="54" rx="10"/>
+  <text x="940" y="286">Cancelled</text>
+  <text class="secondary" x="940" y="305">terminal</text>
+</svg>

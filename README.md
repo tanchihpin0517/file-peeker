@@ -42,6 +42,9 @@ The shell script check needs [ShellCheck](https://www.shellcheck.net).
 ## Documentation
 
 - [TODO](TODO.md), the tracked work list for both crates
+- [v2 documentation](docs/README.md), what v2 is built from:
+  [task architecture](docs/task-architecture.md) and
+  [task pipeline](docs/task-pipeline.md)
 - [v2 architecture](docs/design/v2-architecture.md), the rewrite and its build order
 - [Design proposals](docs/design/README.md), including the layout and palette galleries
 - [The shipping crate's documentation](old/docs/README.md)
