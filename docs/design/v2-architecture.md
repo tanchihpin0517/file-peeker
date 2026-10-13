@@ -308,6 +308,20 @@ A step that is not independently cancellable, observable or retryable is a
 phase, not a child. There is no general dependency graph: a parent awaiting its
 children is ordinary Rust.
 
+How a task ends, as step 3 built it:
+
+- **A body that returns while children still run** has them cancelled, and
+  settles only once they have.
+- **After a cancel**, a body that returns an `Interrupted` error settles
+  `Cancelled`; one that returns any other error settles `Failed`, because its
+  cleanup failed; and one that returns success settles `Succeeded`, because it
+  finished the work and saying otherwise would be untrue.
+- **A body that panics** settles `Failed`. Each body runs as a tokio task of its
+  own, so a panic reaches the driver as a join error rather than leaving a task
+  `Running` forever.
+- **Summing children's progress into the parent's** is deferred to step 10,
+  where copies are its first consumer.
+
 A copy between machines is the one place bytes pass through a client. Servers do
 not talk to each other, so the client relays the source server's read stream into
 the destination server's write. That follows herdr's rule that the client
@@ -332,6 +346,20 @@ Each kind declares an admission class, and the runtime holds a cap per class:
 The numbers are policy; the `Queued` state is the mechanism, and it exists from
 the start.
 
+Step 3 settled what the table leaves open:
+
+- **A cap counts per scope**: a task's class and the first resource it
+  requires, or the class alone for a task that requires none. Two machines'
+  transfers do not share a cap.
+- **A capped queue is first in, first out.** Roots join their scope's queue
+  when they are submitted, and only the head may take a free place. A queue the
+  user watches has to drain in the order it filled; waking every waiter and
+  letting the fastest win does not guarantee that. A task cancelled while
+  queued leaves the line, and the one behind it moves up.
+- **Only roots are capped.** A child runs under its parent's admission, so a
+  parent holding the last place of its class can still start children rather
+  than deadlock waiting for itself.
+
 ### Observation and retention
 
 ```rust
@@ -342,7 +370,8 @@ pub(crate) enum TaskEvent {
 }
 ```
 
-Events go out on a broadcast channel, `Progressed` coalesced per task. The
+Events go out on a broadcast channel, `Progressed` coalesced per task: at most
+one per interval, and the latest value always sent before the task settles. The
 registry lock is `std::sync` so a synchronous caller can inspect it, and
 `tasks()` returns owned snapshots. The runtime keeps live tasks plus a bounded
 ring of recently settled roots, which answers "which failed" without becoming a

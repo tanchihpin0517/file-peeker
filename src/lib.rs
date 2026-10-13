@@ -21,6 +21,10 @@ mod client;
 mod home;
 mod protocol;
 mod server;
+// Step 3 builds the runtime alone, exercised by its own tests; the server
+// submits its first kinds in step 5, and this allow goes then.
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+mod task;
 mod tui;
 
 use std::process::ExitCode;

@@ -128,7 +128,9 @@ after.
   verify` and CI cover both. Step 1 is done: `fpk` starts, finds, attaches to and
   stops a detached per-user server. Step 2 is done: `fpk` opens a terminal UI with a
   machine list holding `local`, detaches on `q`, dims and reconnects with backoff
-  when the server goes away, and starts one again only on `s`.
+  when the server goes away, and starts one again only on `s`. Step 3 is done: the
+  task runtime — lifecycle, structured tree, cancellation, resources, FIFO
+  admission per scope, coalesced events, retention — with test kinds only.
 
 ### Tier 3 — states the proposals draw
 
