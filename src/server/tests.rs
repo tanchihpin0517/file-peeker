@@ -174,7 +174,20 @@ async fn stale_sockets_from_a_crashed_server_are_replaced() {
     // crashed server's would.
     drop(UnixListener::bind(home.api_socket()).unwrap());
     drop(UnixListener::bind(home.client_socket()).unwrap());
-    assert!(!client::is_running(&home).await);
+    // Not running — once any copy of that listener is gone. A test running
+    // alongside that forks a process (git, sh, a stand-in ssh) copies every
+    // open descriptor into the child until it execs, so for a moment the
+    // dropped listener can still accept. Wait that moment out rather than read
+    // it as a server.
+    let mut stale = false;
+    for _ in 0..100 {
+        if !client::is_running(&home).await {
+            stale = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(stale, "the dropped listener kept accepting");
 
     let (shutdown, task) = spawn(&home);
     wait_for_socket(&home).await;

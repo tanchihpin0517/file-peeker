@@ -53,6 +53,8 @@ const LOG_ENV: &str = "FILE_PEEKER_LOG";
 pub(crate) enum ServerError {
     #[error("a server is already running for {}", .0.display())]
     AlreadyRunning(PathBuf),
+    #[error("{0}")]
+    SocketPathTooLong(String),
     #[error("{context}: {source}")]
     Io {
         context: String,
@@ -302,6 +304,8 @@ struct Sockets {
 
 impl Sockets {
     fn claim(home: &Home) -> Result<Self, ServerError> {
+        home.check_sockets()
+            .map_err(ServerError::SocketPathTooLong)?;
         let sockets = Self {
             api: home.api_socket(),
             client: home.client_socket(),

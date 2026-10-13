@@ -5,8 +5,16 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use super::app::{Command, ConnectionEvent};
-use crate::{client, home::Home};
+use super::app::{Attention, Command, ConnectionEvent};
+use crate::{
+    client::{
+        self, Watching,
+        remote::{self, Reach},
+        ssh::Ssh,
+    },
+    home::Home,
+    protocol::CLIENT_PROTOCOL,
+};
 
 /// Reconnect delays: doubling from `base`, capped at `max`.
 #[derive(Clone, Copy, Debug)]
@@ -29,13 +37,76 @@ impl Backoff {
     }
 }
 
+/// What a connection reaches.
+#[derive(Clone, Debug)]
+pub(super) enum Target {
+    /// This machine's server, on its socket.
+    Local(Home),
+    /// A saved machine's server, through its bridge over SSH that never
+    /// prompts.
+    Remote(Ssh),
+}
+
+/// Why an attempt to attach did not end attached.
+enum Lost {
+    /// Try again after the backoff; `reason` says why, when there is more to
+    /// say than that the server is gone.
+    Retry(Option<String>),
+    /// Try again after the backoff, but someone has to act first.
+    Attention(Attention),
+}
+
+/// Attaches to `target` and opens its `Watch` stream. A remote machine is
+/// probed first, so a missing or incompatible install, a host that wants a
+/// login, and a server that is simply not running each say so rather than all
+/// looking like a dropped connection.
+async fn attach(target: &Target) -> Result<Watching, Lost> {
+    let channel = match target {
+        Target::Local(home) => {
+            return client::watch(home).await.map_err(|_| Lost::Retry(None));
+        }
+        Target::Remote(ssh) => match remote::probe(ssh).await {
+            Reach::NeedsLogin(_) => return Err(Lost::Attention(Attention::NeedsLogin)),
+            Reach::Unreachable(why) => return Err(Lost::Retry(Some(why))),
+            Reach::Probed(probe) if !probe.installed => {
+                return Err(Lost::Attention(Attention::NotInstalled));
+            }
+            Reach::Probed(probe) if probe.client_protocol != CLIENT_PROTOCOL => {
+                return Err(Lost::Attention(Attention::Incompatible {
+                    found: probe.describe(),
+                }));
+            }
+            Reach::Probed(probe) if !probe.server_running => {
+                return Err(Lost::Retry(Some("its server is not running".to_owned())));
+            }
+            Reach::Probed(_) => remote::channel(ssh)
+                .await
+                .map_err(|error| Lost::Retry(Some(error.to_string())))?,
+        },
+    };
+    client::watch_on(channel)
+        .await
+        .map_err(|error| Lost::Retry(Some(error.to_string())))
+}
+
+async fn start_server(target: &Target) {
+    // A failure here is the next attach failing, which backs off and is shown
+    // like any other.
+    let _ = match target {
+        Target::Local(home) => client::start_server(home)
+            .await
+            .map_err(|error| error.to_string()),
+        Target::Remote(ssh) => remote::start_server(ssh).await,
+    };
+}
+
 /// Runs until the UI goes away: `events` closing, or `commands` ending.
 ///
 /// Reconnecting only ever attaches. A server is started only on
 /// [`Command::StartServer`], so a server the user stopped on purpose stays
-/// stopped until they say otherwise.
+/// stopped until they say otherwise, and nothing is ever installed from here.
 pub(super) async fn run(
-    home: Home,
+    target: Target,
     backoff: Backoff,
     events: mpsc::Sender<ConnectionEvent>,
     mut commands: mpsc::Receiver<Command>,
@@ -45,38 +116,45 @@ pub(super) async fn run(
         if events.send(ConnectionEvent::Attaching).await.is_err() {
             return;
         }
-        if let Ok(mut watching) = client::watch(&home).await {
-            attempt = 0;
-            let attached = ConnectionEvent::Attached {
-                server_version: watching.attached.server_version.clone(),
-                pid: watching.attached.pid,
-            };
-            if events.send(attached).await.is_err() {
-                return;
-            }
-            loop {
-                tokio::select! {
-                    update = watching.next() => match update {
-                        Some(update) => {
-                            if events.send(ConnectionEvent::Tasks(update)).await.is_err() {
-                                return;
-                            }
-                        }
-                        None => break,
-                    },
-                    () = events.closed() => return,
+        let lost = match attach(&target).await {
+            Ok(mut watching) => {
+                attempt = 0;
+                let attached = ConnectionEvent::Attached {
+                    server_version: watching.attached.server_version.clone(),
+                    pid: watching.attached.pid,
+                };
+                if events.send(attached).await.is_err() {
+                    return;
                 }
+                loop {
+                    tokio::select! {
+                        update = watching.next() => match update {
+                            Some(update) => {
+                                if events.send(ConnectionEvent::Tasks(update)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            None => break,
+                        },
+                        () = events.closed() => return,
+                    }
+                }
+                Lost::Retry(None)
             }
-        }
+            Err(lost) => lost,
+        };
 
         let delay = backoff.delay(attempt);
         attempt = attempt.saturating_add(1);
         let retry_at = Instant::now() + delay;
-        if events
-            .send(ConnectionEvent::Disconnected { retry_at })
-            .await
-            .is_err()
-        {
+        let event = match lost {
+            Lost::Retry(reason) => ConnectionEvent::Disconnected { retry_at, reason },
+            Lost::Attention(attention) => ConnectionEvent::NeedsAttention {
+                attention,
+                retry_at,
+            },
+        };
+        if events.send(event).await.is_err() {
             return;
         }
         tokio::select! {
@@ -86,9 +164,7 @@ pub(super) async fn run(
                     if events.send(ConnectionEvent::Starting).await.is_err() {
                         return;
                     }
-                    // A failure here is the next attach failing, which backs
-                    // off and is shown like any other.
-                    let _ = client::start_server(&home).await;
+                    start_server(&target).await;
                     attempt = 0;
                 }
                 None => return,
@@ -171,7 +247,12 @@ mod tests {
         };
 
         // No server yet: the connection backs off rather than starting one.
-        let connection = tokio::spawn(run(home.clone(), backoff, events_tx, commands_rx));
+        let connection = tokio::spawn(run(
+            Target::Local(home.clone()),
+            backoff,
+            events_tx,
+            commands_rx,
+        ));
         assert_eq!(next(&mut events).await, ConnectionEvent::Attaching);
         until_disconnected(&mut events).await;
         assert!(!client::is_running(&home).await);

@@ -140,7 +140,10 @@ that may not read them. A server started from a login shell and a bridge started
 over SSH would then resolve different directories, and the client would start a
 second server rather than find the first. One directory resolved from `HOME`
 alone resolves the same way from a login shell, a cron job and an SSH command.
-`FILE_PEEKER_HOME` overrides it outright, for tests and development.
+`FILE_PEEKER_HOME` overrides it outright, for tests and development. A dev
+build uses `~/.file-peeker-dev/` instead, on the client and on every host, so a
+build run from a checkout never shares a binary, a server or a socket with a
+release install.
 
 Both sockets are mode `0600`. That replaces the current crate's bearer token: a
 unix socket in a private directory is reachable only by its user, and a remote
@@ -780,8 +783,8 @@ the connection, the reconnects and the aggregation everything later rides on.
   and speaks the client protocol over that process's standard input and
   output; on the host, the bridge relays them to `file-peeker-client.sock`. No
   port listens anywhere and no socket path is forwarded. **A bridge never
-  installs and starts a server only when asked**: `fpk bridge --start` starts
-  one first, and setup is the one caller that passes it.
+  installs and never starts a server**: starting one is `fpk server start` over
+  the same SSH, which setup runs and `s` asks for.
 - **SSH is shared, as herdr shares it.** With `[remote] manage_ssh_config =
   true` in `config.toml` — the default — the client adds `ControlMaster=auto`, a
   `ControlPath` under `~/.file-peeker/ssh/` and `ControlPersist=600`, so setup,
@@ -798,7 +801,7 @@ the connection, the reconnects and the aggregation everything later rides on.
   machine shows its tasks in the lower half. Besides attaching, attached and
   disconnected, a machine can **need attention** — not installed, incompatible,
   or needing a login — and the main pane says which and what to run. `s` on a
-  disconnected remote machine reconnects with `bridge --start`.
+  disconnected remote machine starts its server over SSH.
 - **`--machine <label>` runs a command on a saved machine**: `fpk --machine
   workbox task demo` runs `~/.file-peeker/bin/fpk task demo` there over the
   shared connection and passes its output through.

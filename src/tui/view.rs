@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use super::app::{App, Machine, MachineState};
+use super::app::{App, Attention, Machine, MachineState};
 use crate::client::tasks::{Measure, TaskStatus, TaskView};
 
 const SIDEBAR_WIDTH: u16 = 26;
@@ -42,6 +42,7 @@ fn title_line(machine: &Machine) -> Paragraph<'static> {
         MachineState::Attaching => "attaching".to_owned(),
         MachineState::Starting => "starting the server".to_owned(),
         MachineState::Disconnected { .. } => "disconnected".to_owned(),
+        MachineState::NeedsAttention { .. } => "needs attention".to_owned(),
     };
     Paragraph::new(Line::from(vec![
         Span::styled(" fpk ", Style::new().add_modifier(Modifier::BOLD)),
@@ -149,9 +150,10 @@ fn machine_row(machine: &Machine, now: Instant, selected: bool) -> Line<'static>
         MachineState::Attached { .. } => (Color::Green, "attached".to_owned()),
         MachineState::Attaching => (Color::Yellow, "attaching".to_owned()),
         MachineState::Starting => (Color::Yellow, "starting".to_owned()),
-        MachineState::Disconnected { retry_at } => {
+        MachineState::Disconnected { retry_at, .. } => {
             (Color::Red, format!("retry {}", countdown(*retry_at, now)))
         }
+        MachineState::NeedsAttention { .. } => (Color::Magenta, "attention".to_owned()),
     };
     let mut row = Line::from(vec![
         Span::styled(" ● ", Style::new().fg(dot)),
@@ -169,13 +171,46 @@ fn draw_main(frame: &mut Frame<'_>, machine: &Machine, now: Instant, area: Rect)
         MachineState::Attached { .. } => vec![Line::from("Nothing to browse yet.")],
         MachineState::Attaching => vec![Line::from("Attaching to the server…")],
         MachineState::Starting => vec![Line::from("Starting the server…")],
-        MachineState::Disconnected { retry_at } => vec![
-            Line::from("Disconnected from the server."),
-            Line::from(format!(
+        MachineState::Disconnected { retry_at, reason } => {
+            let mut lines = vec![Line::from("Disconnected from the server.")];
+            if let Some(reason) = reason {
+                lines.push(Line::from(reason.clone()));
+            }
+            lines.push(Line::from(format!(
                 "Retrying in {}. Press s to start it.",
                 countdown(*retry_at, now)
-            )),
-        ],
+            )));
+            lines
+        }
+        MachineState::NeedsAttention {
+            attention,
+            retry_at,
+        } => {
+            let label = &machine.label;
+            let add = format!(
+                "fpk machine add {label} {}",
+                machine.ssh.as_deref().unwrap_or("<ssh-target>")
+            );
+            let (what, run) = match attention {
+                Attention::NotInstalled => (format!("fpk is not installed on {label}."), add),
+                Attention::Incompatible { found } => (
+                    format!("{label} has {found}, which this client cannot attach to."),
+                    add,
+                ),
+                Attention::NeedsLogin => (
+                    format!("{label} wants you to sign in."),
+                    format!("fpk machine login {label}"),
+                ),
+            };
+            vec![
+                Line::from(what),
+                Line::from(format!("Run `{run}` in a terminal.")),
+                Line::styled(
+                    format!("Checking again in {}.", countdown(*retry_at, now)),
+                    DIM,
+                ),
+            ]
+        }
     };
     let dim = matches!(machine.state, MachineState::Disconnected { .. });
     let style = if dim {
@@ -236,11 +271,14 @@ mod tests {
 
     #[test]
     fn attached_shows_the_server_and_an_empty_body() {
-        let mut app = App::new();
-        app.on_connection(ConnectionEvent::Attached {
-            server_version: "0.0.0".to_owned(),
-            pid: 4242,
-        });
+        let mut app = App::new(&[]);
+        app.on_connection(
+            0,
+            ConnectionEvent::Attached {
+                server_version: "0.0.0".to_owned(),
+                pid: 4242,
+            },
+        );
         let screen = render(&app, Instant::now());
         assert!(
             screen.contains("fpk · local · server 0.0.0 · pid 4242"),
@@ -256,10 +294,14 @@ mod tests {
     #[test]
     fn disconnected_counts_down_and_offers_to_start() {
         let now = Instant::now();
-        let mut app = App::new();
-        app.on_connection(ConnectionEvent::Disconnected {
-            retry_at: now + Duration::from_millis(3_500),
-        });
+        let mut app = App::new(&[]);
+        app.on_connection(
+            0,
+            ConnectionEvent::Disconnected {
+                retry_at: now + Duration::from_millis(3_500),
+                reason: None,
+            },
+        );
         let screen = render(&app, now);
         assert!(screen.contains("fpk · local · disconnected"), "{screen}");
         assert!(screen.contains("local   retry 4s"), "{screen}");
@@ -272,11 +314,14 @@ mod tests {
 
     #[test]
     fn the_lower_half_lists_tasks_in_submission_order() {
-        let mut app = App::new();
-        app.on_connection(ConnectionEvent::Attached {
-            server_version: "0.0.0".to_owned(),
-            pid: 1,
-        });
+        let mut app = App::new(&[]);
+        app.on_connection(
+            0,
+            ConnectionEvent::Attached {
+                server_version: "0.0.0".to_owned(),
+                pid: 1,
+            },
+        );
         let screen = render(&app, Instant::now());
         assert!(screen.contains("Tasks"), "{screen}");
         assert!(screen.contains("No tasks"), "{screen}");
@@ -317,7 +362,7 @@ mod tests {
                 Measure::Indeterminate,
             ),
         ] {
-            app.on_connection(ConnectionEvent::Tasks(TaskUpdate::Changed(task)));
+            app.on_connection(0, ConnectionEvent::Tasks(TaskUpdate::Changed(task)));
         }
         let screen = render(&app, Instant::now());
         let rows: Vec<&str> = screen
@@ -330,6 +375,82 @@ mod tests {
         assert!(rows[2].contains("◐ demo.count  42%"), "{screen}");
         assert!(rows[3].contains("○ demo.count  queued"), "{screen}");
         assert!(!screen.contains("No tasks"), "{screen}");
+    }
+
+    #[test]
+    fn several_machines_list_in_order_and_each_shows_its_own_state() {
+        let now = Instant::now();
+        let mut app = App::new(&[
+            ("workbox".to_owned(), "me@workbox".to_owned()),
+            ("nano4".to_owned(), "nano4".to_owned()),
+        ]);
+        app.on_connection(
+            0,
+            ConnectionEvent::Attached {
+                server_version: "0.0.0".to_owned(),
+                pid: 1,
+            },
+        );
+        app.on_connection(
+            1,
+            ConnectionEvent::NeedsAttention {
+                attention: Attention::NotInstalled,
+                retry_at: now + Duration::from_secs(8),
+            },
+        );
+        app.on_connection(
+            2,
+            ConnectionEvent::NeedsAttention {
+                attention: Attention::NeedsLogin,
+                retry_at: now + Duration::from_secs(2),
+            },
+        );
+        let screen = render(&app, now);
+        let rows: Vec<&str> = screen.lines().filter(|line| line.contains("● ")).collect();
+        assert!(rows[0].contains("local   attached"), "{screen}");
+        assert!(rows[1].contains("workbox attention"), "{screen}");
+        assert!(rows[2].contains("nano4   attention"), "{screen}");
+
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('j'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let screen = render(&app, now);
+        assert!(
+            screen.contains("fpk · workbox · needs attention"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("fpk is not installed on workbox."),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("fpk machine add workbox me@workbox"),
+            "{screen}"
+        );
+
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('j'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let screen = render(&app, now);
+        assert!(screen.contains("nano4 wants you to sign in."), "{screen}");
+        assert!(screen.contains("fpk machine login nano4"), "{screen}");
+    }
+
+    #[test]
+    fn a_disconnect_says_why_when_it_knows() {
+        let now = Instant::now();
+        let mut app = App::new(&[]);
+        app.on_connection(
+            0,
+            ConnectionEvent::Disconnected {
+                retry_at: now + Duration::from_secs(1),
+                reason: Some("its server is not running".to_owned()),
+            },
+        );
+        let screen = render(&app, now);
+        assert!(screen.contains("its server is not running"), "{screen}");
     }
 
     #[test]

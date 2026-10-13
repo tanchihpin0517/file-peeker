@@ -16,8 +16,10 @@
 //! [`protocol`], the two surfaces between them. `client` never names `server`:
 //! the only way from one to the other is a socket.
 
+mod build_info;
 mod cli;
 mod client;
+mod config;
 mod home;
 mod protocol;
 mod server;
@@ -45,5 +47,9 @@ pub fn run() -> ExitCode {
         cli::Invocation::Server => server::run(&home),
         cli::Invocation::Tui => tui::run(&home),
         cli::Invocation::Client(command) => cli::execute(&home, command),
+        cli::Invocation::Refused(reason) => {
+            eprintln!("fpk: {reason}");
+            ExitCode::from(2)
+        }
     }
 }

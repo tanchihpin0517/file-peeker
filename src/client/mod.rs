@@ -5,6 +5,9 @@
 //! this same binary as `fpk server`.
 
 pub(crate) mod api;
+pub(crate) mod machines;
+pub(crate) mod remote;
+pub(crate) mod ssh;
 pub(crate) mod tasks;
 
 use std::{
@@ -47,6 +50,8 @@ pub(crate) enum ClientError {
         #[source]
         source: io::Error,
     },
+    #[error("cannot start a server here: {0}")]
+    Unstartable(String),
     #[error("the server did not start within {}s; see {}", START_TIMEOUT.as_secs(), .log)]
     StartTimeout { log: String },
     /// The running server is a different build. Never replaced behind the
@@ -109,6 +114,9 @@ pub(crate) async fn start_server(home: &Home) -> Result<(), ClientError> {
 /// to the server log, which is where anything it says before its own logging is
 /// up has to land.
 fn start(home: &Home) -> Result<(), ClientError> {
+    // Checked here as well as in the server, so the reason reaches the user
+    // rather than a server log and a start that only times out.
+    home.check_sockets().map_err(ClientError::Unstartable)?;
     home.create().map_err(|source| ClientError::Io {
         context: format!("cannot create {}", home.dir().display()),
         source,
@@ -246,7 +254,17 @@ impl Watching {
 /// Returns an error when no server answers, the handshake fails, or the stream
 /// does not open.
 pub(crate) async fn watch(home: &Home) -> Result<Watching, ClientError> {
-    let mut client = ClientProtocolClient::new(channel(home).await?);
+    watch_on(channel(home).await?).await
+}
+
+/// [`watch`] over any channel to a server: the local socket, or a remote
+/// machine's bridge.
+///
+/// # Errors
+///
+/// Returns an error when the handshake fails or the stream does not open.
+pub(crate) async fn watch_on(channel: Channel) -> Result<Watching, ClientError> {
+    let mut client = ClientProtocolClient::new(channel);
     let attached = handshake(&mut client).await?;
     let events = client.watch(WatchRequest {}).await?.into_inner();
     Ok(Watching { attached, events })

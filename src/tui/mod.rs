@@ -25,10 +25,17 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
 
 use self::{
-    app::{App, MachineState},
-    connection::Backoff,
+    app::App,
+    connection::{Backoff, Target},
 };
-use crate::{client, home::Home};
+use crate::{
+    client::{
+        self, machines,
+        ssh::{Prompt, Ssh},
+    },
+    config::Config,
+    home::Home,
+};
 
 /// How often a disconnected screen redraws, so its countdown moves.
 const TICK: Duration = Duration::from_millis(250);
@@ -51,6 +58,14 @@ pub(crate) fn run(home: &Home) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Read before the terminal is taken, so a broken file says so plainly.
+    let targets = match targets(home) {
+        Ok(targets) => targets,
+        Err(error) => {
+            eprintln!("fpk: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     runtime.block_on(async {
         // Attach before taking the terminal, so a server that cannot start says
         // so on a normal screen rather than inside one that is about to vanish.
@@ -70,15 +85,14 @@ pub(crate) fn run(home: &Home) -> ExitCode {
 
         // `init` also installs a panic hook that restores the terminal first.
         let mut terminal = ratatui::init();
-        let outcome = event_loop(&mut terminal, home).await;
+        let outcome = event_loop(&mut terminal, targets).await;
         ratatui::restore();
 
         match outcome {
-            Ok(Some(pid)) => {
-                println!("detached; the server is still running (pid {pid})");
+            Ok(()) => {
+                println!("detached; every server keeps running");
                 ExitCode::SUCCESS
             }
-            Ok(None) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("fpk: {error}");
                 ExitCode::FAILURE
@@ -87,18 +101,64 @@ pub(crate) fn run(home: &Home) -> ExitCode {
     })
 }
 
-/// Runs until the user quits, and returns the pid of the server it was
-/// attached to when it did, if it was.
-async fn event_loop(terminal: &mut DefaultTerminal, home: &Home) -> io::Result<Option<u32>> {
-    let mut app = App::new();
-    let (events_tx, mut connection_events) = mpsc::channel(16);
-    let (commands, commands_rx) = mpsc::channel(4);
-    let connection = tokio::spawn(connection::run(
-        home.clone(),
-        Backoff::DEFAULT,
-        events_tx,
-        commands_rx,
-    ));
+/// `local`, then each enabled saved machine, with the label and SSH target
+/// the app lists for each.
+fn targets(home: &Home) -> Result<Vec<(String, String, Target)>, String> {
+    let config = Config::load(home)?;
+    let mut targets = vec![(
+        "local".to_owned(),
+        String::new(),
+        Target::Local(home.clone()),
+    )];
+    for machine in machines::load(home)?
+        .into_iter()
+        .filter(|machine| machine.enabled)
+    {
+        let ssh = Ssh::new(home, &config, &machine.ssh, Prompt::Never)
+            .map_err(|error| error.to_string())?;
+        targets.push((machine.label, machine.ssh, Target::Remote(ssh)));
+    }
+    Ok(targets)
+}
+
+/// Runs until the user quits.
+///
+/// Each machine has a connection task of its own, reconnecting on its own
+/// backoff, so a slow or lost remote holds up nothing else; `local` opens at
+/// once rather than waiting for the remote ones.
+async fn event_loop(
+    terminal: &mut DefaultTerminal,
+    targets: Vec<(String, String, Target)>,
+) -> io::Result<()> {
+    let remotes: Vec<(String, String)> = targets
+        .iter()
+        .skip(1)
+        .map(|(label, ssh, _)| (label.clone(), ssh.clone()))
+        .collect();
+    let mut app = App::new(&remotes);
+    let (merged_tx, mut connection_events) = mpsc::channel(64);
+    let mut commands = Vec::new();
+    let mut tasks = Vec::new();
+    for (index, (_, _, target)) in targets.into_iter().enumerate() {
+        let (events_tx, mut events) = mpsc::channel(16);
+        let (command_tx, command_rx) = mpsc::channel(4);
+        commands.push(command_tx);
+        tasks.push(tokio::spawn(connection::run(
+            target,
+            Backoff::DEFAULT,
+            events_tx,
+            command_rx,
+        )));
+        // Tags each machine's events with its row, so one loop serves them all.
+        let merged = merged_tx.clone();
+        tasks.push(tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if merged.send((index, event)).await.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
 
@@ -110,7 +170,7 @@ async fn event_loop(terminal: &mut DefaultTerminal, home: &Home) -> io::Result<O
             event = input.next() => match event {
                 Some(Ok(Event::Key(key))) => {
                     if let Some(command) = app.on_key(key) {
-                        let _ = commands.try_send(command);
+                        let _ = commands[app.selected()].try_send(command);
                     }
                 }
                 // A resize, focus change or paste only needs the redraw above.
@@ -118,17 +178,15 @@ async fn event_loop(terminal: &mut DefaultTerminal, home: &Home) -> io::Result<O
                 Some(Err(error)) => break Err(error),
                 None => break Ok(()),
             },
-            Some(event) = connection_events.recv() => app.on_connection(event),
+            Some((index, event)) = connection_events.recv() => app.on_connection(index, event),
             _ = tick.tick() => {}
         }
         if app.should_quit() {
             break Ok(());
         }
     };
-    connection.abort();
-    outcome?;
-    Ok(match app.selected_machine().state {
-        MachineState::Attached { pid, .. } => Some(pid),
-        _ => None,
-    })
+    for task in tasks {
+        task.abort();
+    }
+    outcome
 }

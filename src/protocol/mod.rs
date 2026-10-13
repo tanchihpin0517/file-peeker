@@ -7,6 +7,7 @@
 //!   versioned by [`api::API_GENERATION`], and the surface the CLI drives.
 
 pub(crate) mod api;
+pub(crate) mod probe;
 
 /// The client protocol's version. Bump it on any change a client relies on,
 /// including a new call: a client that needs `Watch` cannot use a server that

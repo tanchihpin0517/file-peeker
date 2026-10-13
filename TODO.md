@@ -132,7 +132,11 @@ after.
   task runtime — lifecycle, structured tree, cancellation, resources, FIFO
   admission per scope, coalesced events, retention — with test kinds only. The
   server now holds a runtime, `Watch` carries its tasks, and the TUI's sidebar
-  lists them in its lower half; `fpk task demo` starts one to watch.
+  lists them in its lower half; `fpk task demo` starts one to watch. Step 4 is
+  done: `fpk machine add` saves SSH machines and installs `fpk` on them — a
+  release build downloads its release, a dev build uploads and builds its own
+  source — the TUI lists and reconnects every machine over an SSH bridge, and
+  `--machine` runs a command on one. Releases publish from `v*` tags.
 
 ### Tier 3 — states the proposals draw
 

@@ -28,12 +28,31 @@ pub(super) enum ConnectionEvent {
         server_version: String,
         pid: u32,
     },
-    /// The attachment is gone; the next attempt is at `retry_at`.
+    /// The attachment is gone, or could not be made; the next attempt is at
+    /// `retry_at`. `reason` says why when there is more to say than that.
     Disconnected {
+        retry_at: Instant,
+        reason: Option<String>,
+    },
+    /// The machine cannot be attached to until someone does something.
+    /// Checked again at `retry_at`, in case they did it elsewhere.
+    NeedsAttention {
+        attention: Attention,
         retry_at: Instant,
     },
     /// What the attached server says about its tasks.
     Tasks(TaskUpdate),
+}
+
+/// What a machine needs before it can be attached to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum Attention {
+    /// No `fpk` on the host.
+    NotInstalled,
+    /// An `fpk` whose client protocol is not this client's.
+    Incompatible { found: String },
+    /// SSH wants a password or a login it may not ask for in the background.
+    NeedsLogin,
 }
 
 /// What the UI asks one machine's connection to do.
@@ -46,13 +65,25 @@ pub(super) enum Command {
 pub(super) enum MachineState {
     Attaching,
     Starting,
-    Attached { server_version: String, pid: u32 },
-    Disconnected { retry_at: Instant },
+    Attached {
+        server_version: String,
+        pid: u32,
+    },
+    Disconnected {
+        retry_at: Instant,
+        reason: Option<String>,
+    },
+    NeedsAttention {
+        attention: Attention,
+        retry_at: Instant,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct Machine {
     pub label: String,
+    /// The SSH target of a saved machine; `None` for `local`.
+    pub ssh: Option<String>,
     pub state: MachineState,
     /// The server's tasks, oldest first. Kept through a disconnect, as herdr
     /// keeps a lost machine's last state on screen, and replaced by the next
@@ -75,16 +106,20 @@ pub(super) struct App {
 }
 
 impl App {
-    /// The machine list starts with `local` and only `local`; saved SSH machines
-    /// join it in a later step, as rows rather than as a new layout.
-    pub(super) fn new() -> Self {
+    /// `local` first, then each saved machine — label and SSH target — in the
+    /// order given.
+    pub(super) fn new(remotes: &[(String, String)]) -> Self {
+        let machine = |label: &str, ssh: Option<&String>| Machine {
+            label: label.to_owned(),
+            ssh: ssh.cloned(),
+            state: MachineState::Attaching,
+            tasks: Vec::new(),
+            settled_at: HashMap::new(),
+        };
+        let mut machines = vec![machine("local", None)];
+        machines.extend(remotes.iter().map(|(label, ssh)| machine(label, Some(ssh))));
         Self {
-            machines: vec![Machine {
-                label: "local".to_owned(),
-                state: MachineState::Attaching,
-                tasks: Vec::new(),
-                settled_at: HashMap::new(),
-            }],
+            machines,
             selected: 0,
             quit: false,
         }
@@ -136,13 +171,15 @@ impl App {
         None
     }
 
-    /// Applies what the local machine's connection reported, as of now.
-    pub(super) fn on_connection(&mut self, event: ConnectionEvent) {
-        self.on_connection_at(event, Instant::now());
+    /// Applies what machine `index`'s connection reported, as of now.
+    pub(super) fn on_connection(&mut self, index: usize, event: ConnectionEvent) {
+        self.on_connection_at(index, event, Instant::now());
     }
 
-    pub(super) fn on_connection_at(&mut self, event: ConnectionEvent, now: Instant) {
-        let machine = &mut self.machines[0];
+    pub(super) fn on_connection_at(&mut self, index: usize, event: ConnectionEvent, now: Instant) {
+        let Some(machine) = self.machines.get_mut(index) else {
+            return;
+        };
         machine.state = match event {
             ConnectionEvent::Tasks(update) => {
                 machine.apply(update, now);
@@ -157,7 +194,16 @@ impl App {
                 server_version,
                 pid,
             },
-            ConnectionEvent::Disconnected { retry_at } => MachineState::Disconnected { retry_at },
+            ConnectionEvent::Disconnected { retry_at, reason } => {
+                MachineState::Disconnected { retry_at, reason }
+            }
+            ConnectionEvent::NeedsAttention {
+                attention,
+                retry_at,
+            } => MachineState::NeedsAttention {
+                attention,
+                retry_at,
+            },
         };
     }
 
@@ -237,14 +283,18 @@ mod tests {
     }
 
     fn disconnected(app: &mut App) {
-        app.on_connection(ConnectionEvent::Disconnected {
-            retry_at: Instant::now() + Duration::from_secs(1),
-        });
+        app.on_connection(
+            0,
+            ConnectionEvent::Disconnected {
+                retry_at: Instant::now() + Duration::from_secs(1),
+                reason: None,
+            },
+        );
     }
 
     #[test]
     fn starts_with_local_attaching() {
-        let app = App::new();
+        let app = App::new(&[]);
         assert_eq!(app.machines().len(), 1);
         assert_eq!(app.selected_machine().label, "local");
         assert_eq!(app.selected_machine().state, MachineState::Attaching);
@@ -252,22 +302,22 @@ mod tests {
 
     #[test]
     fn q_and_ctrl_c_quit() {
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         app.on_key(press(KeyCode::Char('q')));
         assert!(app.should_quit());
 
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.should_quit());
 
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         app.on_key(press(KeyCode::Char('c')));
         assert!(!app.should_quit());
     }
 
     #[test]
     fn selection_stays_inside_the_list() {
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         for code in [
             KeyCode::Char('j'),
             KeyCode::Down,
@@ -281,12 +331,15 @@ mod tests {
 
     #[test]
     fn s_starts_a_server_only_when_disconnected() {
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         assert_eq!(app.on_key(press(KeyCode::Char('s'))), None);
-        app.on_connection(ConnectionEvent::Attached {
-            server_version: "0.0.0".to_owned(),
-            pid: 1,
-        });
+        app.on_connection(
+            0,
+            ConnectionEvent::Attached {
+                server_version: "0.0.0".to_owned(),
+                pid: 1,
+            },
+        );
         assert_eq!(app.on_key(press(KeyCode::Char('s'))), None);
         disconnected(&mut app);
         assert_eq!(
@@ -297,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_key_release_does_nothing() {
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         let mut release = press(KeyCode::Char('q'));
         release.kind = KeyEventKind::Release;
         app.on_key(release);
@@ -326,14 +379,15 @@ mod tests {
     }
 
     fn changed(app: &mut App, task: TaskView, now: Instant) {
-        app.on_connection_at(ConnectionEvent::Tasks(TaskUpdate::Changed(task)), now);
+        app.on_connection_at(0, ConnectionEvent::Tasks(TaskUpdate::Changed(task)), now);
     }
 
     #[test]
     fn a_snapshot_replaces_the_tasks_and_a_change_updates_one() {
         let now = Instant::now();
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         app.on_connection_at(
+            0,
             ConnectionEvent::Tasks(TaskUpdate::Snapshot(vec![
                 task("b", 2, TaskStatus::Running),
                 task("a", 1, TaskStatus::Queued { on_resource: false }),
@@ -362,6 +416,7 @@ mod tests {
         disconnected(&mut app);
         assert_eq!(app.selected_machine().tasks.len(), 3);
         app.on_connection_at(
+            0,
             ConnectionEvent::Tasks(TaskUpdate::Snapshot(Vec::new())),
             now,
         );
@@ -371,7 +426,7 @@ mod tests {
     #[test]
     fn a_settled_task_lingers_five_seconds_then_goes() {
         let start = Instant::now();
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         changed(&mut app, task("a", 1, TaskStatus::Running), start);
         changed(&mut app, task("b", 2, TaskStatus::Running), start);
         changed(&mut app, task("a", 1, TaskStatus::Succeeded), start);
@@ -394,7 +449,7 @@ mod tests {
     #[test]
     fn a_task_finishing_between_two_running_ones_leaves_alone() {
         let start = Instant::now();
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         for (submitted, id) in (0..).zip(["first", "middle", "last"]) {
             changed(&mut app, task(id, submitted, TaskStatus::Running), start);
         }
@@ -411,7 +466,7 @@ mod tests {
     #[test]
     fn a_running_task_never_expires() {
         let start = Instant::now();
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         changed(&mut app, task("a", 1, TaskStatus::Running), start);
         app.expire(start + Duration::from_secs(3600));
         assert_eq!(ids(&app), ["a"]);
@@ -420,7 +475,7 @@ mod tests {
     #[test]
     fn a_snapshot_shows_only_settled_tasks_this_client_saw_end() {
         let start = Instant::now();
-        let mut app = App::new();
+        let mut app = App::new(&[]);
         changed(&mut app, task("lingering", 1, TaskStatus::Running), start);
         changed(&mut app, task("lingering", 1, TaskStatus::Succeeded), start);
         changed(&mut app, task("running", 2, TaskStatus::Running), start);
@@ -429,6 +484,7 @@ mod tests {
         // and "old" finished before it ever looked.
         let back = start + Duration::from_secs(2);
         app.on_connection_at(
+            0,
             ConnectionEvent::Tasks(TaskUpdate::Snapshot(vec![
                 task("old", 0, TaskStatus::Succeeded),
                 task("lingering", 1, TaskStatus::Succeeded),
@@ -446,11 +502,14 @@ mod tests {
 
     #[test]
     fn connection_events_set_the_machine_state() {
-        let mut app = App::new();
-        app.on_connection(ConnectionEvent::Attached {
-            server_version: "0.0.0".to_owned(),
-            pid: 42,
-        });
+        let mut app = App::new(&[]);
+        app.on_connection(
+            0,
+            ConnectionEvent::Attached {
+                server_version: "0.0.0".to_owned(),
+                pid: 42,
+            },
+        );
         assert_eq!(
             app.selected_machine().state,
             MachineState::Attached {
@@ -463,7 +522,7 @@ mod tests {
             app.selected_machine().state,
             MachineState::Disconnected { .. }
         ));
-        app.on_connection(ConnectionEvent::Starting);
+        app.on_connection(0, ConnectionEvent::Starting);
         assert_eq!(app.selected_machine().state, MachineState::Starting);
     }
 }

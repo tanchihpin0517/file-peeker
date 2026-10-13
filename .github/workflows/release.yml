@@ -1,0 +1,108 @@
+name: Release
+
+# Pushing a `v*` tag publishes `fpk` for Linux and macOS on x86_64 and aarch64,
+# as herdr publishes `herdr-<os>-<arch>`. A release build of `fpk` installs on a
+# remote host by downloading exactly the release of its own version from here,
+# so the asset names and SHA256SUMS below are a contract with
+# `src/client/install-release.sh`.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  version:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      # A client installs the release named for its own version, so a tag that
+      # disagrees with the crate would publish binaries nobody can ask for.
+      - name: The tag names the crate's version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml's version $version" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Static musl builds, so one binary runs on any distribution's C
+          # library, old cluster nodes included.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: fpk-linux-x86_64 }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, asset: fpk-linux-aarch64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, asset: fpk-macos-x86_64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, asset: fpk-macos-aarch64 }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the pinned toolchain and the target
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      # zig is the cross linker for both musl targets, so one runner builds
+      # both without a container.
+      - name: Install zig
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        run: cargo install --locked cargo-zigbuild
+      - name: Build
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            cargo zigbuild --release --locked --target ${{ matrix.target }} --bin fpk
+          else
+            cargo build --release --locked --target ${{ matrix.target }} --bin fpk
+          fi
+          cp target/${{ matrix.target }}/release/fpk ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: assets
+        run: |
+          sha256sum fpk-* > SHA256SUMS
+          cat SHA256SUMS
+      # A tag with a pre-release part, such as v0.1.0-alpha.1, publishes a
+      # pre-release.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          case "$GITHUB_REF_NAME" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${prerelease[@]}"
