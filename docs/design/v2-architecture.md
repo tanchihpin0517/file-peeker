@@ -547,7 +547,7 @@ v2 is the package `file-peeker` at the repository root. It depends on nothing in
 ```text
 src/
 ├── task/          the runtime: ids, kinds, lifecycle, tree, admission, resources, events
-├── fs/            host-local filesystem work; task-agnostic, takes a CancellationToken
+├── fs/            host-local filesystem work; task-agnostic, cancelled by being dropped
 ├── path_string.rs lossless names and paths
 ├── home.rs        where a server's files live: sockets, lock, log
 ├── session/       tabs, trees, sorting, selection, filter, views, actions, persistence
@@ -870,6 +870,46 @@ Ported from `old/src/host_path.rs` with its tests, in
 [`path_string`](../../src/path_string.rs); nothing else uses it until step 6.
 Constructors with no caller yet — a breadcrumb's fragment, an unvalidated
 fixture — come back with what needs them.
+
+### Step 6: `fs`
+
+This host's filesystem, and the only module that touches it: the shipping
+crate's `fs`, over `PathString`.
+
+| Operation | Does |
+| --- | --- |
+| `resolve_path` | A leading `~` and `.`/`..`, with nothing touched |
+| `list_dir` | One directory's entries, streamed, each with one `lstat`'s metadata |
+| `walk_dir` | Everything below a directory, pre-order depth first, symlinks emitted but never followed |
+| `read_file` | A regular file's bytes, streamed |
+| `write_file` | A new file from a stream, through a hidden partial file, published whole or not at all |
+
+- **Cancelling is dropping.** Every operation runs inside a task, and the task
+  owns cancelling it, as it owns progress and state: a body selects on its
+  context's `cancelled()` and drops the operation. So `fs` holds no token and
+  the shipping crate's `FsService` is gone. Each `.await` is a point it stops
+  at, and a stream does no work until pulled. A write's partial file is
+  unlinked synchronously as it drops, so it is gone before the task reports
+  itself cancelled — not left to a spawned cleanup, as the shipping crate did.
+- **Paths must be absolute once a leading `~` is expanded.** A relative path
+  is relative to something only the caller knows, such as a tab's directory,
+  and the server's working directory is wherever the client that started it
+  happened to be; so it is refused, and the session joins it first. `~` is the
+  server's own `HOME`, and only at the start: a directory named `~` further
+  along stays itself, and `~user` is refused.
+- **No `$VARIABLE` expansion.** It would read the server's environment — the
+  starting client's — not the user's; `shellexpand` is not a dependency.
+- **One entry's failure is that entry's.** An entry whose `lstat` is refused
+  comes back degraded, with why, and the listing carries on.
+- **Errors carry a kind** — invalid argument, already exists, not found,
+  permission denied, not a directory, not a file, internal — and a message
+  naming the path. There is no cancelled kind: a dropped operation never
+  returns.
+- **Linux and macOS only**: an entry's mode is a `u32`, not an `Option`.
+
+Ported with its tests in [`fs`](../../src/fs/mod.rs). Names outside UTF-8 are
+tested where the filesystem holds them; APFS refuses them, so on macOS only the
+literal-marker round trip runs, and Linux CI covers the rest.
 
 ## What this replaces at cutover
 

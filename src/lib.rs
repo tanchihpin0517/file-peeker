@@ -20,9 +20,14 @@ mod build_info;
 mod cli;
 mod client;
 mod config;
+// Reached from its tests alone until step 7's kinds run it, and its tests use
+// only part of what it exports; this allow goes then, with the one on
+// `path_string`.
+#[allow(dead_code, unused_imports)]
+mod fs;
 mod home;
-// Nothing reaches it outside its tests until step 6's `fs` resolves through it;
-// this allow goes then.
+// Reached from `fs` and tests alone until step 7's kinds use it; this allow
+// goes then.
 #[cfg_attr(not(test), allow(dead_code))]
 mod path_string;
 mod protocol;
