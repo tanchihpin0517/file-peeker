@@ -20,6 +20,12 @@ rather than to the whole listing. What is left in this tier is the tree that hol
 those entries: how it stores its rows, and what order it puts them in. Beyond it are
 the input model, a second connection, and the operations.
 
+**Most of what remains is now built in a new crate rather than here.** Item 8
+starts a task-driven architecture as a second workspace crate and ports features
+into it one at a time; the current crate takes bug fixes only. An item whose shape
+the new architecture changes is built once, there, when its area is ported — the
+route below says where each one lands.
+
 ## Status
 
 This is a **work list**, not current behavior. Each item names what is true in
@@ -101,17 +107,19 @@ after.
   combinations reset to the default on every start. Decide the file location, the
   handling of missing and invalid values, and whether both front ends share one
   file.
-- [ ] **8. Let the Client own its tasks.** Proposed in
-  [Client task model](docs/design/client-task-model.md). Each front end keeps its
-  own task lifecycle today — minting request IDs, rejecting stale results,
-  aborting a superseded request, joining at shutdown — and `crate::gui` keeps
-  none of it, which is item 18. Items 9 and 10 each add tasks that need watching
-  rather than awaiting, so the third copy of that machinery is about to be
-  written. The proposal makes every operation a task the Client registers,
-  observes and cancels, owning lifecycle but never payload, so the Client still
-  holds no browsing state. Its steps 1 and 2 retire item 18 by construction;
-  step 3 is what item 9 lifts; step 4 carries item 10's progress. Open: a
-  retry's identity, and whether the tree stores a `TaskId`, which reaches item 5.
+- [ ] **8. Build the task architecture as a new crate, and port into it.**
+  Proposed in [Task architecture](docs/design/task-architecture.md). Each front
+  end keeps its own task lifecycle today — minting request IDs, rejecting stale
+  results, aborting a superseded request, joining at shutdown — and `crate::gui`
+  keeps none of it, which is item 18; the server cannot say what it is doing at
+  all. The proposal puts a task runtime at the top of the client and the server:
+  every asynchronous, fallible operation is a task kind it submits, admits, runs,
+  observes and cancels, in a structured task tree, with connections as resources
+  tasks wait on. Filesystem access becomes one family of kinds. It is built as
+  `crates/next`, which depends on nothing here, and reaches parity through a
+  porting order of twelve steps, 0 to 11, ending in cutover. Open: the first milestone — the
+  runtime alone, or a walking skeleton through one CLI subcommand — and the new
+  binaries' names until cutover.
 
 ### Tier 3 — states the proposals draw
 
@@ -182,23 +190,30 @@ None of these touch the data layer.
 | 17 — contrast checks | 16 |
 
 Nothing else is blocked. Items 4, 10 and 13 waited on the entry model and no longer
-do. Items 4 and 5 do not block each other, but 5 decides how expensive 4 is, which
-is why the route puts it first. Item 8 blocks nothing, but 9 and 10 are cheaper on
-top of it than beside it.
+do. Items 4 and 5 do not block each other, but 5 decides how expensive 4 is. Items 4,
+5, 9, 10, 11, 12, 13 and 18 are no longer built against the current crate; each
+lands at the porting step that owns its area.
 
 ## Suggested route
 
 1. ~~Items 1, 2 and 3: the entry model settles before anything reads it.~~ Done.
-2. Items 18 and 19, as one pass over the two defects the proposal already found.
-3. Item 5, which decides how expensive item 4 is, and whose first step — splitting
-   the tail off an expansion — is worth having on its own.
-4. Item 4, now that there is metadata to sort by — and a decision to make about
-   whether a collation reads the displayed name or the real bytes.
-5. Item 8's first two steps, after item 5 has settled what the tree stores, so
-   that items 9 and 10 add tasks to a registry rather than to each front end.
-6. Items 6 and 7, which are what a selectable layout and palette are carried on.
-7. Items 9 through 12 in parallel with the GUI proposal's first three build
-   phases — widening the palette, landing the ten, and extracting the
-   components — since those phases do not read the entry model.
-8. Items 13, 14 and 15 answered before the fourth build phase introduces
-   `Layout`, because that is where the proposals begin to depend on them.
+2. Item 8, through the [porting order](docs/design/task-architecture.md#porting-order).
+   The current crate keeps shipping and takes bug fixes only.
+3. The data-layer items land inside that order rather than beside it, designed in
+   rather than retrofitted:
+
+   | Item | Porting step |
+   | --- | --- |
+   | 10 — transfer progress and queue | 7, copy and transfers |
+   | 13 — recursive directory sizes | 7, as server-originated `DirSize`, if the treemap stays |
+   | 11 — bounded file read | after 7, once `ReadFile` is a kind |
+   | 4 and 5 — sorting and segmented rows | 8, the browser model |
+   | 12 — refresh | 9 and 10, the front-end ports |
+   | 9 — several connections | 10, the GUI port |
+   | 18 — the collapse leak | 10, by construction |
+
+4. Items that only reach drawing — 6, 7, 14 to 17 and 19 — are front-end code that
+   ports nearly as it is, so they may land on the current crate at any time without
+   being thrown away. Item 18 needs no fix there unless it is wanted before step 10.
+5. Items 13, 14 and 15 answered before the GUI proposal's fourth build phase
+   introduces `Layout`, because that is where the proposals begin to depend on them.
