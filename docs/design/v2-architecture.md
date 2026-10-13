@@ -109,20 +109,34 @@ window system and a GPU backend. A remote install builds without it.
 
 ### Files
 
-Per user, under `~/.config/file-peeker/`, as herdr keeps `~/.config/herdr/`:
+Per user, in one directory, `~/.file-peeker/`, mode `0700`:
 
-| File | Holds |
-| --- | --- |
-| `file-peeker.sock` | The public API socket |
-| `file-peeker-client.sock` | The private client protocol socket |
-| `server.lock` | Single-instance lock |
-| `server.log` | Server log, structured |
-| `session.json` | The default session's saved shape |
-| `sessions/<name>.json` | A named session's saved shape |
-| `session-snapshots/` | Recovery snapshots |
-| `session-backups/` | Unreadable session files, preserved |
-| `config.toml` | Client settings |
-| `machines.toml` | Saved SSH machines |
+```text
+~/.file-peeker/
+├── config.toml              client settings
+├── machines.toml            saved SSH machines
+├── server.lock              single-instance lock
+├── file-peeker.sock         the public API socket
+├── file-peeker-client.sock  the private client protocol socket
+├── logs/
+│   ├── server.log           structured
+│   └── client.log
+└── sessions/
+    ├── default.json         the default session's saved shape
+    ├── <name>.json          a named session's
+    ├── snapshots/           recovery snapshots
+    └── backups/             unreadable session files, preserved
+```
+
+**This is where File Peeker departs from herdr**, which splits its files between
+`~/.config/herdr/` and `~/.local/state/herdr/`. The XDG variables that would
+place a split are often set only in an interactive shell's startup files, and a
+remote server is reached by `ssh host fpk bridge`, a non-interactive command
+that may not read them. A server started from a login shell and a bridge started
+over SSH would then resolve different directories, and the client would start a
+second server rather than find the first. One directory resolved from `HOME`
+alone resolves the same way from a login shell, a cron job and an SSH command.
+`FILE_PEEKER_HOME` overrides it outright, for tests and development.
 
 Both sockets are mode `0600`. That replaces the current crate's bearer token: a
 unix socket in a private directory is reachable only by its user, and a remote
@@ -149,18 +163,18 @@ As herdr does, persistence has two strengths:
 | Event | Tasks | Session shape | Listed contents |
 | --- | --- | --- | --- |
 | Client detaches and reattaches | keep running | kept | kept, live |
-| Server restarts | lost | restored from `session.json` | re-listed on restore |
-| Machine restarts | lost | restored from `session.json` or a snapshot | re-listed on restore |
+| Server restarts | lost | restored from `sessions/default.json` | re-listed on restore |
+| Machine restarts | lost | restored from `sessions/default.json` or a snapshot | re-listed on restore |
 
-- **The session shape is saved, the contents are not.** `session.json` holds
+- **The session shape is saved, the contents are not.** A session file holds
   tabs, root paths, expanded paths, the selection, filter and sort — never
   directory entries. Restoring re-lists what was expanded, so a restored tab
   shows the filesystem as it is now. A path that no longer exists restores as
   that tab's error, not as a silent move to the home directory, as herdr keeps a
   pane whose directory is gone.
 - **Saves are debounced** on change and on shutdown.
-- **Snapshots**: up to 48 in `session-snapshots/`, at most one per 15 minutes. An
-  unreadable `session.json` is moved to `session-backups/`, keeping three, and is
+- **Snapshots**: up to 48 in `sessions/snapshots/`, at most one per 15 minutes. An
+  unreadable session file is moved to `sessions/backups/`, keeping three, and is
   never restored automatically.
 - **Tasks do not survive a server restart.** A copy that was in flight is gone;
   its destination was a hidden partial file published atomically, so nothing
@@ -500,6 +514,7 @@ crates/next/src/
 ├── task/          the runtime: ids, kinds, lifecycle, tree, admission, resources, events
 ├── fs/            host-local filesystem work; task-agnostic, takes a CancellationToken
 ├── host_path.rs   lossless names and paths
+├── home.rs        where a server's files live: sockets, lock, log
 ├── session/       tabs, trees, sorting, selection, filter, views, actions, persistence
 ├── server/        the daemon: sockets, lock, auto-start, server kinds, API, client protocol service
 ├── protocol/      the client protocol schema and the API schema
@@ -511,12 +526,12 @@ crates/next/src/
 
 | Module | May name |
 | --- | --- |
-| `task`, `fs`, `host_path` | nothing else in the crate |
+| `task`, `fs`, `host_path`, `home` | nothing else in the crate |
 | `protocol` | `task`, `host_path` |
 | `session` | `task`, `fs`, `host_path` |
-| `server` | `task`, `fs`, `session`, `protocol`, `host_path` |
-| `client` | `task`, `protocol`, `host_path` — never `server` or `session` |
-| `cli`, `tui`, `gui` | `client`, `protocol`, `task`'s observer types |
+| `server` | `task`, `fs`, `session`, `protocol`, `host_path`, `home` |
+| `client` | `task`, `protocol`, `host_path`, `home` — never `server` or `session` |
+| `cli`, `tui`, `gui` | `client`, `protocol`, `home`, `task`'s observer types |
 
 `client` never naming `server` is the structural form of "the server owns the
 session": a front end can only reach browsing state through a view.
@@ -536,6 +551,7 @@ session": a front end can only reach browsing state through a view.
 | Kind set | Open trait, closed descriptor | Filesystem work is one family among others |
 | Composition | Structured task tree, phases for non-independent steps | Batches, transfers, sizes and restore need children |
 | Persistence | Session shape saved, contents and tasks not | Restores reflect the filesystem as it is now |
+| Files | One directory, `~/.file-peeker/`, from `HOME` alone | A server and an SSH bridge must resolve the same place; XDG variables may differ between them |
 | Local transport | Unix sockets, mode `0600` | Replaces the bearer token with the filesystem's own access control |
 | Remote transport | SSH, ControlMaster, a stdio bridge | No listening port, no socket forwarding to configure |
 | Remote install | With approval only; background reconnects never install | A server on someone's host is theirs to agree to |
@@ -568,7 +584,7 @@ crate changes along the way.
 | 3 | `fs` and `host_path` | The filesystem core, with its own tests |
 | 4 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
 | 5 | The client protocol, views and actions; the TUI attached through them | **Local walking skeleton** |
-| 6 | Persistence: `session.json`, snapshots, backups, restore | Reattach and restart |
+| 6 | Persistence: `sessions/default.json`, snapshots, backups, restore | Reattach and restart |
 | 7 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
 | 8 | Machines: bridge, ControlMaster, approval-based install, reconnect, dimmed views, aggregation in the TUI | Several machines in one client |
 | 9 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
@@ -586,8 +602,8 @@ starts, is found, answers, and stops, holding no tasks and no sessions. Everythi
 after it is a feature added to a server that already runs.
 
 - `file-peeker server` runs headless: takes `server.lock`, creates
-  `~/.config/file-peeker/` mode `0700`, binds `file-peeker.sock` and
-  `file-peeker-client.sock` mode `0600`, writes `server.log`, and removes both
+  `~/.file-peeker/` mode `0700`, binds `file-peeker.sock` and
+  `file-peeker-client.sock` mode `0600`, writes `logs/server.log`, and removes both
   sockets on exit.
 - `file-peeker` with no server running spawns `current_exe() server` detached in
   its own session, waits for the client socket, and attaches. With one running,
@@ -599,6 +615,11 @@ after it is a feature added to a server that already runs.
   `file-peeker status` and `file-peeker server stop`.
 - A stale socket left by a crashed server is detected — the lock is free but the
   socket exists — and replaced rather than refused.
+- A lock held with no socket is a server that has not bound yet or is exiting;
+  a starting server retries for a second rather than losing to it, which is what
+  makes `fpk server stop && fpk` start a fresh server.
+- `FILE_PEEKER_HOME` overrides the directory, so tests and development run a
+  server that cannot meet the user's real one.
 - `SIGTERM` and `server stop` both shut down cleanly; a client detaching does not.
 
 It proves the claim the whole design rests on: closing the client leaves the

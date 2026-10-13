@@ -123,7 +123,8 @@ after.
   `fpk` until cutover. Open: whether round-tripped input needs an optimistic
   cursor over SSH.
   Step 0 is done: `crates/next` is a workspace member, named `file-peeker-next`,
-  sharing the root's lints and covered by `make lint` and `make test`.
+  sharing the root's lints and covered by `make lint` and `make test`. Step 1 is
+  done: `fpk` starts, finds, attaches to and stops a detached per-user server.
 
 ### Tier 3 — states the proposals draw
 

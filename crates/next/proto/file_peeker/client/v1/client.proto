@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+// The private client protocol: between a front end and the server on its machine,
+// over `file-peeker-client.sock`. Versioned by one integer, `CLIENT_PROTOCOL` in
+// `protocol`, rather than by this package name; the package changes only if the
+// protocol is ever split.
+package file_peeker.client.v1;
+
+service ClientProtocol {
+  // The first call a client makes. A server refuses a client whose protocol
+  // version differs, with FAILED_PRECONDITION and both versions in the message.
+  rpc Attach(AttachRequest) returns (AttachResponse);
+}
+
+message AttachRequest {
+  string client_version = 1;
+  uint32 client_protocol = 2;
+}
+
+message AttachResponse {
+  string server_version = 1;
+  uint32 client_protocol = 2;
+  uint32 pid = 3;
+}
