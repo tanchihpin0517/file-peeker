@@ -857,13 +857,19 @@ because "host" reads as a machine and this has nothing to do with one.
   to pick one meaning, and either is wrong somewhere: the escaped text shows a
   person `%%`, and the readable text, `caf�.txt`, has lost the byte that finds
   the file. Without it a caller says which: `display()` for a person,
-  `as_str()` for a program, `fs`'s `resolve_path` for the filesystem.
+  `as_str()` for a program, `to_path_buf()` for the filesystem — exact, with
+  nothing expanded; `fs`'s `resolve_path` adds `~` on top.
 - **The escape never produces `/`, and is canonical**: joining and prefix tests
   work on the escaped form unchanged, and one file has one spelling.
-- **A name is a one-component path**, so one type holds both.
+- **A name is a one-component path**, so one type holds both; `is_name()` tells
+  one from a longer path, as a destination filename must be.
+- **Linux and macOS only**, so the conversions are Unix's bytes; the shipping
+  crate's non-Unix arms are gone.
 
-Ported from `old/src/host_path.rs` with its tests; nothing else uses it until
-step 6.
+Ported from `old/src/host_path.rs` with its tests, in
+[`path_string`](../../src/path_string.rs); nothing else uses it until step 6.
+Constructors with no caller yet — a breadcrumb's fragment, an unvalidated
+fixture — come back with what needs them.
 
 ## What this replaces at cutover
 

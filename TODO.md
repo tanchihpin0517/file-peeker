@@ -139,6 +139,8 @@ after.
   `--machine` runs a command on one. Releases publish from `v*` tags. The TUI
   takes the mouse, as herdr's does: clicks select machines and press key hints,
   the wheel moves the selection, and `[ui] mouse_capture = false` turns it off.
+  Step 5 is done: `PathString`, the shipping crate's `HostPath` renamed, holds
+  any name or path as a string without losing a byte.
 
 ### Tier 3 — states the proposals draw
 

@@ -21,6 +21,10 @@ mod cli;
 mod client;
 mod config;
 mod home;
+// Nothing reaches it outside its tests until step 6's `fs` resolves through it;
+// this allow goes then.
+#[cfg_attr(not(test), allow(dead_code))]
+mod path_string;
 mod protocol;
 mod server;
 // The server runs only the demo kind so far, so children, resources and the
