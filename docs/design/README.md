@@ -3,7 +3,7 @@
 This directory holds proposals: design work labeled as a future possibility
 rather than as current behavior. Most of it is the two browsable galleries, one
 per frontend, for making a frontend's arrangement and its colors selectable
-rather than fixed. [Task architecture](task-architecture.md) is the exception
+rather than fixed. [v2 architecture](v2-architecture.md) is the exception
 and is described at the end.
 
 ## Layout and palette galleries
@@ -60,11 +60,11 @@ hold; a desktop palette gets true color, real elevation and a selection ground
 that is a color rather than an inversion. Naming the same palette twice across
 two frontends would have forced one of the two to render a compromise.
 
-## Task architecture
+## v2 architecture
 
-[Task architecture](task-architecture.md) is a proposal for the whole
-application rather than for a frontend's appearance: a task runtime becomes the
-top layer of both the client and the server, every unit of asynchronous work
-becomes a task it runs, observes and cancels, and filesystem access becomes one
-family of task kinds. It shares this directory because it is a proposal, not
-because it shares the galleries' seam.
+[v2 architecture](v2-architecture.md) is a proposal for rebuilding the whole
+application rather than for a frontend's appearance: a persistent server on every
+machine owns the tasks and the browsing session, a task runtime is that server's
+top layer, and front ends become clients that attach, render and detach. It
+shares this directory because it is a proposal, not because it shares the
+galleries' seam.

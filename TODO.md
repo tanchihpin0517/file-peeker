@@ -20,11 +20,11 @@ rather than to the whole listing. What is left in this tier is the tree that hol
 those entries: how it stores its rows, and what order it puts them in. Beyond it are
 the input model, a second connection, and the operations.
 
-**Most of what remains is now built in a new crate rather than here.** Item 8
-starts a task-driven architecture as a second workspace crate and ports features
-into it one at a time; the current crate takes bug fixes only. An item whose shape
-the new architecture changes is built once, there, when its area is ported — the
-route below says where each one lands.
+**Most of what remains is now built in v2 rather than here.** Item 8 rewrites
+File Peeker as a second workspace crate — a persistent server per machine with a
+task runtime as its top layer, front ends as clients — with no compatibility with
+this one. The current crate takes bug fixes only. An item whose shape v2 changes is
+built once, there, at the step that owns its area; the route below says which.
 
 ## Status
 
@@ -107,19 +107,21 @@ after.
   combinations reset to the default on every start. Decide the file location, the
   handling of missing and invalid values, and whether both front ends share one
   file.
-- [ ] **8. Build the task architecture as a new crate, and port into it.**
-  Proposed in [Task architecture](docs/design/task-architecture.md). Each front
-  end keeps its own task lifecycle today — minting request IDs, rejecting stale
-  results, aborting a superseded request, joining at shutdown — and `crate::gui`
-  keeps none of it, which is item 18; the server cannot say what it is doing at
-  all. The proposal puts a task runtime at the top of the client and the server:
-  every asynchronous, fallible operation is a task kind it submits, admits, runs,
-  observes and cancels, in a structured task tree, with connections as resources
-  tasks wait on. Filesystem access becomes one family of kinds. It is built as
-  `crates/next`, which depends on nothing here, and reaches parity through a
-  porting order of twelve steps, 0 to 11, ending in cutover. Open: the first milestone — the
-  runtime alone, or a walking skeleton through one CLI subcommand — and the new
-  binaries' names until cutover.
+- [ ] **8. Rewrite as v2: a persistent server per machine, run by tasks.**
+  Proposed in [v2 architecture](docs/design/v2-architecture.md), with every
+  decision defaulting to how [herdr](https://herdr.dev) does it. Each machine runs
+  one persistent server that owns its tasks and its browsing sessions — tabs,
+  trees, selection — and keeps running with no client attached; front ends attach
+  over a unix socket or an SSH bridge, render views the server supplies, and send
+  actions. Servers never talk to each other; the client aggregates them. The
+  server's top layer is a task runtime: every asynchronous, fallible operation is
+  a task kind in a structured tree, and filesystem access is one family of kinds.
+  A public JSON API sits beside the private client protocol, and the CLI is a
+  client of the API. Built as `crates/next` in thirteen steps, 0 to 12, ending in
+  cutover. Step 1 is an empty server — started, found, answering and stopped,
+  with nothing inside — and step 5 is a local walking skeleton. Open: the new
+  binary's name until cutover, and whether round-tripped input needs an
+  optimistic cursor over SSH.
 
 ### Tier 3 — states the proposals draw
 
@@ -189,31 +191,28 @@ None of these touch the data layer.
 | --- | --- |
 | 17 — contrast checks | 16 |
 
-Nothing else is blocked. Items 4, 10 and 13 waited on the entry model and no longer
-do. Items 4 and 5 do not block each other, but 5 decides how expensive 4 is. Items 4,
-5, 9, 10, 11, 12, 13 and 18 are no longer built against the current crate; each
-lands at the porting step that owns its area.
+Nothing else is blocked. Every item from 4 onward except the palette and drawing
+items is now built in v2 rather than against the current crate.
 
 ## Suggested route
 
 1. ~~Items 1, 2 and 3: the entry model settles before anything reads it.~~ Done.
-2. Item 8, through the [porting order](docs/design/task-architecture.md#porting-order).
+2. Item 8, through the [v2 build order](docs/design/v2-architecture.md#build-order).
    The current crate keeps shipping and takes bug fixes only.
-3. The data-layer items land inside that order rather than beside it, designed in
-   rather than retrofitted:
+3. The other items land inside that order, designed in rather than retrofitted:
 
-   | Item | Porting step |
+   | Item | v2 step |
    | --- | --- |
-   | 10 — transfer progress and queue | 7, copy and transfers |
-   | 13 — recursive directory sizes | 7, as server-originated `DirSize`, if the treemap stays |
-   | 11 — bounded file read | after 7, once `ReadFile` is a kind |
-   | 4 and 5 — sorting and segmented rows | 8, the browser model |
-   | 12 — refresh | 9 and 10, the front-end ports |
-   | 9 — several connections | 10, the GUI port |
-   | 18 — the collapse leak | 10, by construction |
+   | 4 and 5 — sorting and segmented rows | 4, sessions on the server |
+   | 7 — configuration | 5, client-side `config.toml`; the server reads no UI settings |
+   | 9 — several connections | 8, machines |
+   | 10 — transfer progress and queue | 9, copies |
+   | 11, 12, 13 — preview read, refresh, directory sizes | 10 |
+   | 6 — desktop keyboard and focus | 11, the desktop client |
+   | 18 — the collapse leak | 4, by construction: a collapse cancels on the server |
 
-4. Items that only reach drawing — 6, 7, 14 to 17 and 19 — are front-end code that
-   ports nearly as it is, so they may land on the current crate at any time without
-   being thrown away. Item 18 needs no fix there unless it is wanted before step 10.
-5. Items 13, 14 and 15 answered before the GUI proposal's fourth build phase
-   introduces `Layout`, because that is where the proposals begin to depend on them.
+4. The palette and drawing items — 14 to 17 and 19 — belong to the desktop client,
+   step 11. The current GUI is replaced rather than ported, so work on them there
+   would be thrown away.
+5. Item 13's treemap decision, and items 14 and 15, answered before step 11 builds
+   the desktop client's layouts.

@@ -49,7 +49,7 @@ and link to that owner rather than duplicate implementation details.
 | [GUI layout and palette gallery](design/gui-layouts.md) | The desktop front end's ten layouts, ten palettes and window-size rungs |
 | [TUI layout and palette system](design/tui-layout-spec.md) | The TUI proposal's implementation contract |
 | [GUI layout and palette system](design/gui-layout-spec.md) | The GUI proposal's implementation contract: types, component metrics, palette values, build order |
-| [Task architecture](design/task-architecture.md) | The proposed task-driven architecture: the runtime as the top layer on client and server, task kinds, the task tree, the wire change and build order |
+| [v2 architecture](design/v2-architecture.md) | The proposed rewrite: a persistent server per machine, a task runtime as its top layer, sessions and views, machines, protocols and build order |
 | [State ownership](state-ownership.md) | Cross-client and cross-UI ownership comparison |
 | [Client test CLI](client-cli.md) | Test CLI commands and output behavior |
 
