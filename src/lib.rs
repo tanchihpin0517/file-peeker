@@ -24,7 +24,7 @@ mod home;
 mod protocol;
 mod server;
 // The server runs only the demo kind so far, so children, resources and the
-// cancellation API are reached from tests alone until step 6's real kinds use
+// cancellation API are reached from tests alone until step 7's real kinds use
 // them; this allow goes then.
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
 mod task;

@@ -117,10 +117,10 @@ after.
   server's top layer is a task runtime: every asynchronous, fallible operation is
   a task kind in a structured tree, and filesystem access is one family of kinds.
   A public JSON API sits beside the private client protocol, and the CLI is a
-  client of the API. Built at the repository root in fourteen steps, 0 to 13,
+  client of the API. Built at the repository root in fifteen steps, 0 to 14,
   ending in cutover. Step 1 is an empty server — started, found, answering and stopped,
   with nothing inside — step 2 an empty TUI client attached to it, step 4 several
-  machines in one client, and step 7 a local walking skeleton. The binary is
+  machines in one client, and step 8 a local walking skeleton. The binary is
   `fpk` until cutover. Open: whether round-tripped input needs an optimistic
   cursor over SSH.
   Step 0 is done: v2 is the package `file-peeker` at the repository root, and the
@@ -221,15 +221,15 @@ items is now built in v2 rather than against the current crate.
    | Item | v2 step |
    | --- | --- |
    | 9 — several connections | 4, machines |
-   | 4 and 5 — sorting and segmented rows | 6, sessions on the server |
-   | 7 — configuration | 4 reads `config.toml` first, for `[remote]`; 7 adds the UI's settings; the server reads none |
-   | 10 — transfer progress and queue | 10, copies |
-   | 11, 12, 13 — preview read, refresh, directory sizes | 11 |
-   | 6 — desktop keyboard and focus | 12, the desktop client |
-   | 18 — the collapse leak | 6, by construction: a collapse cancels on the server |
+   | 4 and 5 — sorting and segmented rows | 7, sessions on the server |
+   | 7 — configuration | 4 reads `config.toml` first, for `[remote]`; 8 adds the UI's settings; the server reads none |
+   | 10 — transfer progress and queue | 11, copies |
+   | 11, 12, 13 — preview read, refresh, directory sizes | 12 |
+   | 6 — desktop keyboard and focus | 13, the desktop client |
+   | 18 — the collapse leak | 7, by construction: a collapse cancels on the server |
 
 4. The palette and drawing items — 14 to 17 and 19 — belong to the desktop client,
-   step 12. The current GUI is replaced rather than ported, so work on them there
+   step 13. The current GUI is replaced rather than ported, so work on them there
    would be thrown away.
-5. Item 13's treemap decision, and items 14 and 15, answered before step 12 builds
+5. Item 13's treemap decision, and items 14 and 15, answered before step 13 builds
    the desktop client's layouts.

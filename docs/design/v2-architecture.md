@@ -325,7 +325,7 @@ How a task ends, as step 3 built it:
 - **A body that panics** settles `Failed`. Each body runs as a tokio task of its
   own, so a panic reaches the driver as a join error rather than leaving a task
   `Running` forever.
-- **Summing children's progress into the parent's** is deferred to step 10,
+- **Summing children's progress into the parent's** is deferred to step 11,
   where copies are its first consumer.
 
 A copy between machines is the one place bytes pass through a client. Servers do
@@ -395,9 +395,9 @@ herdr's workspaces, tabs and panes.
 ```text
 Session
 └── Tab
-    ├── root: HostPath
+    ├── root: PathString
     ├── tree: rows, expansions, the ListDir task each loading row waits on
-    ├── selected: HostPath          ← a path, not a row index
+    ├── selected: PathString          ← a path, not a row index
     ├── filter: String
     └── sort: SortOrder
 ```
@@ -548,7 +548,7 @@ v2 is the package `file-peeker` at the repository root. It depends on nothing in
 src/
 ├── task/          the runtime: ids, kinds, lifecycle, tree, admission, resources, events
 ├── fs/            host-local filesystem work; task-agnostic, takes a CancellationToken
-├── host_path.rs   lossless names and paths
+├── path_string.rs lossless names and paths
 ├── home.rs        where a server's files live: sockets, lock, log
 ├── session/       tabs, trees, sorting, selection, filter, views, actions, persistence
 ├── server/        the daemon: sockets, lock, auto-start, server kinds, API, client protocol service
@@ -561,11 +561,12 @@ src/
 
 | Module | May name |
 | --- | --- |
-| `task`, `fs`, `host_path`, `home` | nothing else in the crate |
-| `protocol` | `task`, `host_path` |
-| `session` | `task`, `fs`, `host_path` |
-| `server` | `task`, `fs`, `session`, `protocol`, `host_path`, `home` |
-| `client` | `task`, `protocol`, `host_path`, `home` — never `server` or `session` |
+| `task`, `path_string`, `home` | nothing else in the crate |
+| `fs` | `path_string` |
+| `protocol` | `task`, `path_string` |
+| `session` | `task`, `fs`, `path_string` |
+| `server` | `task`, `fs`, `session`, `protocol`, `path_string`, `home` |
+| `client` | `task`, `protocol`, `path_string`, `home` — never `server` or `session` |
 | `cli`, `tui`, `gui` | `client`, `protocol`, `home`, `task`'s observer types |
 
 `client` never naming `server` is the structural form of "the server owns the
@@ -626,17 +627,18 @@ crate changes along the way.
 | 3 | The task runtime, with test kinds only | Lifecycle, tree, cancellation, admission, events |
 | 4 | **Machines** — see below: releases, approval-based install, the bridge, ControlMaster, several machines in the TUI, `--machine` | **Several machines in one client** |
 | 4b | The mouse in the TUI, as herdr's — see after step 4 | Clicks land on what was drawn |
-| 5 | `fs` and `host_path` | The filesystem core, with its own tests |
-| 6 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
-| 7 | Views and actions in the client protocol; the TUI renders a tab through them | **Local walking skeleton** |
-| 8 | Persistence: `sessions/default.json`, snapshots, backups, restore | Reattach and restart |
-| 9 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
-| 10 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
-| 11 | `Preview`, `DirSize`, `Refresh` | TODO items 11, 12 and 13 |
-| 12 | The desktop front end, as a second client | TODO items 6 and 9 |
-| 13 | Cutover: `fpk` becomes `file-peeker`, and `old/` is deleted | One crate again |
+| 5 | `PathString`: a name or path held as a string without losing a byte, `%`-escaped, with no `Display` | Any Unix name survives the wire and still opens its file |
+| 6 | `fs` over `PathString`, cancelled by a token | The filesystem core, with its own tests |
+| 7 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
+| 8 | Views and actions in the client protocol; the TUI renders a tab through them | **Local walking skeleton** |
+| 9 | Persistence: `sessions/default.json`, snapshots, backups, restore | Reattach and restart |
+| 10 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
+| 11 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
+| 12 | `Preview`, `DirSize`, `Refresh` | TODO items 11, 12 and 13 |
+| 13 | The desktop front end, as a second client | TODO items 6 and 9 |
+| 14 | Cutover: `fpk` becomes `file-peeker`, and `old/` is deleted | One crate again |
 
-Step 7 is the first one a person can use to browse. Machines come before
+Step 8 is the first one a person can use to browse. Machines come before
 browsing so that everything after them is built against several machines from
 the start, rather than against one and widened later.
 
@@ -733,7 +735,7 @@ After step 3, the sidebar gained its lower half, as herdr splits its sidebar:
 - **The server holds a task runtime** from here on, and cancels every task when
   it stops. Its one kind so far is `demo.count`, started by `fpk task demo`
   through the API's `task.demo`: it counts for a while, reports progress, and
-  fails halfway when asked, so the pane has something to show before step 6's
+  fails halfway when asked, so the pane has something to show before step 7's
   real kinds. It is `Background`, so a second one queues behind the first.
 
 ### Step 4: machines
@@ -834,6 +836,34 @@ After step 4, the TUI took the mouse, as herdr's is mouse-first:
 Clicking a task, and herdr's right-click menu, wait for something to act on:
 there is nothing to do to a task until cancelling one, and the menu's actions
 are machine operations the CLI holds for now.
+
+### Step 5: `PathString`
+
+A Unix name is any bytes but `/` and NUL, so it need not be UTF-8, while a Rust
+`String` and a protobuf `string` must be. `PathString` is a name or path held as
+a string without losing a byte: the shipping crate's `HostPath`, renamed,
+because "host" reads as a machine and this has nothing to do with one.
+
+| The name has | `PathString` holds |
+| --- | --- |
+| A valid UTF-8 run | It, verbatim |
+| A literal `%` | `%%` |
+| A byte outside UTF-8 | `%XX`, uppercase hex |
+
+- **It is the file's identity, not its label.** It goes over the wire, keys
+  maps, and resolves back to the exact bytes; it is not what a person reads.
+  For an ordinary name the two look the same, which is why they are kept apart.
+- **No `Display`, as `std::path::Path` has none.** `format!("{path}")` would have
+  to pick one meaning, and either is wrong somewhere: the escaped text shows a
+  person `%%`, and the readable text, `caf�.txt`, has lost the byte that finds
+  the file. Without it a caller says which: `display()` for a person,
+  `as_str()` for a program, `fs`'s `resolve_path` for the filesystem.
+- **The escape never produces `/`, and is canonical**: joining and prefix tests
+  work on the escaped form unchanged, and one file has one spelling.
+- **A name is a one-component path**, so one type holds both.
+
+Ported from `old/src/host_path.rs` with its tests; nothing else uses it until
+step 6.
 
 ## What this replaces at cutover
 

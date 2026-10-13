@@ -9,7 +9,7 @@ is the proposal this implements and still owns everything not built yet.
 
 Implemented in [`src/task/`](../src/task/mod.rs). The server holds one runtime
 from startup to shutdown. Its only kind so far is `demo.count`; the filesystem
-kinds arrive in step 6 of the build order.
+kinds arrive in step 7 of the build order.
 
 ## The rule
 
@@ -286,7 +286,7 @@ at the head of a queue; multi-threaded, they found both.
 
 ## Not built yet
 
-- **Summing children's progress into the parent's.** Deferred to step 10, where
+- **Summing children's progress into the parent's.** Deferred to step 11, where
   copies are its first consumer.
 - **Configurable caps.** Hard-coded defaults until configuration exists; the
   proposal reloads them with `fpk server reload-config`.
