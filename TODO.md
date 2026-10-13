@@ -16,8 +16,9 @@ So the work that comes before a new front end is not arrangement and color. It i
 the entry model, the input model, and the operations the layouts assume already
 exist. **The entry model is now settled** — items 1 to 3 are done, so an entry has a
 size and a modification time, and a failure belongs to the entry it happened to
-rather than to the whole listing. What is left is the input model, a second
-connection, and the operations.
+rather than to the whole listing. What is left in this tier is the tree that holds
+those entries: how it stores its rows, and what order it puts them in. Beyond it are
+the input model, a second connection, and the operations.
 
 ## Status
 
@@ -61,54 +62,74 @@ Landing these late means reworking every layout that reads them.
   made item 1 necessary rather than merely tidy: it is a per-entry syscall that
   can be refused on its own. The desktop table gained `Size` and `Modified`
   columns; the terminal shows a size above 52 columns.
-- [ ] **4. Decide which layer sorts, and let the tree reorder.** *Unblocked: 3 is
-  done.* Note that paths and names are now escaped, and `Ord` on the escaped form is
-  not the ordering of the real bytes — `%` is `0x25`, so an escaped high byte sorts
-  before a letter. `HostPath` deliberately does not derive `Ord`; this item chooses
-  whether to collate the displayed form or the real bytes.
-  Listings arrive in `read_dir` order; [Client API](docs/api.md) promises stream
-  order, not a collation. The difficulty is not the comparison: `Placement` in
-  [`browser::tree`](src/browser/tree.rs) holds row indices and is only
-  sound because a root listing appends, so any reorder disturbs the insertion
-  point of an in-flight expansion. Sorting on the server costs the streaming;
-  sorting on the client needs a reorder that preserves the placement invariant.
-  Every layout with a column header depends on the answer.
+- [ ] **4. Sort a listing.** *Unblocked: 3 is done.* Chosen: append while a listing
+  streams, sort when it finishes. `Placement` caches row indices and its fixups only
+  add and subtract, while a sort permutes variable-length blocks — a nested expansion
+  interleaves deeper rows among the siblings — so each block moves rigidly and an
+  index inside one maps by `new = old + delta`. Open: the collation, where the escaped
+  form sorts `%` at `0x25`, the displayed form is not injective, and the real bytes
+  cost a decode per key; then case, natural order, whether directories group first,
+  where an absent size sorts, and the tie-break. Selection and scroll offset are both
+  indices a permutation invalidates. Both layout specs say a listing is never sorted,
+  so one of them has to be amended.
+- [ ] **5. Stop moving every row below an expansion on every group.** Chosen: split
+  the tail off at `begin_expansion`, append each group, merge at `finish`, which is
+  `2T` rather than `m·T`. `extend_child` splices into one flat `Vec<Row>` today, so a
+  100k-entry directory expanded above a 100k-row tail is 195 groups over 100k rows,
+  near 7.5 GB and a quarter of a second of dropped frames; the trigger is the product,
+  so both have to be large. It costs the `rows() -> &[Row]` shape, though every caller
+  uses only `len`, `get`, `iter` and `position`, and several expansions in flight mean
+  several segments. A `Placement` holding a segment and an offset then never moves
+  when another grows, so `placements_after_insertion` goes away. It does not settle 4;
+  the far end is one segment per directory, a nested tree, worth it once a second
+  customer for the tree shape appears (item 13).
 
 ### Tier 2 — what carries a new front end
 
-Neither is blocked. Both are cheaper once, before ten layouts, than ten times
+None is blocked. Each is cheaper once, before ten layouts, than ten times
 after.
 
-- [ ] **5. Give the desktop front end a keyboard and a focus model.**
+- [ ] **6. Give the desktop front end a keyboard and a focus model.**
   `crate::gui` handles no key at all, which is why its filter field is always on
   screen rather than opened by a shortcut. The proposals include a command
   palette layout, selection movement, filtering, and rungs where the pointer
   loses controls. Needs focus ownership, a binding table aligned with the TUI's
   keys, and a rule for competing with `egui`'s own text-field capture.
-- [ ] **6. Read and persist configuration.** The GUI proposal selects a layout, a
+- [ ] **7. Read and persist configuration.** The GUI proposal selects a layout, a
   palette and a mode from `[ui]` in a config file with per-role overrides.
   Nothing in the crate reads configuration today. Without persistence a hundred
   combinations reset to the default on every start. Decide the file location, the
   handling of missing and invalid values, and whether both front ends share one
   file.
+- [ ] **8. Let the Client own its tasks.** Proposed in
+  [Client task model](docs/design/client-task-model.md). Each front end keeps its
+  own task lifecycle today — minting request IDs, rejecting stale results,
+  aborting a superseded request, joining at shutdown — and `crate::gui` keeps
+  none of it, which is item 18. Items 9 and 10 each add tasks that need watching
+  rather than awaiting, so the third copy of that machinery is about to be
+  written. The proposal makes every operation a task the Client registers,
+  observes and cancels, owning lifecycle but never payload, so the Client still
+  holds no browsing state. Its steps 1 and 2 retire item 18 by construction;
+  step 3 is what item 9 lifts; step 4 carries item 10's progress. Open: a
+  retry's identity, and whether the tree stores a `TaskId`, which reaches item 5.
 
 ### Tier 3 — states the proposals draw
 
-- [ ] **7. Let the desktop front end hold several connections.** It holds one
+- [ ] **9. Let the desktop front end hold several connections.** It holds one
   `ConnectionId`, and its rail and status bar name it with literal strings. The
   proposal's rail draws a connection list with three status colors and expects
   transfers between panes. The TUI already has a Connection Manager and tabs, so
   this is lifting a proven model into shared code rather than inventing one.
-- [ ] **8. Report transfer progress, queue transfers, and cancel them.**
+- [ ] **10. Report transfer progress, queue transfers, and cancel them.**
   *Unblocked: 3 is done, so the source size a determinate bar needs is available.*
   [`Client::op_copy_file`](src/client/file/copy.rs) is a
   single await returning a final byte count. The proposal draws a transfer track
   and an inspector queue; a determinate bar also needs the source size.
-- [ ] **9. Expose a bounded, cancellable file read.** `read_file` is private and
+- [ ] **11. Expose a bounded, cancellable file read.** `read_file` is private and
   serves copying only. The Miller preview pane and the gallery's thumbnails need
   a prefix read with a size ceiling. Decide the signature, binary detection, and
   whether thumbnails require image decoding and its dependency.
-- [ ] **10. Add refresh and content invalidation.** The desktop front end has no
+- [ ] **12. Add refresh and content invalidation.** The desktop front end has no
   refresh; the TUI has `R`. Neither watches the filesystem. The more panes a
   layout shows at once, the more visible stale content becomes. Manual refresh
   first, preserving selection and expansion; then decide about watching.
@@ -118,16 +139,16 @@ after.
 Each is cheap to settle now and expensive to settle after a hundred combinations
 exist.
 
-- [ ] **11. Decide whether the treemap's recursive directory sizes are worth it.**
+- [ ] **13. Decide whether the treemap's recursive directory sizes are worth it.**
   *Unblocked: 3 is done, so a walk entry now carries a size.* `op_walk_dir` still has
   no aggregation and no cache, and walking a large tree has a real cost and a cancellation story.
   Either compute lazily with a cache, or drop the layout.
-- [ ] **12. Decide the accessibility cost of painting text.** `crate::gui` draws
+- [ ] **14. Decide the accessibility cost of painting text.** `crate::gui` draws
   every string through `Painter::text` rather than as a widget, so there is no
   accessibility node, no selectable text and no keyboard traversal. The GUI
   proposal's component inventory extends that approach. Either accept it, or give
   the list row semantics.
-- [ ] **13. Decide whether the dock or the layout seam owns pane arrangement.**
+- [ ] **15. Decide whether the dock or the layout seam owns pane arrangement.**
   The GUI proposal already raises this: four of its layouts place panes in ways
   [`gui::dock`](src/gui/dock.rs) owns today, and a layout seam fighting the
   dock is worse than no layout seam.
@@ -136,19 +157,20 @@ exist.
 
 None of these touch the data layer.
 
-- [ ] **14. Widen `Palette` with `sel`, `on_sel`, `bad` and `shadow`.**
+- [ ] **16. Widen `Palette` with `sel`, `on_sel`, `bad` and `shadow`.**
   [`gui::theme`](src/gui/theme.rs) derives the selection ground from the
   accent, which cannot be tuned per palette and disappears in the darker ones;
   the shadow is a constant chosen by mode; and `warn` means both a refused
   expansion and a dead connection. This is the GUI proposal's first build phase.
-- [ ] **15. Make the palette contrast floors executable.** *Blocked by 14.* The
+- [ ] **17. Make the palette contrast floors executable.** *Blocked by 16.* The
   GUI proposal states contrast floors and a full set of acceptance checks as
   prose. Ten palettes in two modes cannot be reviewed by eye.
-- [ ] **16. Abort the listing task when the desktop front end collapses a row.**
+- [ ] **18. Abort the listing task when the desktop front end collapses a row.**
   `Tree::collapse` returns the request IDs whose tasks are no longer wanted;
   `crate::gui` discards them, so a collapsed large directory keeps streaming to
-  completion. The TUI does this correctly.
-- [ ] **17. Give the loading bar a visible track.** `gui::dock` passes `surface`
+  completion. The TUI does this correctly. Item 8 retires this by construction;
+  fixing it here first is a few lines that item 8 then deletes.
+- [ ] **19. Give the loading bar a visible track.** `gui::dock` passes `surface`
   as the track color onto a `surface` panel, so the accent segment slides through
   nothing. The GUI proposal's fix is the accent at reduced alpha, separating by
   hue as the status dot's halo already does, rather than another ground role.
@@ -157,20 +179,26 @@ None of these touch the data layer.
 
 | Item | Blocked by |
 | --- | --- |
-| 15 — contrast checks | 14 |
+| 17 — contrast checks | 16 |
 
-Nothing else is blocked. Items 4, 8 and 11 waited on the entry model and no longer
-do.
+Nothing else is blocked. Items 4, 10 and 13 waited on the entry model and no longer
+do. Items 4 and 5 do not block each other, but 5 decides how expensive 4 is, which
+is why the route puts it first. Item 8 blocks nothing, but 9 and 10 are cheaper on
+top of it than beside it.
 
 ## Suggested route
 
 1. ~~Items 1, 2 and 3: the entry model settles before anything reads it.~~ Done.
-2. Items 16 and 17, as one pass over the two defects the proposal already found.
-3. Item 4, now that there is metadata to sort by — and a decision to make about
+2. Items 18 and 19, as one pass over the two defects the proposal already found.
+3. Item 5, which decides how expensive item 4 is, and whose first step — splitting
+   the tail off an expansion — is worth having on its own.
+4. Item 4, now that there is metadata to sort by — and a decision to make about
    whether a collation reads the displayed name or the real bytes.
-4. Items 5 and 6, which are what a selectable layout and palette are carried on.
-5. Items 7 through 10 in parallel with the GUI proposal's first three build
+5. Item 8's first two steps, after item 5 has settled what the tree stores, so
+   that items 9 and 10 add tasks to a registry rather than to each front end.
+6. Items 6 and 7, which are what a selectable layout and palette are carried on.
+7. Items 9 through 12 in parallel with the GUI proposal's first three build
    phases — widening the palette, landing the ten, and extracting the
    components — since those phases do not read the entry model.
-6. Items 11, 12 and 13 answered before the fourth build phase introduces
+8. Items 13, 14 and 15 answered before the fourth build phase introduces
    `Layout`, because that is where the proposals begin to depend on them.

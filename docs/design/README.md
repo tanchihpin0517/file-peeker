@@ -1,7 +1,12 @@
-# Layout and palette galleries
+# Design proposals
 
-This directory holds two browsable proposals, one per frontend, for making a
-frontend's arrangement and its colors selectable rather than fixed.
+This directory holds proposals: design work labeled as a future possibility
+rather than as current behavior. Most of it is the two browsable galleries, one
+per frontend, for making a frontend's arrangement and its colors selectable
+rather than fixed. [Client task model](client-task-model.md) is the exception
+and is described at the end.
+
+## Layout and palette galleries
 
 | Gallery | Document | Open |
 | --- | --- | --- |
@@ -54,3 +59,11 @@ The palettes are not shared. A terminal palette answers to what a terminal can
 hold; a desktop palette gets true color, real elevation and a selection ground
 that is a color rather than an inversion. Naming the same palette twice across
 two frontends would have forced one of the two to render a compromise.
+
+## Client task model
+
+[Client task model](client-task-model.md) is a proposal for the Client layer
+rather than for a frontend's appearance: every unit of work the Client performs
+becomes a task it owns, observes and cancels, in place of the lifecycle
+machinery each frontend keeps for itself today. It shares this directory because
+it is a proposal, not because it shares the galleries' seam.
