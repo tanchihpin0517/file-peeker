@@ -126,7 +126,9 @@ after.
   Step 0 is done: v2 is the package `file-peeker` at the repository root, and the
   shipping crate is `file-peeker-old` in `old/`, a workspace of its own; `make
   verify` and CI cover both. Step 1 is done: `fpk` starts, finds, attaches to and
-  stops a detached per-user server.
+  stops a detached per-user server. Step 2 is done: `fpk` opens a terminal UI with a
+  machine list holding `local`, detaches on `q`, dims and reconnects with backoff
+  when the server goes away, and starts one again only on `s`.
 
 ### Tier 3 — states the proposals draw
 

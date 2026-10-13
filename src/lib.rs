@@ -4,10 +4,13 @@
 //! grows one build step at a time; it depends on nothing in the shipping crate in
 //! `old/`, and replaces it at cutover.
 //!
-//! One binary, `fpk`, runs in one of two roles:
+//! One binary, `fpk`, runs in one of three roles:
 //!
 //! - [`server`] is the persistent per-user server: `fpk server`.
-//! - [`cli`] is everything else, a client of that server through [`client`].
+//! - [`tui`] is the terminal UI, a client of that server: `fpk`.
+//! - [`cli`] is every other command, also a client of it.
+//!
+//! Both clients reach the server through [`client`].
 //!
 //! They share only [`home`], which says where the server's files live, and
 //! [`protocol`], the two surfaces between them. `client` never names `server`:
@@ -18,6 +21,7 @@ mod client;
 mod home;
 mod protocol;
 mod server;
+mod tui;
 
 use std::process::ExitCode;
 
@@ -34,6 +38,7 @@ pub fn run() -> ExitCode {
     };
     match invocation {
         cli::Invocation::Server => server::run(&home),
+        cli::Invocation::Tui => tui::run(&home),
         cli::Invocation::Client(command) => cli::execute(&home, command),
     }
 }

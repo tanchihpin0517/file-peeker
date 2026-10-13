@@ -201,9 +201,10 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
         shutdown.clone(),
     ));
     let client = tonic::transport::Server::builder()
-        .add_service(ClientProtocolServer::new(attach::Attach::new(Arc::clone(
-            &info,
-        ))))
+        .add_service(ClientProtocolServer::new(attach::Attach::new(
+            Arc::clone(&info),
+            shutdown.clone(),
+        )))
         .serve_with_incoming_shutdown(
             UnixListenerStream::new(client_listener),
             shutdown.clone().cancelled_owned(),

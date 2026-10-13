@@ -8,8 +8,14 @@
 
 pub(crate) mod api;
 
-/// The client protocol's version. Bump it on any incompatible change.
-pub(crate) const CLIENT_PROTOCOL: u32 = 1;
+/// The client protocol's version. Bump it on any change a client relies on,
+/// including a new call: a client that needs `Watch` cannot use a server that
+/// answers the handshake but not the stream, and the handshake is the only place
+/// that can say so.
+///
+/// - 1: `Attach`.
+/// - 2: `Watch`.
+pub(crate) const CLIENT_PROTOCOL: u32 = 2;
 
 /// This build's version, as both roles report it.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");

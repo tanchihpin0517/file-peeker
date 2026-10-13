@@ -26,7 +26,9 @@ use crate::{
     home::{HOME_ENV, Home},
     protocol::{
         CLIENT_PROTOCOL, VERSION,
-        client_v1::{AttachRequest, client_protocol_client::ClientProtocolClient},
+        client_v1::{
+            AttachRequest, ServerEvent, WatchRequest, client_protocol_client::ClientProtocolClient,
+        },
     },
 };
 
@@ -44,7 +46,9 @@ pub(crate) enum ClientError {
     },
     #[error("the server did not start within {}s; see {}", START_TIMEOUT.as_secs(), .log)]
     StartTimeout { log: String },
-    #[error("the server refused to attach: {0}")]
+    /// The running server is a different build. Never replaced behind the
+    /// user's back, as herdr never replaces a running server: they stop it.
+    #[error("the server refused to attach: {0}; stop it with `fpk server stop` and run this again")]
     Incompatible(String),
     #[error("the server failed the handshake: {0}")]
     Handshake(#[from] tonic::Status),
@@ -71,8 +75,7 @@ pub(crate) async fn attach_or_start(home: &Home) -> Result<Attached, ClientError
     let started = if is_running(home).await {
         false
     } else {
-        start(home)?;
-        wait_until_running(home).await?;
+        start_server(home).await?;
         true
     };
     let mut attached = attach(home).await?;
@@ -83,6 +86,17 @@ pub(crate) async fn attach_or_start(home: &Home) -> Result<Attached, ClientError
 /// Whether a server answers on `home`'s client socket.
 pub(crate) async fn is_running(home: &Home) -> bool {
     UnixStream::connect(home.client_socket()).await.is_ok()
+}
+
+/// Starts a server for `home` and waits until it answers.
+///
+/// # Errors
+///
+/// Returns an error when the server cannot be spawned or does not open its
+/// socket in time.
+pub(crate) async fn start_server(home: &Home) -> Result<(), ClientError> {
+    start(home)?;
+    wait_until_running(home).await
 }
 
 /// Runs this binary as `fpk server`, detached.
@@ -148,6 +162,10 @@ async fn wait_until_running(home: &Home) -> Result<(), ClientError> {
 /// Returns [`ClientError::Incompatible`] when the server's protocol differs.
 pub(crate) async fn attach(home: &Home) -> Result<Attached, ClientError> {
     let mut client = ClientProtocolClient::new(channel(home).await?);
+    handshake(&mut client).await
+}
+
+async fn handshake(client: &mut ClientProtocolClient<Channel>) -> Result<Attached, ClientError> {
     let response = client
         .attach(AttachRequest {
             client_version: VERSION.to_owned(),
@@ -177,4 +195,34 @@ pub(crate) async fn channel(home: &Home) -> Result<Channel, ClientError> {
         }))
         .await?;
     Ok(channel)
+}
+
+/// An attachment held open: the handshake's answer, and the `Watch` stream whose
+/// end means the server is gone.
+pub(crate) struct Watching {
+    pub attached: Attached,
+    events: tonic::Streaming<ServerEvent>,
+}
+
+impl Watching {
+    /// Resolves when the server ends the stream or the connection drops. Either
+    /// way the attachment is over.
+    pub(crate) async fn closed(mut self) {
+        while let Ok(Some(_)) = self.events.message().await {}
+    }
+}
+
+/// Attaches to a running server and opens its `Watch` stream on the same
+/// channel. Never starts a server: a client that lost one reconnects through
+/// this, and reconnecting must not resurrect a server the user stopped.
+///
+/// # Errors
+///
+/// Returns an error when no server answers, the handshake fails, or the stream
+/// does not open.
+pub(crate) async fn watch(home: &Home) -> Result<Watching, ClientError> {
+    let mut client = ClientProtocolClient::new(channel(home).await?);
+    let attached = handshake(&mut client).await?;
+    let events = client.watch(WatchRequest {}).await?.into_inner();
+    Ok(Watching { attached, events })
 }

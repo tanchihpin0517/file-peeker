@@ -1,4 +1,5 @@
-//! `fpk`'s command line: which role to run, and the client commands.
+//! `fpk`'s command line: which role to run, and the commands that are neither
+//! the server nor the terminal UI.
 
 use std::{
     process::ExitCode,
@@ -22,8 +23,9 @@ use crate::{
     version,
     about = "File Peeker v2: browse files through a persistent server",
     long_about = "File Peeker v2: browse files through a persistent server.\n\n\
-                  With no command, attaches to this machine's server, starting one if \
-                  none is running. The server keeps running after this exits."
+                  With no command, opens the terminal UI attached to this machine's \
+                  server, starting one if none is running. The server keeps running \
+                  after the UI exits."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -43,6 +45,8 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ServerAction {
+    /// Start the server in the background if none is running, and show its status.
+    Start,
     /// Stop the running server through its API socket.
     Stop,
 }
@@ -51,12 +55,13 @@ enum ServerAction {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Invocation {
     Server,
+    Tui,
     Client(ClientCommand),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClientCommand {
-    Attach,
+    Start,
     Status,
     Stop,
 }
@@ -67,9 +72,12 @@ pub(crate) fn parse() -> Invocation {
 
 fn invocation(cli: &Cli) -> Invocation {
     match &cli.command {
-        None => Invocation::Client(ClientCommand::Attach),
+        None => Invocation::Tui,
         Some(Command::Status) => Invocation::Client(ClientCommand::Status),
         Some(Command::Server { action: None }) => Invocation::Server,
+        Some(Command::Server {
+            action: Some(ServerAction::Start),
+        }) => Invocation::Client(ClientCommand::Start),
         Some(Command::Server {
             action: Some(ServerAction::Stop),
         }) => Invocation::Client(ClientCommand::Stop),
@@ -89,7 +97,7 @@ pub(crate) fn execute(home: &Home, command: ClientCommand) -> ExitCode {
     };
     let outcome = runtime.block_on(async {
         match command {
-            ClientCommand::Attach => attach(home).await,
+            ClientCommand::Start => start(home).await,
             ClientCommand::Status => status(home).await,
             ClientCommand::Stop => stop(home).await,
         }
@@ -103,20 +111,18 @@ pub(crate) fn execute(home: &Home, command: ClientCommand) -> ExitCode {
     }
 }
 
-async fn attach(home: &Home) -> Result<(), String> {
+/// What a script runs in place of the terminal UI: make sure a server is up,
+/// and say which one.
+async fn start(home: &Home) -> Result<(), String> {
     let attached = client::attach_or_start(home)
         .await
         .map_err(|error| error.to_string())?;
-    let how = if attached.started {
-        "started and attached to"
+    if attached.started {
+        println!("started the server");
     } else {
-        "attached to"
-    };
-    println!(
-        "{how} fpk server {} (pid {})",
-        attached.server_version, attached.pid
-    );
-    Ok(())
+        println!("the server was already running");
+    }
+    status(home).await
 }
 
 async fn status(home: &Home) -> Result<(), String> {
@@ -186,13 +192,17 @@ mod tests {
     }
 
     #[test]
-    fn no_command_attaches() {
-        assert_eq!(parse_args(&[]), Invocation::Client(ClientCommand::Attach));
+    fn no_command_opens_the_terminal_ui() {
+        assert_eq!(parse_args(&[]), Invocation::Tui);
     }
 
     #[test]
     fn server_alone_runs_the_server_and_stop_is_a_client_command() {
         assert_eq!(parse_args(&["server"]), Invocation::Server);
+        assert_eq!(
+            parse_args(&["server", "start"]),
+            Invocation::Client(ClientCommand::Start)
+        );
         assert_eq!(
             parse_args(&["server", "stop"]),
             Invocation::Client(ClientCommand::Stop)

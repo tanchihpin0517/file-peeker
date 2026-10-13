@@ -10,6 +10,11 @@ service ClientProtocol {
   // The first call a client makes. A server refuses a client whose protocol
   // version differs, with FAILED_PRECONDITION and both versions in the message.
   rpc Attach(AttachRequest) returns (AttachResponse);
+
+  // Held open for as long as a client is attached. The server sends `Hello`
+  // first and then events as it has them; the stream ending is how a client
+  // learns the server went away.
+  rpc Watch(WatchRequest) returns (stream ServerEvent);
 }
 
 message AttachRequest {
@@ -22,3 +27,14 @@ message AttachResponse {
   uint32 client_protocol = 2;
   uint32 pid = 3;
 }
+
+message WatchRequest {}
+
+message ServerEvent {
+  oneof event {
+    Hello hello = 1;
+  }
+}
+
+// The first event on every Watch stream, so a client knows the stream is live.
+message Hello {}

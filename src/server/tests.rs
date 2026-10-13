@@ -213,3 +213,45 @@ async fn attach_without_a_server_is_a_transport_error() {
         Err(ClientError::Transport(_))
     ));
 }
+
+#[tokio::test]
+async fn watch_opens_with_hello_and_ends_when_the_server_stops() {
+    let server = Running::start().await;
+    let watching = client::watch(&server.home).await.unwrap();
+    assert_eq!(watching.attached.pid, std::process::id());
+    let closed = tokio::spawn(watching.closed());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !closed.is_finished(),
+        "the stream ended while the server ran"
+    );
+
+    server.stop().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), closed)
+        .await
+        .expect("the stream outlived the server")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_open_watch_does_not_hold_up_a_stop() {
+    let server = Running::start().await;
+    let _watching = client::watch(&server.home).await.unwrap();
+    let started = std::time::Instant::now();
+    server.stop().await.unwrap();
+    // Well inside the shutdown timeout: the stream ended rather than being
+    // waited out.
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn watch_never_starts_a_server() {
+    let root = tempfile::tempdir().unwrap();
+    let home = Home::at(root.path().join("home"));
+    assert!(client::watch(&home).await.is_err());
+    assert!(!client::is_running(&home).await);
+}
