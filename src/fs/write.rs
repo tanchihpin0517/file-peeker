@@ -11,7 +11,7 @@ use tokio::{
     io::AsyncWriteExt as _,
 };
 
-use super::{FsError, FsErrorKind, ReadStream, resolve::real_path};
+use super::{FsError, FsErrorKind, ReadStream, absolute::absolute};
 use crate::path_string::PathString;
 
 static NEXT_PARTIAL: AtomicU64 = AtomicU64::new(1);
@@ -58,7 +58,7 @@ pub(crate) async fn write_file(
             ),
         ));
     }
-    let directory = real_path(directory)?;
+    let directory = absolute(directory)?;
     let name = name.to_path_buf()?.into_os_string();
     let destination = directory.join(&name);
 

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use futures_util::{StreamExt as _, stream, stream::BoxStream};
 use tokio::fs;
 
-use super::{DirectoryEntry, FsError, entry::inspect, resolve::real_path};
+use super::{DirectoryEntry, FsError, absolute::absolute, entry::inspect};
 use crate::path_string::PathString;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,10 +37,10 @@ struct Frame {
 ///
 /// # Errors
 ///
-/// When the root does not resolve or is not a directory this process may read;
+/// When the root is relative or is not a directory this process may read;
 /// later failures are the stream's last item.
 pub(crate) async fn walk_dir(path: &PathString) -> Result<WalkStream, FsError> {
-    let root = real_path(path)?;
+    let root = absolute(path)?;
     let walk = Walk {
         stack: vec![Frame {
             entries: open(&root).await?,

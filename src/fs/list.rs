@@ -1,7 +1,7 @@
 use futures_util::{StreamExt as _, stream, stream::BoxStream};
 use tokio::fs;
 
-use super::{DirectoryEntry, FsError, entry::inspect, resolve::real_path};
+use super::{DirectoryEntry, FsError, absolute::absolute, entry::inspect};
 use crate::path_string::PathString;
 
 /// One directory's entries, in the order the filesystem gives them. Ends after
@@ -12,10 +12,10 @@ pub(crate) type EntryStream = BoxStream<'static, Result<DirectoryEntry, FsError>
 ///
 /// # Errors
 ///
-/// When the path does not resolve or is not a directory this process may read;
+/// When the path is relative or is not a directory this process may read;
 /// later failures are the stream's last item.
 pub(crate) async fn list_dir(path: &PathString) -> Result<EntryStream, FsError> {
-    let path = real_path(path)?;
+    let path = absolute(path)?;
     let entries = fs::read_dir(&path)
         .await
         .map_err(|error| FsError::at("cannot list", &path, &error))?;

@@ -142,7 +142,8 @@ after.
   Step 5 is done: `PathString`, the shipping crate's `HostPath` renamed, holds
   any name or path as a string without losing a byte. Step 6 is done: `fs`
   lists, walks, reads and writes this host's files over `PathString`, cancelled
-  by being dropped, and takes only absolute paths or a leading `~`.
+  by being dropped, and opens absolute paths exactly as given: `~`, `..` and
+  relative paths are left to whatever took the path in.
 
 ### Tier 3 — states the proposals draw
 

@@ -878,7 +878,6 @@ crate's `fs`, over `PathString`.
 
 | Operation | Does |
 | --- | --- |
-| `resolve_path` | A leading `~` and `.`/`..`, with nothing touched |
 | `list_dir` | One directory's entries, streamed, each with one `lstat`'s metadata |
 | `walk_dir` | Everything below a directory, pre-order depth first, symlinks emitted but never followed |
 | `read_file` | A regular file's bytes, streamed |
@@ -891,14 +890,23 @@ crate's `fs`, over `PathString`.
   at, and a stream does no work until pulled. A write's partial file is
   unlinked synchronously as it drops, so it is gone before the task reports
   itself cancelled — not left to a spawned cleanup, as the shipping crate did.
-- **Paths must be absolute once a leading `~` is expanded.** A relative path
-  is relative to something only the caller knows, such as a tab's directory,
-  and the server's working directory is wherever the client that started it
-  happened to be; so it is refused, and the session joins it first. `~` is the
-  server's own `HOME`, and only at the start: a directory named `~` further
-  along stays itself, and `~user` is refused.
-- **No `$VARIABLE` expansion.** It would read the server's environment — the
-  starting client's — not the user's; `shellexpand` is not a dependency.
+- **A path is absolute and opened exactly as given; nothing is interpreted.**
+  Reading what a person typed is the job of whatever took it in, as step 7's
+  session does for a tab:
+  - **Relative paths are refused.** They are relative to something only the
+    caller knows, such as a tab's directory, and the server's working
+    directory is wherever the client that started it happened to be.
+  - **`~` is a name like any other.** Expanding it moves to the session, on
+    the same server with the same `HOME`, so `~` typed in a remote machine's
+    tab is that machine's.
+  - **`.` and `..` go to the kernel**, which follows symlinks on the way:
+    `/a/link/..` is the parent of where `link` points, which folding the text
+    — as the shipping crate did — gets wrong.
+  - **No `$VARIABLE`**, here or in the session: it would read the server's
+    environment, the starting client's, not the user's, and it broke real
+    names holding a `$`, such as `Foo$Inner.class`. If typing one is wanted,
+    the client expands it from its own environment before sending.
+    `shellexpand` is not a dependency.
 - **One entry's failure is that entry's.** An entry whose `lstat` is refused
   comes back degraded, with why, and the listing carries on.
 - **Errors carry a kind** — invalid argument, already exists, not found,

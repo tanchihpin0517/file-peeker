@@ -96,8 +96,8 @@ async fn listing_a_file_fails_before_the_stream() {
 }
 
 #[tokio::test]
-async fn a_relative_path_is_refused_before_anything_is_touched() {
-    for path in ["notes", "."] {
+async fn a_relative_path_or_a_tilde_is_refused_before_anything_is_touched() {
+    for path in ["notes", ".", "~", "~/notes"] {
         let path = PathString::from_literal(path);
         assert_eq!(
             list_dir(&path).await.err().unwrap().kind(),
@@ -240,17 +240,24 @@ async fn a_literal_marker_round_trips_and_still_opens_its_file() {
     );
 }
 
+/// `..` goes to the kernel, which follows the symlink before it: `link/..` is
+/// the parent of where the link points, which folding the text would get wrong.
 #[tokio::test]
-async fn a_tilde_lists_home() {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-    let listed = list_dir(&PathString::from_literal("~")).await;
-    // Only that it resolved to the same place; what is in a home is not ours.
-    assert_eq!(
-        listed.is_ok(),
-        std::fs::read_dir(&home).is_ok(),
-        "{:?}",
-        listed.err()
-    );
+async fn dot_dot_after_a_symlink_is_the_kernels_to_read() {
+    let fixture = TempDir::new().unwrap();
+    std::fs::create_dir_all(fixture.path().join("elsewhere/target")).unwrap();
+    std::fs::write(fixture.path().join("elsewhere/marker"), b"").unwrap();
+    std::fs::create_dir(fixture.path().join("here")).unwrap();
+    std::os::unix::fs::symlink(
+        fixture.path().join("elsewhere/target"),
+        fixture.path().join("here/link"),
+    )
+    .unwrap();
+
+    let entries = list(&fixture.path().join("here/link/..")).await;
+    let mut names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["marker", "target"]);
 }
 
 // Walking.

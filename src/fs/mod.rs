@@ -7,24 +7,25 @@
 //! stop at, and a stream does no work until it is pulled, so a dropped operation
 //! stops where it stood; a write takes its partial file with it.
 //!
-//! Paths arrive as [`PathString`] and must be absolute once a leading `~` is
-//! expanded. A relative path means relative to something only the caller knows —
-//! a tab's directory — and the server's own working directory is wherever the
-//! client that started it happened to be, so it is refused rather than guessed.
+//! Paths arrive as [`PathString`], absolute, and are opened exactly as given.
+//! Nothing is interpreted here — not `~`, not `$VARIABLE`, not `.` or `..` — so
+//! a path names one file and only the kernel reads it. What a person typed is
+//! read by whatever took it in, which knows the tab it was typed in; a relative
+//! path is refused, since the server's own working directory is wherever the
+//! client that started it happened to be.
 //!
 //! | Operation | Does |
 //! | --- | --- |
-//! | [`resolve_path`] | `~` and `.`/`..`, with nothing touched |
 //! | [`list_dir`] | One directory's entries, streamed |
 //! | [`walk_dir`] | Everything below a directory, depth first, links not followed |
 //! | [`read_file`] | A regular file's bytes, streamed |
 //! | [`write_file`] | A new file from a stream, published whole or not at all |
 
+mod absolute;
 mod entry;
 mod error;
 mod list;
 mod read;
-mod resolve;
 mod walk;
 mod write;
 
@@ -35,7 +36,6 @@ pub(crate) use entry::{DirectoryEntry, EntryKind, EntryMetadata};
 pub(crate) use error::{FsError, FsErrorKind};
 pub(crate) use list::{EntryStream, list_dir};
 pub(crate) use read::{ReadStream, read_file};
-pub(crate) use resolve::resolve_path;
 pub(crate) use walk::{WalkEntry, WalkStream, walk_dir};
 pub(crate) use write::{WriteConflict, Written, write_file};
 

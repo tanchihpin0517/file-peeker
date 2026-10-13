@@ -3,7 +3,7 @@ use futures_util::{StreamExt as _, stream::BoxStream};
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
-use super::{FsError, FsErrorKind, resolve::real_path};
+use super::{FsError, FsErrorKind, absolute::absolute};
 use crate::path_string::PathString;
 
 /// A file's bytes from the start, in non-empty chunks whose sizes mean nothing.
@@ -14,9 +14,9 @@ pub(crate) type ReadStream = BoxStream<'static, Result<Bytes, FsError>>;
 ///
 /// # Errors
 ///
-/// When the path does not resolve, cannot be opened, or is not a regular file.
+/// When the path is relative, cannot be opened, or is not a regular file.
 pub(crate) async fn read_file(path: &PathString) -> Result<ReadStream, FsError> {
-    let path = real_path(path)?;
+    let path = absolute(path)?;
     let file = File::open(&path)
         .await
         .map_err(|error| FsError::at("cannot open", &path, &error))?;
