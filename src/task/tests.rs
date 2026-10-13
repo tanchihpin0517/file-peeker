@@ -139,6 +139,7 @@ impl TaskKind for Stream {
                 phase: None,
                 measure: Measure::Items {
                     done: u64::from(next),
+                    total: self.count.map(u64::from),
                 },
             });
         }

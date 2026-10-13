@@ -12,8 +12,9 @@ service ClientProtocol {
   rpc Attach(AttachRequest) returns (AttachResponse);
 
   // Held open for as long as a client is attached. The server sends `Hello`
-  // first and then events as it has them; the stream ending is how a client
-  // learns the server went away.
+  // first, then a `TaskSnapshot` of every task it retains, then a `TaskChanged`
+  // whenever one changes. The stream ending is how a client learns the server
+  // went away.
   rpc Watch(WatchRequest) returns (stream ServerEvent);
 }
 
@@ -33,8 +34,72 @@ message WatchRequest {}
 message ServerEvent {
   oneof event {
     Hello hello = 1;
+    TaskSnapshot snapshot = 2;
+    TaskChanged changed = 3;
   }
 }
 
 // The first event on every Watch stream, so a client knows the stream is live.
 message Hello {}
+
+// Every task the server retains, replacing whatever the client held. Sent
+// after Hello, and again whenever the server's stream fell too far behind to
+// say what changed.
+message TaskSnapshot {
+  repeated Task tasks = 1;
+}
+
+// One task as it is now. Always the current state, never the change that
+// prompted it, so a client applying these in order never moves a task back.
+message TaskChanged {
+  Task task = 1;
+}
+
+// A task as the runtime describes it to anyone who did not submit it.
+message Task {
+  string id = 1;
+  // Empty for a root.
+  string parent = 2;
+  // Stable and dotted: `demo.count`.
+  string kind = 3;
+  repeated Operand subject = 4;
+  TaskState state = 5;
+  // Why it failed. Empty unless `state` is TASK_STATE_FAILED.
+  string error = 6;
+  // Set while queued on a resource rather than on admission.
+  bool waiting_on_resource = 7;
+  Progress progress = 8;
+  int64 submitted_unix_millis = 9;
+  // Absent until it settles.
+  optional int64 settled_unix_millis = 10;
+}
+
+message Operand {
+  string name = 1;
+  string value = 2;
+}
+
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0;
+  TASK_STATE_QUEUED = 1;
+  TASK_STATE_RUNNING = 2;
+  TASK_STATE_CANCELLING = 3;
+  TASK_STATE_SUCCEEDED = 4;
+  TASK_STATE_FAILED = 5;
+  TASK_STATE_CANCELLED = 6;
+}
+
+message Progress {
+  // Empty when the task names no phase.
+  string phase = 1;
+  oneof measure {
+    Count items = 2;
+    Count bytes = 3;
+  }
+}
+
+// A tally, and what it is counting towards when that is known.
+message Count {
+  uint64 done = 1;
+  optional uint64 total = 2;
+}

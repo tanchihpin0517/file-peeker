@@ -4,9 +4,18 @@
 //! transition is testable without either. The event loop in [`super`] feeds it
 //! and [`super::view`] draws it.
 
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+use crate::client::tasks::{TaskUpdate, TaskView};
+
+/// How long a settled task stays in the pane: long enough to see how it
+/// ended, short enough that the pane shows what is going on now.
+pub(super) const SETTLED_LINGER: Duration = Duration::from_secs(5);
 
 /// What one machine's connection reports to the UI.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +32,8 @@ pub(super) enum ConnectionEvent {
     Disconnected {
         retry_at: Instant,
     },
+    /// What the attached server says about its tasks.
+    Tasks(TaskUpdate),
 }
 
 /// What the UI asks one machine's connection to do.
@@ -43,6 +54,16 @@ pub(super) enum MachineState {
 pub(super) struct Machine {
     pub label: String,
     pub state: MachineState,
+    /// The server's tasks, oldest first. Kept through a disconnect, as herdr
+    /// keeps a lost machine's last state on screen, and replaced by the next
+    /// snapshot.
+    pub tasks: Vec<TaskView>,
+    /// When this client saw each settled task settle. The pane drops a task
+    /// [`SETTLED_LINGER`] after it; the server keeps it regardless.
+    ///
+    /// The client's own clock, not the server's settle time: a remote server's
+    /// clock need not agree with this one.
+    settled_at: HashMap<String, Instant>,
 }
 
 /// The whole TUI.
@@ -61,6 +82,8 @@ impl App {
             machines: vec![Machine {
                 label: "local".to_owned(),
                 state: MachineState::Attaching,
+                tasks: Vec::new(),
+                settled_at: HashMap::new(),
             }],
             selected: 0,
             quit: false,
@@ -113,10 +136,18 @@ impl App {
         None
     }
 
-    /// Applies what the local machine's connection reported.
+    /// Applies what the local machine's connection reported, as of now.
     pub(super) fn on_connection(&mut self, event: ConnectionEvent) {
+        self.on_connection_at(event, Instant::now());
+    }
+
+    pub(super) fn on_connection_at(&mut self, event: ConnectionEvent, now: Instant) {
         let machine = &mut self.machines[0];
         machine.state = match event {
+            ConnectionEvent::Tasks(update) => {
+                machine.apply(update, now);
+                return;
+            }
             ConnectionEvent::Attaching => MachineState::Attaching,
             ConnectionEvent::Starting => MachineState::Starting,
             ConnectionEvent::Attached {
@@ -129,6 +160,69 @@ impl App {
             ConnectionEvent::Disconnected { retry_at } => MachineState::Disconnected { retry_at },
         };
     }
+
+    /// Drops every settled task that has lingered its while. Called each tick.
+    pub(super) fn expire(&mut self, now: Instant) {
+        for machine in &mut self.machines {
+            machine.expire(now);
+        }
+    }
+}
+
+impl Machine {
+    fn apply(&mut self, update: TaskUpdate, now: Instant) {
+        match update {
+            TaskUpdate::Snapshot(snapshot) => {
+                // A settled task this client never saw running settled while it
+                // was not looking, longer ago than it can tell; it is not shown.
+                // One it did see keeps the time it was first seen settled.
+                let mut settled_at = HashMap::new();
+                let mut tasks = Vec::new();
+                for task in snapshot {
+                    if task.status.is_terminal() {
+                        let known = self.tasks.iter().find(|held| held.id == task.id);
+                        let since = match (known, self.settled_at.get(&task.id)) {
+                            // Already lingering: keep its time.
+                            (Some(_), Some(since)) => *since,
+                            // Seen running, settled while this was not looking.
+                            (Some(known), None) if !known.status.is_terminal() => now,
+                            // Never seen, or seen settled with no time: past it.
+                            _ => continue,
+                        };
+                        settled_at.insert(task.id.clone(), since);
+                    }
+                    tasks.push(task);
+                }
+                self.tasks = tasks;
+                self.settled_at = settled_at;
+            }
+            TaskUpdate::Changed(task) => {
+                if task.status.is_terminal() {
+                    self.settled_at.entry(task.id.clone()).or_insert(now);
+                } else {
+                    self.settled_at.remove(&task.id);
+                }
+                match self.tasks.iter_mut().find(|held| held.id == task.id) {
+                    Some(held) => *held = task,
+                    None => self.tasks.push(task),
+                }
+            }
+        }
+        self.tasks.sort_by_key(|task| task.submitted_unix_millis);
+        self.expire(now);
+    }
+
+    fn expire(&mut self, now: Instant) {
+        let settled_at = &self.settled_at;
+        self.tasks.retain(|task| {
+            settled_at
+                .get(&task.id)
+                .is_none_or(|since| now.duration_since(*since) < SETTLED_LINGER)
+        });
+        let tasks = &self.tasks;
+        self.settled_at
+            .retain(|id, _| tasks.iter().any(|task| &task.id == id));
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +230,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::client::tasks::{Measure, TaskStatus};
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -207,6 +302,146 @@ mod tests {
         release.kind = KeyEventKind::Release;
         app.on_key(release);
         assert!(!app.should_quit());
+    }
+
+    fn task(id: &str, submitted: i64, status: TaskStatus) -> TaskView {
+        TaskView {
+            id: id.to_owned(),
+            parent: None,
+            kind: "demo.count".to_owned(),
+            subject: Vec::new(),
+            status,
+            phase: None,
+            measure: Measure::Indeterminate,
+            submitted_unix_millis: submitted,
+        }
+    }
+
+    fn ids(app: &App) -> Vec<String> {
+        app.selected_machine()
+            .tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect()
+    }
+
+    fn changed(app: &mut App, task: TaskView, now: Instant) {
+        app.on_connection_at(ConnectionEvent::Tasks(TaskUpdate::Changed(task)), now);
+    }
+
+    #[test]
+    fn a_snapshot_replaces_the_tasks_and_a_change_updates_one() {
+        let now = Instant::now();
+        let mut app = App::new();
+        app.on_connection_at(
+            ConnectionEvent::Tasks(TaskUpdate::Snapshot(vec![
+                task("b", 2, TaskStatus::Running),
+                task("a", 1, TaskStatus::Queued { on_resource: false }),
+            ])),
+            now,
+        );
+        assert_eq!(ids(&app), ["a", "b"]);
+
+        changed(
+            &mut app,
+            task("b", 2, TaskStatus::Failed("no".to_owned())),
+            now,
+        );
+        changed(
+            &mut app,
+            task("c", 3, TaskStatus::Queued { on_resource: false }),
+            now,
+        );
+        assert_eq!(ids(&app), ["a", "b", "c"]);
+        assert_eq!(
+            app.selected_machine().tasks[1].status,
+            TaskStatus::Failed("no".to_owned())
+        );
+
+        // A disconnect keeps them; the next snapshot replaces them.
+        disconnected(&mut app);
+        assert_eq!(app.selected_machine().tasks.len(), 3);
+        app.on_connection_at(
+            ConnectionEvent::Tasks(TaskUpdate::Snapshot(Vec::new())),
+            now,
+        );
+        assert!(app.selected_machine().tasks.is_empty());
+    }
+
+    #[test]
+    fn a_settled_task_lingers_five_seconds_then_goes() {
+        let start = Instant::now();
+        let mut app = App::new();
+        changed(&mut app, task("a", 1, TaskStatus::Running), start);
+        changed(&mut app, task("b", 2, TaskStatus::Running), start);
+        changed(&mut app, task("a", 1, TaskStatus::Succeeded), start);
+        let later = start + Duration::from_secs(2);
+        changed(
+            &mut app,
+            task("b", 2, TaskStatus::Failed("no".to_owned())),
+            later,
+        );
+
+        app.expire(start + SETTLED_LINGER.saturating_sub(Duration::from_millis(1)));
+        assert_eq!(ids(&app), ["a", "b"]);
+        // Each goes five seconds after it settled, not after the first did.
+        app.expire(start + SETTLED_LINGER);
+        assert_eq!(ids(&app), ["b"]);
+        app.expire(later + SETTLED_LINGER);
+        assert!(ids(&app).is_empty());
+    }
+
+    #[test]
+    fn a_task_finishing_between_two_running_ones_leaves_alone() {
+        let start = Instant::now();
+        let mut app = App::new();
+        for (submitted, id) in (0..).zip(["first", "middle", "last"]) {
+            changed(&mut app, task(id, submitted, TaskStatus::Running), start);
+        }
+        let done = start + Duration::from_secs(1);
+        changed(&mut app, task("middle", 1, TaskStatus::Succeeded), done);
+
+        app.expire(done + SETTLED_LINGER.saturating_sub(Duration::from_millis(1)));
+        assert_eq!(ids(&app), ["first", "middle", "last"]);
+        app.expire(done + SETTLED_LINGER);
+        // The two still running keep their places, in order.
+        assert_eq!(ids(&app), ["first", "last"]);
+    }
+
+    #[test]
+    fn a_running_task_never_expires() {
+        let start = Instant::now();
+        let mut app = App::new();
+        changed(&mut app, task("a", 1, TaskStatus::Running), start);
+        app.expire(start + Duration::from_secs(3600));
+        assert_eq!(ids(&app), ["a"]);
+    }
+
+    #[test]
+    fn a_snapshot_shows_only_settled_tasks_this_client_saw_end() {
+        let start = Instant::now();
+        let mut app = App::new();
+        changed(&mut app, task("lingering", 1, TaskStatus::Running), start);
+        changed(&mut app, task("lingering", 1, TaskStatus::Succeeded), start);
+        changed(&mut app, task("running", 2, TaskStatus::Running), start);
+
+        // Reattached two seconds later: "running" finished while this was away,
+        // and "old" finished before it ever looked.
+        let back = start + Duration::from_secs(2);
+        app.on_connection_at(
+            ConnectionEvent::Tasks(TaskUpdate::Snapshot(vec![
+                task("old", 0, TaskStatus::Succeeded),
+                task("lingering", 1, TaskStatus::Succeeded),
+                task("running", 2, TaskStatus::Succeeded),
+            ])),
+            back,
+        );
+        assert_eq!(ids(&app), ["lingering", "running"]);
+        // "lingering" keeps the time it first settled; "running" starts now.
+        app.expire(start + SETTLED_LINGER);
+        assert_eq!(ids(&app), ["running"]);
+        app.expire(back + SETTLED_LINGER);
+        assert!(ids(&app).is_empty());
     }
 
     #[test]

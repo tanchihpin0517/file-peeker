@@ -170,8 +170,11 @@ pub(crate) struct Progress {
 pub(crate) enum Measure {
     #[default]
     Indeterminate,
+    /// `total` when the count is known up front, so a client can show a
+    /// fraction rather than a tally.
     Items {
         done: u64,
+        total: Option<u64>,
     },
     Bytes {
         done: u64,

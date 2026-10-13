@@ -21,6 +21,9 @@ pub(crate) const API_GENERATION: u32 = 1;
 
 pub(crate) const METHOD_STATUS: &str = "server.status";
 pub(crate) const METHOD_STOP: &str = "server.stop";
+/// Starts a `demo.count` task: `{"seconds": 5, "fail": false}`, both optional.
+/// Answers `{"id": "<task id>"}` at once; the task runs on.
+pub(crate) const METHOD_TASK_DEMO: &str = "task.demo";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Request {
@@ -68,6 +71,25 @@ pub(crate) struct ApiError {
 
 pub(crate) const ERROR_INVALID_REQUEST: &str = "invalid_request";
 pub(crate) const ERROR_UNKNOWN_METHOD: &str = "unknown_method";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct DemoParams {
+    #[serde(default = "DemoParams::default_seconds")]
+    pub seconds: u64,
+    #[serde(default)]
+    pub fail: bool,
+}
+
+impl DemoParams {
+    fn default_seconds() -> u64 {
+        5
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct Submitted {
+    pub id: String,
+}
 
 /// `server.status`'s result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

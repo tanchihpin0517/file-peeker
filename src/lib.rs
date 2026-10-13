@@ -21,8 +21,9 @@ mod client;
 mod home;
 mod protocol;
 mod server;
-// Step 3 builds the runtime alone, exercised by its own tests; the server
-// submits its first kinds in step 5, and this allow goes then.
+// The server runs only the demo kind so far, so children, resources and the
+// cancellation API are reached from tests alone until step 5's real kinds use
+// them; this allow goes then.
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
 mod task;
 mod tui;

@@ -7,6 +7,8 @@
 
 mod api;
 mod attach;
+mod demo;
+mod tasks;
 
 use std::{
     fs::{self, File, TryLockError},
@@ -35,6 +37,7 @@ use crate::{
         api::{API_GENERATION, ServerStatus},
         client_v1::client_protocol_server::ClientProtocolServer,
     },
+    task::{self, Runtime},
 };
 
 const SOCKET_MODE: u32 = 0o600;
@@ -185,6 +188,7 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
     let sockets = Sockets::claim(home)?;
 
     let info = Arc::new(ServerInfo::new(home));
+    let runtime = Runtime::new(task::Config::default());
     info!(
         pid = info.pid,
         version = VERSION,
@@ -198,11 +202,13 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
     let api = tokio::spawn(api::serve(
         api_listener,
         Arc::clone(&info),
+        runtime.clone(),
         shutdown.clone(),
     ));
     let client = tonic::transport::Server::builder()
         .add_service(ClientProtocolServer::new(attach::Attach::new(
             Arc::clone(&info),
+            runtime.clone(),
             shutdown.clone(),
         )))
         .serve_with_incoming_shutdown(
@@ -213,6 +219,9 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
 
     shutdown.cancelled().await;
     info!("server stopping");
+    // Tasks do not survive the server: cancelled now, they get the shutdown
+    // timeout to clean up rather than being cut off mid-write.
+    runtime.cancel_all();
     let finished = tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
         let api = api.await;
         let client = client.await;

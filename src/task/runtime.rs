@@ -161,6 +161,16 @@ impl Runtime {
         }
     }
 
+    /// Cancels every task that has not settled.
+    pub(crate) fn cancel_all(&self) {
+        let registry = self.lock();
+        for entry in registry.tasks.values() {
+            if !entry.info.state.is_terminal() {
+                entry.token.cancel();
+            }
+        }
+    }
+
     /// Every retained task, in submission order.
     pub(crate) fn tasks(&self) -> Vec<TaskInfo> {
         let registry = self.lock();

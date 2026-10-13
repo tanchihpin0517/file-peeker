@@ -15,7 +15,8 @@ pub(crate) mod api;
 ///
 /// - 1: `Attach`.
 /// - 2: `Watch`.
-pub(crate) const CLIENT_PROTOCOL: u32 = 2;
+/// - 3: tasks on `Watch`: a snapshot, then every change.
+pub(crate) const CLIENT_PROTOCOL: u32 = 3;
 
 /// This build's version, as both roles report it.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");

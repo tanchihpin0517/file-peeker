@@ -130,7 +130,9 @@ after.
   machine list holding `local`, detaches on `q`, dims and reconnects with backoff
   when the server goes away, and starts one again only on `s`. Step 3 is done: the
   task runtime — lifecycle, structured tree, cancellation, resources, FIFO
-  admission per scope, coalesced events, retention — with test kinds only.
+  admission per scope, coalesced events, retention — with test kinds only. The
+  server now holds a runtime, `Watch` carries its tasks, and the TUI's sidebar
+  lists them in its lower half; `fpk task demo` starts one to watch.
 
 ### Tier 3 — states the proposals draw
 

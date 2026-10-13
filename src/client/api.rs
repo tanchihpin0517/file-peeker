@@ -11,7 +11,10 @@ use tokio::{
 
 use crate::{
     home::Home,
-    protocol::api::{ApiError, METHOD_STATUS, METHOD_STOP, Request, Response, ServerStatus},
+    protocol::api::{
+        ApiError, DemoParams, METHOD_STATUS, METHOD_STOP, METHOD_TASK_DEMO, Request, Response,
+        ServerStatus, Submitted,
+    },
 };
 
 /// How long `stop` waits for the server to remove its socket.
@@ -61,12 +64,20 @@ impl ApiClient {
     }
 
     pub(crate) async fn call(&mut self, method: &str) -> Result<Value, ApiClientError> {
+        self.call_with(method, Value::Null).await
+    }
+
+    pub(crate) async fn call_with(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, ApiClientError> {
         let id = self.next_id;
         self.next_id += 1;
         let mut line = serde_json::to_vec(&Request {
             id: Some(id),
             method: method.to_owned(),
-            params: Value::Null,
+            params,
         })?;
         line.push(b'\n');
         self.write.write_all(&line).await?;
@@ -85,6 +96,17 @@ impl ApiClient {
 
     pub(crate) async fn status(&mut self) -> Result<ServerStatus, ApiClientError> {
         Ok(serde_json::from_value(self.call(METHOD_STATUS).await?)?)
+    }
+
+    /// Starts a `demo.count` task on the server, and returns its ID.
+    pub(crate) async fn submit_demo(
+        &mut self,
+        params: &DemoParams,
+    ) -> Result<String, ApiClientError> {
+        let result = self
+            .call_with(METHOD_TASK_DEMO, serde_json::to_value(params)?)
+            .await?;
+        Ok(serde_json::from_value::<Submitted>(result)?.id)
     }
 }
 

@@ -133,3 +133,19 @@ fn the_terminal_ui_refuses_without_a_terminal_and_starts_nothing() {
     assert!(stderr.contains("fpk server start"), "{stderr}");
     assert!(!home.join("file-peeker-client.sock").exists());
 }
+
+#[test]
+fn a_demo_task_starts_the_server_and_answers_with_its_id() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let _guard = StopOnDrop(&home);
+
+    let started = stdout(&fpk(&home, &["task", "demo", "--seconds", "1"]));
+    let id = started
+        .strip_prefix("started demo.count task ")
+        .unwrap_or_else(|| panic!("{started}"))
+        .trim();
+    assert_eq!(id.len(), 36, "{id}");
+    let status = stdout(&fpk(&home, &["status"]));
+    assert!(status.contains("status: running"), "{status}");
+}

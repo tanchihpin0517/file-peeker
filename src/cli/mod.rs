@@ -14,7 +14,10 @@ use crate::{
         api::{self, ApiClient, ApiClientError},
     },
     home::Home,
-    protocol::{CLIENT_PROTOCOL, VERSION, api::API_GENERATION},
+    protocol::{
+        CLIENT_PROTOCOL, VERSION,
+        api::{API_GENERATION, DemoParams},
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -41,6 +44,25 @@ enum Command {
         #[command(subcommand)]
         action: Option<ServerAction>,
     },
+    /// Work with the server's tasks.
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskAction {
+    /// Start a demo task that counts for a while, to watch in the terminal UI.
+    /// Starts the server if none is running.
+    Demo {
+        /// How long it counts.
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+        /// Fail halfway instead of finishing.
+        #[arg(long)]
+        fail: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -64,6 +86,7 @@ pub(crate) enum ClientCommand {
     Start,
     Status,
     Stop,
+    Demo { seconds: u64, fail: bool },
 }
 
 pub(crate) fn parse() -> Invocation {
@@ -81,6 +104,12 @@ fn invocation(cli: &Cli) -> Invocation {
         Some(Command::Server {
             action: Some(ServerAction::Stop),
         }) => Invocation::Client(ClientCommand::Stop),
+        Some(Command::Task {
+            action: TaskAction::Demo { seconds, fail },
+        }) => Invocation::Client(ClientCommand::Demo {
+            seconds: *seconds,
+            fail: *fail,
+        }),
     }
 }
 
@@ -100,6 +129,7 @@ pub(crate) fn execute(home: &Home, command: ClientCommand) -> ExitCode {
             ClientCommand::Start => start(home).await,
             ClientCommand::Status => status(home).await,
             ClientCommand::Stop => stop(home).await,
+            ClientCommand::Demo { seconds, fail } => demo(home, seconds, fail).await,
         }
     });
     match outcome {
@@ -160,6 +190,21 @@ async fn status(home: &Home) -> Result<(), String> {
     }
 }
 
+async fn demo(home: &Home, seconds: u64, fail: bool) -> Result<(), String> {
+    client::attach_or_start(home)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut api = ApiClient::connect(home)
+        .await
+        .map_err(|error| error.to_string())?;
+    let id = api
+        .submit_demo(&DemoParams { seconds, fail })
+        .await
+        .map_err(|error| error.to_string())?;
+    println!("started demo.count task {id}");
+    Ok(())
+}
+
 async fn stop(home: &Home) -> Result<(), String> {
     match api::stop(home).await {
         Ok(true) => println!("server stopped"),
@@ -210,6 +255,13 @@ mod tests {
         assert_eq!(
             parse_args(&["status"]),
             Invocation::Client(ClientCommand::Status)
+        );
+        assert_eq!(
+            parse_args(&["task", "demo", "--seconds", "2", "--fail"]),
+            Invocation::Client(ClientCommand::Demo {
+                seconds: 2,
+                fail: true
+            })
         );
     }
 

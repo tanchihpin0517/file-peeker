@@ -18,9 +18,10 @@ the middle of a rewrite.
 A stable Rust toolchain is required; see [rust-toolchain.toml](rust-toolchain.toml).
 
 ```text
-cargo run --bin fpk                  # attach to this machine's server, starting one if needed
-cargo run --bin fpk -- status        # versions, pid, protocol compatibility, uptime
-cargo run --bin fpk -- server stop   # stop the server
+cargo run                            # the terminal UI, attached to this machine's server
+cargo run -- status                  # versions, pid, protocol compatibility, uptime
+cargo run -- task demo --seconds 8   # a task to watch in the UI's sidebar
+cargo run -- server stop             # stop the server
 ```
 
 The server keeps running after `fpk` exits. Its sockets, lock and logs live in

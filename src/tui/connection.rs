@@ -45,7 +45,7 @@ pub(super) async fn run(
         if events.send(ConnectionEvent::Attaching).await.is_err() {
             return;
         }
-        if let Ok(watching) = client::watch(&home).await {
+        if let Ok(mut watching) = client::watch(&home).await {
             attempt = 0;
             let attached = ConnectionEvent::Attached {
                 server_version: watching.attached.server_version.clone(),
@@ -54,9 +54,18 @@ pub(super) async fn run(
             if events.send(attached).await.is_err() {
                 return;
             }
-            tokio::select! {
-                () = watching.closed() => {}
-                () = events.closed() => return,
+            loop {
+                tokio::select! {
+                    update = watching.next() => match update {
+                        Some(update) => {
+                            if events.send(ConnectionEvent::Tasks(update)).await.is_err() {
+                                return;
+                            }
+                        }
+                        None => break,
+                    },
+                    () = events.closed() => return,
+                }
             }
         }
 
@@ -94,7 +103,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::server;
+    use crate::{
+        client::tasks::{TaskUpdate, TaskView},
+        server,
+    };
 
     #[test]
     fn backoff_doubles_up_to_its_cap() {
@@ -110,6 +122,14 @@ mod tests {
             .await
             .expect("no connection event in time")
             .expect("the connection task ended")
+    }
+
+    async fn until_snapshot(events: &mut mpsc::Receiver<ConnectionEvent>) -> Vec<TaskView> {
+        loop {
+            if let ConnectionEvent::Tasks(TaskUpdate::Snapshot(tasks)) = next(events).await {
+                return tasks;
+            }
+        }
     }
 
     async fn until_attached(events: &mut mpsc::Receiver<ConnectionEvent>) -> u32 {
@@ -158,6 +178,8 @@ mod tests {
 
         let (shutdown, task) = serve(home.clone());
         assert_eq!(until_attached(&mut events).await, std::process::id());
+        // A fresh server has no tasks, and says so rather than saying nothing.
+        assert_eq!(until_snapshot(&mut events).await, []);
 
         shutdown.cancel();
         task.await.unwrap().unwrap();

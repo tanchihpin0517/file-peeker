@@ -103,7 +103,9 @@ async fn event_loop(terminal: &mut DefaultTerminal, home: &Home) -> io::Result<O
     let mut tick = tokio::time::interval(TICK);
 
     let outcome = loop {
-        terminal.draw(|frame| view::draw(frame, &app, Instant::now()))?;
+        let now = Instant::now();
+        app.expire(now);
+        terminal.draw(|frame| view::draw(frame, &app, now))?;
         tokio::select! {
             event = input.next() => match event {
                 Some(Ok(Event::Key(key))) => {

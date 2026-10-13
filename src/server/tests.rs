@@ -255,3 +255,95 @@ async fn watch_never_starts_a_server() {
     assert!(client::watch(&home).await.is_err());
     assert!(!client::is_running(&home).await);
 }
+
+#[tokio::test]
+async fn watch_follows_a_task_from_submission_to_its_end() {
+    use crate::{
+        client::tasks::{Measure, TaskStatus, TaskUpdate},
+        protocol::api::DemoParams,
+    };
+
+    let server = Running::start().await;
+    let mut watching = client::watch(&server.home).await.unwrap();
+    assert_eq!(
+        watching.next().await,
+        Some(TaskUpdate::Snapshot(Vec::new()))
+    );
+
+    let id = ApiClient::connect(&server.home)
+        .await
+        .unwrap()
+        .submit_demo(&DemoParams {
+            seconds: 0,
+            fail: false,
+        })
+        .await
+        .unwrap();
+
+    let mut seen = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(TaskUpdate::Changed(task)) = watching.next().await {
+            assert_eq!(task.id, id);
+            assert_eq!(task.kind, "demo.count");
+            let done = task.status == TaskStatus::Succeeded;
+            seen.push(task);
+            if done {
+                return;
+            }
+        }
+        panic!("the stream ended before the task did");
+    })
+    .await
+    .expect("the task never finished");
+    assert!(seen.iter().any(|task| task.status == TaskStatus::Running));
+    assert_eq!(
+        seen.last().unwrap().measure,
+        Measure::Items {
+            done: 1,
+            total: Some(1)
+        }
+    );
+
+    // A watcher attaching later gets it in its snapshot.
+    let mut late = client::watch(&server.home).await.unwrap();
+    let Some(TaskUpdate::Snapshot(tasks)) = late.next().await else {
+        panic!("expected a snapshot first");
+    };
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].status, TaskStatus::Succeeded);
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stopping_the_server_cancels_its_tasks() {
+    use crate::{
+        client::tasks::{TaskStatus, TaskUpdate},
+        protocol::api::DemoParams,
+    };
+
+    let server = Running::start().await;
+    let mut watching = client::watch(&server.home).await.unwrap();
+    watching.next().await;
+    ApiClient::connect(&server.home)
+        .await
+        .unwrap()
+        .submit_demo(&DemoParams {
+            seconds: 60,
+            fail: false,
+        })
+        .await
+        .unwrap();
+    while let Some(TaskUpdate::Changed(task)) = watching.next().await {
+        if task.status == TaskStatus::Running {
+            break;
+        }
+    }
+    let started = std::time::Instant::now();
+    server.stop().await.unwrap();
+    // Cancelled, a minute-long task ends at once rather than at the timeout.
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}

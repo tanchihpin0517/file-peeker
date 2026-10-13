@@ -5,6 +5,7 @@
 //! this same binary as `fpk server`.
 
 pub(crate) mod api;
+pub(crate) mod tasks;
 
 use std::{
     fs::File,
@@ -22,12 +23,14 @@ use tonic::{
 };
 use tower::service_fn;
 
+use self::tasks::{TaskUpdate, TaskView};
 use crate::{
     home::{HOME_ENV, Home},
     protocol::{
         CLIENT_PROTOCOL, VERSION,
         client_v1::{
             AttachRequest, ServerEvent, WatchRequest, client_protocol_client::ClientProtocolClient,
+            server_event,
         },
     },
 };
@@ -205,10 +208,32 @@ pub(crate) struct Watching {
 }
 
 impl Watching {
-    /// Resolves when the server ends the stream or the connection drops. Either
-    /// way the attachment is over.
+    /// The next task update, or `None` once the server ends the stream or the
+    /// connection drops. Either way the attachment is over.
+    pub(crate) async fn next(&mut self) -> Option<TaskUpdate> {
+        loop {
+            let event = self.events.message().await.ok()??;
+            match event.event {
+                Some(server_event::Event::Snapshot(snapshot)) => {
+                    return Some(TaskUpdate::Snapshot(
+                        snapshot.tasks.into_iter().map(TaskView::from).collect(),
+                    ));
+                }
+                Some(server_event::Event::Changed(changed)) => {
+                    if let Some(task) = changed.task {
+                        return Some(TaskUpdate::Changed(task.into()));
+                    }
+                }
+                // `Hello`, or an event a newer server sends: nothing to apply.
+                Some(server_event::Event::Hello(_)) | None => {}
+            }
+        }
+    }
+
+    /// Resolves when the attachment is over, discarding what arrives first.
+    #[cfg(test)]
     pub(crate) async fn closed(mut self) {
-        while let Ok(Some(_)) = self.events.message().await {}
+        while self.next().await.is_some() {}
     }
 }
 

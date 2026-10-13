@@ -258,7 +258,7 @@ pub(crate) enum TaskState {
 
 pub(crate) struct Progress {
     pub phase: Option<PhaseName>,
-    pub measure: Measure,        // Indeterminate | Items { done } | Bytes { done, total }
+    pub measure: Measure,        // Indeterminate | Items { done, total } | Bytes { done, total }
 }
 ```
 
@@ -693,6 +693,33 @@ already attaches, detaches and reconnects.
   `fpk`.
 - Resizing redraws. Rendering is a pure function of the client's state, so it is
   tested against a test backend rather than a real terminal.
+
+After step 3, the sidebar gained its lower half, as herdr splits its sidebar:
+
+- **The sidebar's lower half lists the selected machine's tasks** in the order
+  they were submitted, top down, as a queue reads: a new task joins the end.
+  Nothing decides what to leave out: settled tasks leave on their own, so the
+  list stays short, and what does not fit is cut at the pane's bottom edge.
+- **A settled task stays five seconds, then leaves the pane.** Long enough to
+  see how it ended; the server still retains it. The five seconds run on the
+  client's clock from when the client saw it settle, not on the server's settle
+  time, because a remote server's clock need not agree. A snapshot's settled
+  task the client never saw end settled longer ago than it can tell, and is not
+  shown.
+- **The key hints sit under the main pane alone**; the sidebar runs the full
+  height beside them. Each row is a glyph
+  for the state, the kind, and a share when the task knows its total, a count
+  when it does not, its state otherwise. A disconnected machine's
+  tasks stay on screen, dimmed, until the next snapshot replaces them.
+- **`Watch` carries the server's tasks**: a snapshot after `Hello`, then every
+  change. A change is sent as the task is *now*, looked up when it is sent, so a
+  client applying them in order never moves a task backwards past a snapshot.
+  A watcher that falls behind the runtime's event buffer gets a fresh snapshot.
+- **The server holds a task runtime** from here on, and cancels every task when
+  it stops. Its one kind so far is `demo.count`, started by `fpk task demo`
+  through the API's `task.demo`: it counts for a while, reports progress, and
+  fails halfway when asked, so the pane has something to show before step 5's
+  real kinds. It is `Background`, so a second one queues behind the first.
 
 ## What this replaces at cutover
 
