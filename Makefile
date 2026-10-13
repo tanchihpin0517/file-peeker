@@ -18,6 +18,8 @@ lint:
 	cargo clippy --all-targets -- $(LINT_DENY)
 # The desktop front end is outside `default`, so it needs naming to be linted.
 	cargo clippy --features gui --all-targets -- $(LINT_DENY)
+# v2 is a second workspace member, and the root package is the only default one.
+	cargo clippy -p file-peeker-next --all-targets -- $(LINT_DENY)
 
 # Targets whose `required-features` are unmet are silently skipped unless named
 # explicitly, so the slim build the remote installer uses needs its own check.
@@ -32,6 +34,7 @@ test:
 # cover what is left once the shared model is in `browser`: the expansion policy
 # a click goes through, and what the chrome derives from a path.
 	cargo test --features gui gui::
+	cargo test -p file-peeker-next
 
 docs-check:
 	bash scripts/check-docs.sh

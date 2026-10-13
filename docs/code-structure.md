@@ -63,8 +63,10 @@ several requests and order the locks between them.
 
 Status: implemented.
 
-Everything lives in a single package rooted at the repository. The four
-binaries under `src/bin/` are shims: each one calls the `run` entry point of its
+Everything lives in a single package rooted at the repository. The workspace
+has a second member, `crates/next`, which is the [v2 rewrite](design/v2-architecture.md)
+rather than part of this package: it names nothing here, and nothing here names
+it. The four binaries under `src/bin/` are shims: each one calls the `run` entry point of its
 feature-gated module, so all logic stays in the library where `cfg(test)` reaches
 it.
 

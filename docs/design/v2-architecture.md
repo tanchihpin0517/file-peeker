@@ -79,7 +79,9 @@ incremental step can do cheaply.
 
 ## Processes and binary
 
-One binary, `file-peeker`, as herdr has one.
+One binary, `file-peeker`, as herdr has one. Until cutover it is installed as
+`fpk`, because the current crate's `file-peeker` occupies that name on the same
+machines; the invocations below are written with the final name.
 
 | Invocation | Does |
 | --- | --- |
@@ -550,8 +552,6 @@ session": a front end can only reach browsing state through a view.
 - **Shared selection.** Two clients on one session share one selection, as herdr
   shares focus. If that proves wrong for File Peeker, a per-client cursor over a
   shared tree is the alternative.
-- **The new binary's name until cutover**, since `file-peeker` is taken by the
-  current crate on the same machine and on remote hosts.
 - **Task identity across a retry.** The leaning is a new task with
   `retry_of: TaskId`.
 

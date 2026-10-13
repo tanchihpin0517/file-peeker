@@ -107,7 +107,7 @@ after.
   combinations reset to the default on every start. Decide the file location, the
   handling of missing and invalid values, and whether both front ends share one
   file.
-- [ ] **8. Rewrite as v2: a persistent server per machine, run by tasks.**
+- [~] **8. Rewrite as v2: a persistent server per machine, run by tasks.**
   Proposed in [v2 architecture](docs/design/v2-architecture.md), with every
   decision defaulting to how [herdr](https://herdr.dev) does it. Each machine runs
   one persistent server that owns its tasks and its browsing sessions — tabs,
@@ -119,9 +119,11 @@ after.
   A public JSON API sits beside the private client protocol, and the CLI is a
   client of the API. Built as `crates/next` in thirteen steps, 0 to 12, ending in
   cutover. Step 1 is an empty server — started, found, answering and stopped,
-  with nothing inside — and step 5 is a local walking skeleton. Open: the new
-  binary's name until cutover, and whether round-tripped input needs an
-  optimistic cursor over SSH.
+  with nothing inside — and step 5 is a local walking skeleton. The binary is
+  `fpk` until cutover. Open: whether round-tripped input needs an optimistic
+  cursor over SSH.
+  Step 0 is done: `crates/next` is a workspace member, named `file-peeker-next`,
+  sharing the root's lints and covered by `make lint` and `make test`.
 
 ### Tier 3 — states the proposals draw
 

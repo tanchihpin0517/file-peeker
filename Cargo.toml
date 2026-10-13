@@ -1,7 +1,21 @@
 [workspace]
+# The root package is the shipping crate. `crates/next` is v2, the rewrite
+# proposed in docs/design/v2-architecture.md; it depends on nothing here and
+# replaces this package at cutover. The root stays the only default member, so a
+# bare `cargo build` here still means the shipping crate.
+members = ["crates/next"]
 # Kept explicit: an edition 2024 package outside a workspace would default to
 # resolver 3 and rewrite Cargo.lock.
 resolver = "2"
+
+# Shared by both members, so v2 starts under the same lint bar.
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
 
 [package]
 name = "file-peeker"
@@ -109,10 +123,5 @@ name = "file-peeker-server"
 path = "src/bin/file-peeker-server.rs"
 required-features = ["server"]
 
-[lints.rust]
-unreachable_pub = "warn"
-unsafe_code = "forbid"
-
-[lints.clippy]
-all = "warn"
-pedantic = "warn"
+[lints]
+workspace = true

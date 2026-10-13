@@ -1,0 +1,13 @@
+[package]
+# A working name. It becomes `file-peeker` at cutover, when the root package goes.
+name = "file-peeker-next"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
