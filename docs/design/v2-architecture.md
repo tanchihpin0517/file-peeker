@@ -580,19 +580,20 @@ crate changes along the way.
 | --- | --- | --- |
 | 0 | v2 at the repository root and the shipping crate in `old/`, both under `make verify` and CI | Neither crate can rot |
 | 1 | **An empty server** — see below | **A server that outlives its client** |
-| 2 | The task runtime, with test kinds only | Lifecycle, tree, cancellation, admission, events |
-| 3 | `fs` and `host_path` | The filesystem core, with its own tests |
-| 4 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
-| 5 | The client protocol, views and actions; the TUI attached through them | **Local walking skeleton** |
-| 6 | Persistence: `sessions/default.json`, snapshots, backups, restore | Reattach and restart |
-| 7 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
-| 8 | Machines: bridge, ControlMaster, approval-based install, reconnect, dimmed views, aggregation in the TUI | Several machines in one client |
-| 9 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
-| 10 | `Preview`, `DirSize`, `Refresh` | TODO items 11, 12 and 13 |
-| 11 | The desktop front end, as a second client | TODO items 6 and 9 |
-| 12 | Cutover: `fpk` becomes `file-peeker`, and `old/` is deleted | One crate again |
+| 2 | **An empty TUI client** — see below | **A front end that attaches, detaches and survives its server** |
+| 3 | The task runtime, with test kinds only | Lifecycle, tree, cancellation, admission, events |
+| 4 | `fs` and `host_path` | The filesystem core, with its own tests |
+| 5 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
+| 6 | Views and actions in the client protocol; the TUI renders a tab through them | **Local walking skeleton** |
+| 7 | Persistence: `sessions/default.json`, snapshots, backups, restore | Reattach and restart |
+| 8 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
+| 9 | Machines: bridge, ControlMaster, approval-based install, remote reconnect, aggregation in the TUI | Several machines in one client |
+| 10 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
+| 11 | `Preview`, `DirSize`, `Refresh` | TODO items 11, 12 and 13 |
+| 12 | The desktop front end, as a second client | TODO items 6 and 9 |
+| 13 | Cutover: `fpk` becomes `file-peeker`, and `old/` is deleted | One crate again |
 
-Steps 2 and 3 do not depend on each other. Step 5 is the first one a person can
+Steps 3 and 4 do not depend on each other. Step 6 is the first one a person can
 use to browse.
 
 ### Step 1: an empty server
@@ -624,6 +625,45 @@ after it is a feature added to a server that already runs.
 
 It proves the claim the whole design rests on: closing the client leaves the
 server running, and the next `file-peeker` finds it.
+
+### Step 2: an empty TUI client
+
+The front end's process model with nothing inside it: `fpk` opens a full-screen
+terminal UI attached to the server, shows that it is attached, and leaves the
+server running when it quits. Every later front-end step draws into a shell that
+already attaches, detaches and reconnects.
+
+- **`fpk` opens the TUI.** It attaches as step 1 does — starting a server if none
+  runs — then takes the terminal: alternate screen, raw mode, hidden cursor. The
+  screen is the chrome a browser will later fill: a title bar with the attached
+  server's version and pid, a sidebar, an empty body that says there is nothing
+  to browse yet, and a status line with the keys.
+- **The sidebar lists machines, as herdr's does.** It holds `local` and only
+  `local` until step 9 reads `machines.toml`; the list is a list from the start,
+  so adding machines adds rows rather than a layout. Each row shows the machine's
+  label and a state — attaching, attached, disconnected — and the selected row is
+  the one the body and the title describe. `j`/`k` and the arrow keys move the
+  selection, which with one machine is a no-op but is the binding later steps
+  inherit.
+- **Quitting detaches.** `q` and `Ctrl-C` leave the TUI; the server keeps running
+  and the next `fpk` attaches to it again. The terminal is restored on every exit
+  path, a panic included.
+- **The attachment is live.** After the handshake the client holds one
+  server-streaming call, `Watch`, open for as long as it is attached. Step 2's
+  server sends nothing on it but its opening event; what matters is that its end
+  is how a client learns the server went away.
+- **A lost server shows, as herdr shows a lost machine.** When `Watch` ends, the
+  machine's row and the body dim, its state reads `disconnected`, input other than quitting is off,
+  and the client re-attaches with backoff — doubling from one second, capped at
+  two minutes. **Reconnecting never starts a server**, as herdr's background
+  reconnects never install or restart one: a server that was stopped on purpose
+  stays stopped until the user presses `s` to start it.
+- **Without a terminal, `fpk` refuses** and says to use `fpk server start`, a new
+  command that starts the server if none runs, prints what `status` prints, and
+  exits. That is what scripts and the end-to-end tests use in place of a bare
+  `fpk`.
+- Resizing redraws. Rendering is a pure function of the client's state, so it is
+  tested against a test backend rather than a real terminal.
 
 ## What this replaces at cutover
 
