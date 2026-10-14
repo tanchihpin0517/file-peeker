@@ -902,9 +902,21 @@ After step 4, the TUI took the mouse, as herdr's is mouse-first:
   keyboard-only use, keeping the terminal's own selection and scrollback. The
   mouse is given back on every exit path, a panic included.
 
-Clicking a task, and herdr's right-click menu, wait for something to act on:
-there is nothing to do to a task until cancelling one, and the menu's actions
-are machine operations the CLI holds for now.
+- **A machine's `⋯` opens its menu.** Each machine's row ends in a `⋯`;
+  clicking it hangs the machine's menu below it, as herdr's visible controls
+  open what they name, rather than behind a right click. herdr has no menu on a
+  machine, whose operations are its CLI's. The menu is empty for now and says
+  so: its items come with the actions they would take. While it is open it has
+  the input — Esc, `q` or its own `⋯` closes it, a press outside closes it
+  without acting on what is there, another menu's button opens that one
+  instead, and Ctrl-C still quits.
+- **`menu` in the machine pane's bottom-right corner** opens the
+  client's own menu, for what belongs to no one machine — opening the
+  configuration, later. It is empty for now too, and leaves the selection
+  where it is.
+
+Clicking a task waits for something to act on: there is nothing to do to a
+task until cancelling one.
 
 ### Step 5: `PathString`
 

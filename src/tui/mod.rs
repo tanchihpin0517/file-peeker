@@ -205,7 +205,7 @@ async fn event_loop(
                     let size = terminal.size()?;
                     let screen = Rect::new(0, 0, size.width, size.height);
                     let spot = view::spot(&app, screen, mouse.column, mouse.row);
-                    if let Some(command) = app.on_mouse(mouse.kind, spot) {
+                    if let Some(command) = app.on_mouse(mouse.kind, spot, mouse.column, mouse.row) {
                         let _ = commands[app.selected()].try_send(command);
                     }
                 }

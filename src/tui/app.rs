@@ -68,10 +68,34 @@ pub(super) enum Command {
 pub(super) enum Spot {
     /// A machine's row in the sidebar.
     Machine(usize),
+    /// What opens a menu: the `⋯` at the end of a machine's row, or `menu` in
+    /// the machine pane's bottom-right corner.
+    MenuButton(MenuOf),
     /// The machine list's empty space below its last row.
     Machines,
     /// A key hint under the main pane; clicking it presses its key.
     Hint(Hint),
+    /// Inside the open menu.
+    Menu,
+}
+
+/// Whose menu it is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MenuOf {
+    /// One machine's, from the `⋯` at the end of its row.
+    Machine(usize),
+    /// The whole client's, from `menu` in the machine pane's corner.
+    Global,
+}
+
+/// A menu, opened from a button drawn for it, as herdr's visible controls
+/// open what they name. It holds nothing yet: its items come with the actions they would take.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Menu {
+    pub of: MenuOf,
+    /// The cell clicked to open it; the view hangs it below that, on screen.
+    pub column: u16,
+    pub row: u16,
 }
 
 /// A key hint that does something when clicked, as herdr's visible controls do.
@@ -122,6 +146,7 @@ pub(super) struct Machine {
 pub(super) struct App {
     machines: Vec<Machine>,
     selected: usize,
+    menu: Option<Menu>,
     quit: bool,
 }
 
@@ -141,6 +166,7 @@ impl App {
         Self {
             machines,
             selected: 0,
+            menu: None,
             quit: false,
         }
     }
@@ -157,6 +183,10 @@ impl App {
         &self.machines[self.selected]
     }
 
+    pub(super) fn menu(&self) -> Option<Menu> {
+        self.menu
+    }
+
     pub(super) fn should_quit(&self) -> bool {
         self.quit
     }
@@ -167,11 +197,19 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return None;
         }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit = true;
+            return None;
+        }
+        // An open menu has the keyboard: it closes, and nothing behind it moves.
+        if self.menu.is_some() {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.menu = None;
+            }
+            return None;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.quit = true;
-            }
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
             KeyCode::Char('s') => return self.start_server(),
@@ -180,11 +218,36 @@ impl App {
         None
     }
 
-    /// Applies one mouse event over `spot`, and returns the command it asks of
-    /// the selected machine's connection, if any. A click acts on press, and
-    /// the wheel over the machine list moves the selection as `j` and `k` do.
-    pub(super) fn on_mouse(&mut self, kind: MouseEventKind, spot: Option<Spot>) -> Option<Command> {
+    /// Applies one mouse event at `column`, `row`, over `spot`, and returns the
+    /// command it asks of the selected machine's connection, if any. A click
+    /// acts on press, the wheel over the machine list moves the selection as
+    /// `j` and `k` do, and a click on a menu's button opens it.
+    pub(super) fn on_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        spot: Option<Spot>,
+        column: u16,
+        row: u16,
+    ) -> Option<Command> {
+        if let Some(open) = self.menu {
+            // A press outside the menu closes it and does nothing else, except
+            // that another menu's button opens that one instead; its own closes
+            // it, as a toggle.
+            if matches!(kind, MouseEventKind::Down(_)) && spot != Some(Spot::Menu) {
+                self.menu = None;
+                if let (MouseEventKind::Down(MouseButton::Left), Some(Spot::MenuButton(of))) =
+                    (kind, spot)
+                    && of != open.of
+                {
+                    self.open_menu(of, column, row);
+                }
+            }
+            return None;
+        }
         match (kind, spot?) {
+            (MouseEventKind::Down(MouseButton::Left), Spot::MenuButton(of)) => {
+                self.open_menu(of, column, row);
+            }
             (MouseEventKind::Down(MouseButton::Left), Spot::Machine(index)) => {
                 self.selected = index.min(self.machines.len() - 1);
             }
@@ -194,13 +257,30 @@ impl App {
             (MouseEventKind::Down(MouseButton::Left), Spot::Hint(Hint::StartServer)) => {
                 return self.start_server();
             }
-            (MouseEventKind::ScrollDown, Spot::Machine(_) | Spot::Machines) => self.select_next(),
-            (MouseEventKind::ScrollUp, Spot::Machine(_) | Spot::Machines) => {
+            (
+                MouseEventKind::ScrollDown,
+                Spot::Machine(_) | Spot::MenuButton(_) | Spot::Machines,
+            ) => self.select_next(),
+            (MouseEventKind::ScrollUp, Spot::Machine(_) | Spot::MenuButton(_) | Spot::Machines) => {
                 self.select_previous();
             }
             _ => {}
         }
         None
+    }
+
+    /// A machine's menu selects that machine too; the global one leaves the
+    /// selection where it is.
+    fn open_menu(&mut self, of: MenuOf, column: u16, row: u16) {
+        let of = match of {
+            MenuOf::Machine(index) => {
+                let machine = index.min(self.machines.len() - 1);
+                self.selected = machine;
+                MenuOf::Machine(machine)
+            }
+            MenuOf::Global => MenuOf::Global,
+        };
+        self.menu = Some(Menu { of, column, row });
     }
 
     fn select_next(&mut self) {
@@ -408,7 +488,7 @@ mod tests {
     }
 
     fn click(app: &mut App, spot: Spot) -> Option<Command> {
-        app.on_mouse(MouseEventKind::Down(MouseButton::Left), Some(spot))
+        app.on_mouse(MouseEventKind::Down(MouseButton::Left), Some(spot), 0, 0)
     }
 
     #[test]
@@ -421,29 +501,129 @@ mod tests {
         assert_eq!(app.selected_machine().label, "nano4");
         click(&mut app, Spot::Machine(0));
         assert_eq!(app.selected_machine().label, "local");
-        // Another button, or a release, selects nothing.
+        // The middle button, or a release, selects nothing.
         app.on_mouse(
-            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
             Some(Spot::Machine(1)),
+            0,
+            0,
         );
         app.on_mouse(
             MouseEventKind::Up(MouseButton::Left),
             Some(Spot::Machine(1)),
+            0,
+            0,
         );
         assert_eq!(app.selected(), 0);
+    }
+
+    fn open(app: &mut App, machine: usize, row: u16) {
+        app.on_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            Some(Spot::MenuButton(MenuOf::Machine(machine))),
+            23,
+            row,
+        );
+    }
+
+    fn open_global(app: &mut App) {
+        app.on_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            Some(Spot::MenuButton(MenuOf::Global)),
+            23,
+            9,
+        );
+    }
+
+    #[test]
+    fn the_global_button_opens_the_global_menu_and_leaves_the_selection() {
+        let mut app = App::new(&[("workbox".to_owned(), "me@workbox".to_owned())]);
+        app.on_key(press(KeyCode::Char('j')));
+        open_global(&mut app);
+        assert_eq!(app.menu().map(|menu| menu.of), Some(MenuOf::Global));
+        assert_eq!(app.selected(), 1);
+        // Its own button closes it; a machine's swaps it for that machine's.
+        open_global(&mut app);
+        assert_eq!(app.menu(), None);
+        open_global(&mut app);
+        open(&mut app, 0, 2);
+        assert_eq!(app.menu().map(|menu| menu.of), Some(MenuOf::Machine(0)));
+        open_global(&mut app);
+        assert_eq!(app.menu().map(|menu| menu.of), Some(MenuOf::Global));
+    }
+
+    #[test]
+    fn clicking_a_machines_dots_opens_its_menu_there_and_a_right_click_does_not() {
+        let mut app = App::new(&[("workbox".to_owned(), "me@workbox".to_owned())]);
+        open(&mut app, 1, 3);
+        assert_eq!(
+            app.menu(),
+            Some(Menu {
+                of: MenuOf::Machine(1),
+                column: 23,
+                row: 3
+            })
+        );
+        assert_eq!(app.selected(), 1);
+
+        let mut app = App::new(&[]);
+        for spot in [Spot::Machine(0), Spot::MenuButton(MenuOf::Machine(0))] {
+            app.on_mouse(MouseEventKind::Down(MouseButton::Right), Some(spot), 23, 2);
+        }
+        assert_eq!(app.menu(), None);
+    }
+
+    #[test]
+    fn an_open_menu_closes_on_escape_or_a_press_outside_it_and_holds_everything_else() {
+        let mut app = App::new(&[("workbox".to_owned(), "me@workbox".to_owned())]);
+        open(&mut app, 0, 2);
+        // Behind it, nothing moves and nothing quits.
+        app.on_key(press(KeyCode::Char('j')));
+        app.on_mouse(MouseEventKind::ScrollDown, Some(Spot::Machines), 4, 6);
+        click(&mut app, Spot::Menu);
+        assert_eq!(app.selected(), 0);
+        assert!(app.menu().is_some());
+        app.on_key(press(KeyCode::Char('q')));
+        assert_eq!(app.menu(), None);
+        assert!(!app.should_quit());
+
+        // A click outside closes it without landing on what is there.
+        open(&mut app, 0, 2);
+        assert_eq!(click(&mut app, Spot::Hint(Hint::Detach)), None);
+        assert!(!app.should_quit());
+        assert_eq!(app.menu(), None);
+        open(&mut app, 0, 2);
+        click(&mut app, Spot::Machine(1));
+        assert_eq!(app.menu(), None);
+        assert_eq!(app.selected(), 0);
+
+        // Its own dots close it; another machine's move it there.
+        open(&mut app, 0, 2);
+        open(&mut app, 0, 2);
+        assert_eq!(app.menu(), None);
+        open(&mut app, 0, 2);
+        open(&mut app, 1, 3);
+        assert_eq!(app.menu().map(|menu| menu.of), Some(MenuOf::Machine(1)));
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.menu(), None);
+
+        // Ctrl-C still quits from inside a menu.
+        open(&mut app, 0, 2);
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit());
     }
 
     #[test]
     fn the_wheel_over_the_machines_moves_the_selection() {
         let mut app = App::new(&[("workbox".to_owned(), "me@workbox".to_owned())]);
-        app.on_mouse(MouseEventKind::ScrollDown, Some(Spot::Machines));
+        app.on_mouse(MouseEventKind::ScrollDown, Some(Spot::Machines), 0, 0);
         assert_eq!(app.selected(), 1);
-        app.on_mouse(MouseEventKind::ScrollDown, Some(Spot::Machine(0)));
+        app.on_mouse(MouseEventKind::ScrollDown, Some(Spot::Machine(0)), 0, 0);
         assert_eq!(app.selected(), 1);
-        app.on_mouse(MouseEventKind::ScrollUp, Some(Spot::Machine(1)));
+        app.on_mouse(MouseEventKind::ScrollUp, Some(Spot::Machine(1)), 0, 0);
         assert_eq!(app.selected(), 0);
         // Anywhere else the wheel leaves it.
-        app.on_mouse(MouseEventKind::ScrollDown, None);
+        app.on_mouse(MouseEventKind::ScrollDown, None, 0, 0);
         assert_eq!(app.selected(), 0);
     }
 

@@ -9,10 +9,10 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 
-use super::app::{App, Attention, Hint, Machine, MachineState, Spot};
+use super::app::{App, Attention, Hint, Machine, MachineState, Menu, MenuOf, Spot};
 use crate::client::tasks::{Measure, TaskStatus, TaskView};
 
 const SIDEBAR_WIDTH: u16 = 26;
@@ -60,19 +60,33 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     draw_tasks(frame, machine, areas.tasks);
     draw_main(frame, machine, now, areas.main);
     frame.render_widget(status_line(machine), areas.status);
+    if let Some(menu) = app.menu() {
+        draw_menu(frame, menu_area(menu, frame.area()));
+    }
 }
 
 /// What lies at `column`, `row` on a `screen`-sized terminal showing `app`.
 pub(super) fn spot(app: &App, screen: Rect, column: u16, row: u16) -> Option<Spot> {
     let areas = Areas::of(screen);
     let at = ratatui::layout::Position::new(column, row);
+    // Drawn over everything else, so found before it.
+    if let Some(menu) = app.menu()
+        && menu_area(menu, screen).contains(at)
+    {
+        return Some(Spot::Menu);
+    }
     let machines = machines_block().inner(areas.machines);
     if machines.contains(at) {
+        if global_menu_button(machines).contains(at) {
+            return Some(Spot::MenuButton(MenuOf::Global));
+        }
         let index = usize::from(row - machines.y);
-        return Some(if index < app.machines().len() {
-            Spot::Machine(index)
-        } else {
+        return Some(if index >= app.machines().len() {
             Spot::Machines
+        } else if column >= menu_button(machines, index).x {
+            Spot::MenuButton(MenuOf::Machine(index))
+        } else {
+            Spot::Machine(index)
         });
     }
     if areas.status.contains(at) {
@@ -86,6 +100,34 @@ pub(super) fn spot(app: &App, screen: Rect, column: u16, row: u16) -> Option<Spo
         }
     }
     None
+}
+
+/// What an empty menu says.
+const MENU_EMPTY: &str = " empty ";
+
+/// The menu's box: hung below the `⋯` clicked to open it, its left edge at
+/// the click, and moved up or left only as far as keeps it on screen.
+fn menu_area(menu: Menu, screen: Rect) -> Rect {
+    let width = u16::try_from(MENU_EMPTY.len()).unwrap_or(u16::MAX) + 2;
+    let height = 3;
+    let area = Rect::new(menu.column, menu.row.saturating_add(1), width, height);
+    let x = area
+        .x
+        .min(screen.right().saturating_sub(width))
+        .max(screen.x);
+    let y = area
+        .y
+        .min(screen.bottom().saturating_sub(height))
+        .max(screen.y);
+    Rect::new(x, y, width, height).intersection(screen)
+}
+
+fn draw_menu(frame: &mut Frame<'_>, area: Rect) {
+    let block = Block::bordered();
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(Line::styled(MENU_EMPTY, DIM)), inner);
 }
 
 fn title_line(machine: &Machine) -> Paragraph<'static> {
@@ -124,6 +166,53 @@ fn draw_machines(frame: &mut Frame<'_>, app: &App, now: Instant, area: Rect) {
         .map(|(index, machine)| machine_row(machine, now, index == app.selected()))
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
+    // Drawn over the row's end, so a long label gives way to it.
+    for index in 0..app.machines().len() {
+        let button = menu_button(inner, index);
+        if button.y < inner.bottom() {
+            let style = if index == app.selected() {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                DIM
+            };
+            frame.render_widget(Paragraph::new(Span::styled(MENU_BUTTON, style)), button);
+        }
+    }
+    // Last, so it holds its corner even when the list reaches it.
+    frame.render_widget(
+        Paragraph::new(Span::styled(GLOBAL_MENU_BUTTON, BOLD)),
+        global_menu_button(inner),
+    );
+}
+
+/// What opens a machine's menu, at the end of its row: wider than its glyph,
+/// so it is easy to hit.
+const MENU_BUTTON: &str = " ⋯ ";
+
+/// What opens the global menu, named rather than dotted, so it does not read
+/// as one more machine's.
+const GLOBAL_MENU_BUTTON: &str = " menu ";
+
+/// Where the global menu's button is: the machine pane's bottom-right corner,
+/// in its `inner` area.
+fn global_menu_button(inner: Rect) -> Rect {
+    let width = u16::try_from(GLOBAL_MENU_BUTTON.len()).unwrap_or(u16::MAX);
+    Rect::new(
+        inner.right().saturating_sub(width),
+        inner.bottom().saturating_sub(1),
+        width,
+        1,
+    )
+    .intersection(inner)
+}
+
+/// Where machine `index`'s `⋯` is, in the machine list's `inner` area.
+fn menu_button(inner: Rect, index: usize) -> Rect {
+    let width = 3;
+    let row = inner
+        .y
+        .saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+    Rect::new(inner.right().saturating_sub(width), row, width, 1)
 }
 
 fn draw_tasks(frame: &mut Frame<'_>, machine: &Machine, tasks: Rect) {
@@ -572,6 +661,80 @@ mod tests {
         );
         assert_eq!(at("j/k move"), None);
         assert_eq!(spot(&app, screen_area, 71, row), None);
+    }
+
+    #[test]
+    fn a_machines_dots_open_an_empty_menu_below_them_and_on_screen() {
+        let screen_area = Rect::new(0, 0, 72, 12);
+        let mut app = App::new(&[("workbox".to_owned(), "me@workbox".to_owned())]);
+        let screen = render(&app, Instant::now());
+        let (_, row) = find(&screen, "● workbox");
+        let dots = screen.lines().nth(usize::from(row)).unwrap();
+        let column = u16::try_from(dots.chars().position(|c| c == '⋯').unwrap()).unwrap();
+        // The dots are a button of their own; the rest of the row selects.
+        assert_eq!(
+            spot(&app, screen_area, column, row),
+            Some(Spot::MenuButton(MenuOf::Machine(1)))
+        );
+        assert_eq!(spot(&app, screen_area, 3, row), Some(Spot::Machine(1)));
+
+        app.on_mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            spot(&app, screen_area, column, row),
+            column,
+            row,
+        );
+        let screen = render(&app, Instant::now());
+        // Hung below the dots, its left edge at the click, "empty" inside it.
+        let (empty_column, empty_row) = find(&screen, "empty");
+        assert_eq!((empty_column, empty_row), (column + 2, row + 2), "{screen}");
+        assert_eq!(
+            spot(&app, screen_area, empty_column, empty_row),
+            Some(Spot::Menu)
+        );
+
+        // Opened at the screen's far corner, it stays whole on screen.
+        let corner = Menu {
+            of: MenuOf::Global,
+            column: 71,
+            row: 11,
+        };
+        let area = menu_area(corner, screen_area);
+        assert_eq!((area.right(), area.bottom()), (72, 12));
+        assert_eq!((area.width, area.height), (9, 3));
+    }
+
+    #[test]
+    fn the_global_menu_button_sits_in_the_machine_panes_corner_and_opens_an_empty_menu() {
+        let screen_area = Rect::new(0, 0, 72, 12);
+        let mut app = App::new(&[]);
+        let screen = render(&app, Instant::now());
+        // At the foot of the machine pane, just above the tasks' divider.
+        let (column, row) = find(&screen, "menu");
+        assert!(
+            screen
+                .lines()
+                .nth(usize::from(row) + 1)
+                .unwrap()
+                .contains("Tasks"),
+            "{screen}"
+        );
+        assert_eq!(
+            spot(&app, screen_area, column, row),
+            Some(Spot::MenuButton(MenuOf::Global))
+        );
+        // Beside them is still the list's empty space.
+        assert_eq!(spot(&app, screen_area, 3, row), Some(Spot::Machines));
+
+        app.on_mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            spot(&app, screen_area, column, row),
+            column,
+            row,
+        );
+        let screen = render(&app, Instant::now());
+        let (empty_column, empty_row) = find(&screen, "empty");
+        assert_eq!((empty_column, empty_row), (column + 2, row + 2), "{screen}");
     }
 
     #[test]
