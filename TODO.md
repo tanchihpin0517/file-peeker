@@ -143,9 +143,11 @@ after.
   any name or path as a string without losing a byte. Step 6 is done: `fs`
   lists, walks, reads and writes this host's files over `PathString`, cancelled
   by being dropped, and opens absolute paths exactly as given: `~`, `..` and
-  relative paths are left to whatever took the path in. Step 6b is next: one
-  home per machine, `~/.file-peeker/hosts/<machine-id>/`, with sockets in
-  `/tmp/fpk-<uid>/`, so nodes sharing a home each run their own server.
+  relative paths are left to whatever took the path in. Step 6b is done: one
+  home per machine, `~/.file-peeker/hosts/<machine-id>/` linked from
+  `by-name/<hostname>`, with the lock there and the sockets in
+  `/tmp/fpk-<uid>/`, so nodes sharing a home each run their own server; a
+  server binds its sockets again when a cleaner removes them.
 
 ### Tier 3 — states the proposals draw
 

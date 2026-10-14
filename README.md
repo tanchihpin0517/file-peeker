@@ -27,10 +27,13 @@ cargo run -- machine add workbox me@workbox   # save an SSH machine, installing 
 cargo run -- --machine workbox status         # run a command on it
 ```
 
-The server keeps running after `fpk` exits. Its sockets, lock and logs live in
-`~/.file-peeker/` for a release build and `~/.file-peeker-dev/` for a dev build
-such as `cargo run`, so the two never share a server; set `FILE_PEEKER_HOME` to
-an absolute path to use another directory. The binary is `fpk` until cutover, because the shipping crate's
+The server keeps running after `fpk` exits. One runs per machine: its lock,
+settings and logs live in `~/.file-peeker/hosts/<machine-id>/`, linked from
+`~/.file-peeker/by-name/<hostname>`, and its sockets in `/tmp/fpk-<uid>/`, so
+machines sharing a home directory never meet. A dev build such as `cargo run`
+uses `~/.file-peeker-dev/` and `/tmp/fpk-dev-<uid>/`, so it never shares a
+server with a release one; set `FILE_PEEKER_HOME` to an absolute path to put
+both places under another directory. The binary is `fpk` until cutover, because the shipping crate's
 `file-peeker` holds that name.
 
 ## Checks

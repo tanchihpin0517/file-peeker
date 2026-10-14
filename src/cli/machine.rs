@@ -11,7 +11,7 @@ use crate::{
     client::{
         machines::{self, Machine},
         remote::{self, Reach, Wanted},
-        ssh::{Prompt, Ssh, quote, remote_fpk},
+        ssh::{Prompt, REMOTE_FPK, Ssh, quote},
     },
     config::Config,
     home::Home,
@@ -47,7 +47,7 @@ pub(super) async fn add(home: &Home, label: &str, target: &str, yes: bool) -> Re
     };
     if let Some(why) = wanted.mismatch(&probe) {
         let question = format!(
-            "{target}: {why}. Install {} into ~/{}/bin/fpk there?",
+            "{target}: {why}. Install {} into ~/{}/hosts/<its machine ID>/bin/fpk there?",
             wanted.describe(),
             crate::home::DIRECTORY_NAME
         );
@@ -65,7 +65,7 @@ pub(super) async fn add(home: &Home, label: &str, target: &str, yes: bool) -> Re
             );
             if yes || confirm(&question)? {
                 let stop = ssh
-                    .command(&format!("{} server stop", remote_fpk()))
+                    .command(&format!("{REMOTE_FPK} server stop"))
                     .status()
                     .await
                     .map_err(|error| format!("cannot run ssh: {error}"))?;
@@ -162,7 +162,7 @@ pub(super) async fn run_remote(
         .map(|arg| quote(&arg.to_string_lossy()))
         .collect();
     let status = ssh
-        .command(&format!("{} {}", remote_fpk(), quoted.join(" ")))
+        .command(&format!("{REMOTE_FPK} {}", quoted.join(" ")))
         .status()
         .await
         .map_err(|error| format!("cannot run ssh: {error}"))?;

@@ -131,7 +131,7 @@ fn the_terminal_ui_refuses_without_a_terminal_and_starts_nothing() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("fpk server start"), "{stderr}");
-    assert!(!home.join("file-peeker-client.sock").exists());
+    assert!(!home.join("run/client.sock").exists());
 }
 
 #[test]

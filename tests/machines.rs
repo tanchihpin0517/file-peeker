@@ -13,8 +13,9 @@ use std::{
 };
 
 const FAKE_SSH: &str = r#"#!/bin/sh
-# Stands in for ssh: skips its options, then runs the remote command here,
-# under the fake host's home, as a remote login shell would.
+# Stands in for ssh: skips its options, then runs the remote command here, as
+# a remote login shell would, with the fake host's directory as its override so
+# the host's server binds its sockets there rather than in this machine's /tmp.
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) shift 2 ;;
@@ -23,7 +24,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 shift
-exec env -u FILE_PEEKER_HOME HOME="$FAKE_HOST_HOME" sh -c "$*"
+exec env FILE_PEEKER_HOME="$FAKE_HOST_HOME" HOME="$FAKE_HOST_HOME" sh -c "$*"
 "#;
 
 /// A client home and a host home, and the stand-in `ssh` between them.
@@ -46,6 +47,8 @@ impl World {
         let client = root.path().join("client");
         let host = root.path().join("host");
         fs::create_dir_all(&host).unwrap();
+        // As private as `fpk` makes its own, or the host's server refuses it.
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
         let ssh = root.path().join("ssh");
         fs::write(&ssh, FAKE_SSH).unwrap();
         fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
@@ -84,14 +87,13 @@ impl World {
         serde_json::from_str(&stdout(&self.fpk(&["build-info"]))).unwrap()
     }
 
-    /// The host's directory for this build's profile: a dev binary on the host
-    /// resolves `~/.file-peeker-dev/`, a release one `~/.file-peeker/`.
+    /// The host's directory, which the stand-in `ssh` names as its override.
     fn host_dir(&self) -> PathBuf {
-        self.host.join(self.build_info()["home"].as_str().unwrap())
+        self.host.clone()
     }
 
     fn host_server_running(&self) -> bool {
-        self.host_dir().join("file-peeker-client.sock").exists()
+        self.host_dir().join("run/client.sock").exists()
     }
 }
 
@@ -101,8 +103,7 @@ impl Drop for World {
         if host_fpk.exists() {
             let _ = Command::new(host_fpk)
                 .args(["server", "stop"])
-                .env_remove("FILE_PEEKER_HOME")
-                .env("HOME", &self.host)
+                .env("FILE_PEEKER_HOME", &self.host)
                 .output();
         }
     }

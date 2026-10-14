@@ -21,7 +21,7 @@ use tower::service_fn;
 
 use super::{
     ClientError,
-    ssh::{Ssh, quote, remote_fpk, remote_home},
+    ssh::{REMOTE_FPK, Ssh, quote},
 };
 use crate::{
     build_info,
@@ -47,8 +47,7 @@ pub(crate) enum Reach {
 /// Runs the probe on the host.
 pub(crate) async fn probe(ssh: &Ssh) -> Reach {
     let remote = format!(
-        "f={}; if [ -x \"$f\" ]; then exec \"$f\" probe; else echo '{{\"installed\":false}}'; fi",
-        remote_fpk()
+        "f={REMOTE_FPK}; if [ -x \"$f\" ]; then exec \"$f\" probe; else echo '{{\"installed\":false}}'; fi"
     );
     let output = ssh
         .command(&remote)
@@ -297,11 +296,8 @@ async fn upload(ssh: &Ssh, source: &Source) -> Result<(), String> {
         list.write_all(names.as_bytes()).await?;
         list.write_all(b"\0").await
     };
-    let remote = format!(
-        "src=\"{}/src\"; rm -rf \"$src\" && mkdir -p \"$src\" && tar -xzf - -C \"$src\"",
-        remote_home()
-    );
-    let receive = ssh.command(&remote).stdin(archive).status();
+    let remote = "umask 077; src=\"$FPK_HOST_DIR/src\"; rm -rf \"$src\" && mkdir -p \"$src\" && tar -xzf - -C \"$src\"";
+    let receive = ssh.command(remote).stdin(archive).status();
     let (listed, received) = tokio::join!(feed, receive);
     listed.map_err(|error| format!("cannot list the source for tar: {error}"))?;
     let tarred = tar
@@ -326,7 +322,7 @@ async fn upload(ssh: &Ssh, source: &Source) -> Result<(), String> {
 /// Returns a message when the server cannot be started.
 pub(crate) async fn start_server(ssh: &Ssh) -> Result<(), String> {
     let status = ssh
-        .command(&format!("{} server start >/dev/null", remote_fpk()))
+        .command(&format!("{REMOTE_FPK} server start >/dev/null"))
         .status()
         .await
         .map_err(|error| format!("cannot run ssh: {error}"))?;
@@ -369,7 +365,7 @@ struct Bridge {
 impl Bridge {
     fn open(ssh: &Ssh) -> io::Result<Self> {
         let mut child = ssh
-            .command(&format!("exec {} bridge", remote_fpk()))
+            .command(&format!("exec {REMOTE_FPK} bridge"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

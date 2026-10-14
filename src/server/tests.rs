@@ -197,6 +197,73 @@ async fn stale_sockets_from_a_crashed_server_are_replaced() {
 }
 
 #[tokio::test]
+async fn a_server_binds_its_sockets_again_when_a_cleaner_removes_them() {
+    let server = Running::start().await;
+    fs::remove_dir_all(server.home.run_dir()).unwrap();
+    assert!(!client::is_running(&server.home).await);
+    wait_for_socket(&server.home).await;
+    client::attach(&server.home).await.unwrap();
+    // The API socket is checked on its own clock.
+    let mut api = None;
+    for _ in 0..200 {
+        if let Ok(connected) = ApiClient::connect(&server.home).await {
+            api = Some(connected);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let status = api.expect("the API socket never came back").status().await;
+    assert_eq!(status.unwrap().pid, std::process::id());
+    let mode = fs::metadata(server.home.run_dir())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_lock_held_by_a_server_this_session_cannot_see_says_so() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("hosts").join("one");
+    let seen = Home::split(&dir, root.path().join("tmp-a"));
+    let (shutdown, task) = spawn(&seen);
+    wait_for_socket(&seen).await;
+
+    // The same machine's directory, through a session with a /tmp of its own.
+    let hidden = Home::split(&dir, root.path().join("tmp-b"));
+    let error = serve(&hidden, CancellationToken::new()).await.unwrap_err();
+    assert!(matches!(error, ServerError::SocketUnseen { .. }), "{error}");
+    assert!(
+        error.to_string().contains("cannot be seen from here"),
+        "{error}"
+    );
+    // No second server bound anything.
+    assert!(!hidden.client_socket().exists());
+
+    shutdown.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn two_machines_sharing_a_home_each_run_their_own_server() {
+    let root = tempfile::tempdir().unwrap();
+    let hosts = root.path().join("home/.file-peeker/hosts");
+    let one = Home::split(hosts.join("one"), root.path().join("tmp-one"));
+    let two = Home::split(hosts.join("two"), root.path().join("tmp-two"));
+    let (stop_one, one_task) = spawn(&one);
+    let (stop_two, two_task) = spawn(&two);
+    wait_for_socket(&one).await;
+    wait_for_socket(&two).await;
+    client::attach(&one).await.unwrap();
+    client::attach(&two).await.unwrap();
+    stop_one.cancel();
+    stop_two.cancel();
+    one_task.await.unwrap().unwrap();
+    two_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn the_sockets_are_private() {
     let server = Running::start().await;
     for socket in [server.home.api_socket(), server.home.client_socket()] {

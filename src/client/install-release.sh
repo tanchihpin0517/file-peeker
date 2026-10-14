@@ -1,10 +1,13 @@
 #!/bin/sh
-# Installs a published fpk release into ~/.file-peeker/bin/fpk, as herdr installs
-# its own: the asset for this host's system and architecture, from the release
-# of exactly the version the client asked for, checked against SHA256SUMS.
+# Installs a published fpk release into this machine's own directory,
+# $FPK_HOST_DIR/bin/fpk, as herdr installs its own: the asset for this host's
+# system and architecture, from the release of exactly the version the client
+# asked for, checked against SHA256SUMS.
 #
-# Run on the host over SSH: sh -s -- <version> <repository URL>
+# Run on the host over SSH, after the client's snippet has set FPK_HOST_DIR to
+# ~/.file-peeker/hosts/<machine-id>: sh -s -- <version> <repository URL>
 set -eu
+umask 077
 
 version=$1
 repository=$2
@@ -28,7 +31,7 @@ esac
 
 asset="fpk-$os-$arch"
 base="$repository/releases/download/v$version"
-root="$HOME/.file-peeker"
+root=$FPK_HOST_DIR
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -67,7 +70,8 @@ fi
 mkdir -p "$root/bin"
 chmod 700 "$root"
 chmod 755 "$work/$asset"
-cp "$work/$asset" "$root/bin/fpk.partial"
-mv -f "$root/bin/fpk.partial" "$root/bin/fpk"
+# Named for this process, so two installs never write one partial file.
+cp "$work/$asset" "$root/bin/fpk.$$.partial"
+mv -f "$root/bin/fpk.$$.partial" "$root/bin/fpk"
 rm -f "$root/bin/fpk.source"
 echo "installed fpk v$version at $root/bin/fpk"

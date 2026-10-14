@@ -533,6 +533,7 @@ dependencies = [
  "prost-build",
  "protoc-bin-vendored",
  "ratatui",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

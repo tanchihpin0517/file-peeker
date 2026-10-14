@@ -40,20 +40,35 @@ it already lists every machine.
 
 ## Files
 
-A release build keeps everything in `~/.file-peeker/` and a dev build in
-`~/.file-peeker-dev/`, on the client and on every host: binary, server, sockets,
-logs and saved machines. The two never share any of it, so `cargo run` from a
-checkout never meets the server a release install is using, here or on a host.
-The build profile decides at compile time, as it decides how a build installs.
-Below, `~/.file-peeker/` stands for whichever of the two the build uses.
+Every machine keeps its own files, even when machines share a home directory,
+as a cluster's nodes do: nothing below is shared between two machines. A
+release build uses `~/.file-peeker/` and `/tmp/fpk-<uid>/`, and a dev build
+`~/.file-peeker-dev/` and `/tmp/fpk-dev-<uid>/`, on the client and on every
+host. The two never share any of it, so `cargo run` from a checkout never meets
+the server a release install is using, here or on a host. The build profile
+decides at compile time, as it decides how a build installs. Below,
+`~/.file-peeker/` stands for whichever of the two the build uses.
 
-On the client, in `~/.file-peeker/`:
+| Path | Holds |
+| --- | --- |
+| `~/.file-peeker/hosts/<machine-id>/` | This machine's directory, mode `0700`: everything below that lasts |
+| `~/.file-peeker/by-name/<hostname>` | A link to it, for a person reading the tree; nothing follows it |
+| `/tmp/fpk-<uid>/` | This machine's connections, mode `0700`: the sockets and `ssh/` |
+
+The machine ID is Linux's `/etc/machine-id`, or `/var/lib/dbus/machine-id`, or
+macOS's `IOPlatformUUID`, as 32 lowercase hex digits. A machine without one
+refuses to start. Both directories are refused unless this user owns them and
+no one else may open them.
+
+On the client, in its machine's directory:
 
 | File | Holds |
 | --- | --- |
 | `machines.toml` | Saved machines: an ID, the label, the SSH target, `enabled` |
 | `config.toml` | `[remote] manage_ssh_config`, default `true` |
-| `ssh/` | The shared connections' control sockets, mode `0700` |
+
+and in `/tmp/fpk-<uid>/ssh/`, mode `0700`, the shared connections' control
+sockets.
 
 ```toml
 # machines.toml
@@ -66,17 +81,20 @@ enabled = true
 
 A label is one word and cannot be `local`. A saved label cannot be pointed at
 another host; remove it first. `machines.toml` is written beside itself and
-renamed over, so a crash leaves the old catalog whole.
+renamed over, so a crash leaves the old catalog whole. Another machine sharing
+this home has a catalog of its own.
 
-On a host, in its own `~/.file-peeker/`:
+On a host, in its machine's directory:
 
 | Path | Holds |
 | --- | --- |
 | `bin/fpk` | The installed binary — never on the host's `PATH`, never anywhere else |
-| `bin/fpk.source` | A dev install's source hash, in `~/.file-peeker-dev/` |
-| `src/`, `build/`, `cargo/` | A dev install's uploaded source, kept target directory, and `cargo install` root, in `~/.file-peeker-dev/` |
+| `bin/fpk.source` | A dev install's source hash |
+| `src/`, `build/`, `cargo/` | A dev install's uploaded source, kept target directory, and `cargo install` root |
 
-Nothing from the client's `~/.file-peeker/` is copied to a host.
+Two nodes sharing a home therefore install and build separately: they need not
+share an architecture or a C library. Nothing from the client's files is copied
+to a host.
 
 ## SSH
 
@@ -85,7 +103,7 @@ Every remote operation is one `ssh <options> -T <target> <command>`.
 | Option | When | Why |
 | --- | --- | --- |
 | `ConnectTimeout=10` | Always | A dead host fails rather than hangs |
-| `ControlMaster=auto`, `ControlPath=~/.file-peeker/ssh/%C`, `ControlPersist=600` | `manage_ssh_config = true` | Setup, reconnects and `--machine` share one authenticated connection, as herdr's do |
+| `ControlMaster=auto`, `ControlPath=/tmp/fpk-<uid>/ssh/%C`, `ControlPersist=600` | `manage_ssh_config = true` | Setup, reconnects and `--machine` share one authenticated connection, as herdr's do |
 | `BatchMode=yes` | Background reconnects | A reconnect never prompts; it fails instead |
 
 With `manage_ssh_config = false` the client adds no control options, and your own
@@ -101,12 +119,12 @@ than leaving `bind` or `ssh` to fail with a message about something else:
 
 | Socket | Checked by | Its path | Fix |
 | --- | --- | --- | --- |
-| `file-peeker.sock`, `file-peeker-client.sock` | The server before it binds, and a client before it starts one | `~/.file-peeker/` plus the name | A shorter `FILE_PEEKER_HOME` |
-| A shared SSH connection's control socket | Every SSH command, when `manage_ssh_config` is on | `~/.file-peeker/ssh/`, then `/`, `%C`'s 40 hex characters, and the 17 OpenSSH adds while it binds a new master | `manage_ssh_config = false`, or a shorter `FILE_PEEKER_HOME` |
+| `api.sock`, `client.sock` | The server before it binds, and a client before it starts one | `/tmp/fpk-<uid>/` plus the name | A shorter `FILE_PEEKER_HOME` |
+| A shared SSH connection's control socket | Every SSH command, when `manage_ssh_config` is on | `/tmp/fpk-<uid>/ssh/`, then `/`, `%C`'s 40 hex characters, and the 17 OpenSSH adds while it binds a new master | `manage_ssh_config = false`, or a shorter `FILE_PEEKER_HOME` |
 
-The control socket is the tighter of the two: it fits while `~/.file-peeker/ssh`
-is at most 45 bytes on macOS — `/Users/<name>/.file-peeker-dev/ssh` is 30 plus
-the name.
+Under `/tmp` both fit with room to spare — the control socket, the longer, is
+79 bytes for a dev build — which is why the sockets are not in the home
+directory with everything else. Only a long `FILE_PEEKER_HOME` can exceed them.
 
 Setup, `machine login` and `--machine` may prompt: a password or a
 keyboard-interactive login is answered on your terminal. The terminal UI's
@@ -115,10 +133,18 @@ reconnects may not; a host that wants an answer shows as needing a login until
 
 ## Probing
 
+Every command the client runs on a host goes through `sh -c`, whatever the
+login shell, and starts with the same snippet: it computes the host's machine ID
+and sets `FPK_HOST_DIR` to `~/.file-peeker/hosts/<machine-id>`, or to
+`FILE_PEEKER_HOME` when that is set there. It computes it on every command,
+since one SSH target may reach a different node each time, and a test holds it
+to the Rust that resolves the same directory. A host with no machine ID fails
+there, saying so.
+
 Before anything else, the client runs one command on the host:
 
 ```sh
-f="$HOME/.file-peeker/bin/fpk"; if [ -x "$f" ]; then exec "$f" probe; else echo '{"installed":false}'; fi
+f="$FPK_HOST_DIR/bin/fpk"; if [ -x "$f" ]; then exec "$f" probe; else echo '{"installed":false}'; fi
 ```
 
 `fpk probe` prints one line of JSON:
@@ -155,7 +181,7 @@ downloads it and `SHA256SUMS` from
 one against the other, and moves it into place. A version with no release — any
 build between releases — cannot be installed this way, and says so.
 
-**A dev install** uploads, as a tar stream over SSH into `~/.file-peeker/src`,
+**A dev install** uploads, as a tar stream over SSH into the host's `src/`,
 every file `git ls-files --cached --others --exclude-standard` lists under the
 directory the binary was compiled in, except `old/`: tracked and untracked but
 not ignored, so uncommitted edits travel too. The client hashes those files —

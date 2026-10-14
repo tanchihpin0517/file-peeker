@@ -43,7 +43,6 @@ pub(super) fn build_info() -> Result<(), String> {
     let line = serde_json::json!({
         "wanted": wanted.describe(),
         "source_hash": hash,
-        "home": crate::home::DIRECTORY_NAME,
     });
     println!("{line}");
     Ok(())

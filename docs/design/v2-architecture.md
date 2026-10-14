@@ -151,7 +151,7 @@ architecture or a C library, so neither a binary nor a dev build's target
 directory can be shared.
 
 **The machine ID** names the directory: `/etc/machine-id` on Linux, falling back
-to `/var/lib/dbus/machine-id`, and `IOPlatformUUID` on macOS (`gethostuuid(2)`),
+to `/var/lib/dbus/machine-id`, and `IOPlatformUUID` on macOS, read through `ioreg`,
 written as 32 lowercase hex digits. Not the hostname: macOS changes its
 hostname with the network, and a key that moves would silently start this
 machine over in an empty directory. A machine with no readable ID refuses to
@@ -526,7 +526,7 @@ enabled = true
   the user's own SSH configuration is used as is.
 - **The bridge.** The client runs `file-peeker bridge` over that SSH connection.
   The bridge starts the remote server if none runs, then relays stdio to the
-  remote `file-peeker-client.sock`. There is no listening TCP port anywhere and no
+  remote `client.sock`. There is no listening TCP port anywhere and no
   socket path forwarding to configure.
 - **Install is approval-based.** `file-peeker machine add` probes for an
   installed binary and, if none is found or it is incompatible, offers to install
@@ -553,7 +553,7 @@ Two surfaces, as herdr has two sockets.
 ### The client protocol
 
 Private, versioned by one integer, between a front end and a server, on
-`file-peeker-client.sock` or through the bridge. It carries attach and detach,
+`client.sock` or through the bridge. It carries attach and detach,
 view subscriptions and deltas, actions, task events, and the byte streams of a
 cross-machine transfer.
 
@@ -568,7 +568,7 @@ client says why and what `status` reports.
 
 ### The API
 
-Public, documented, on `file-peeker.sock`, and the same surface the CLI drives —
+Public, documented, on `api.sock`, and the same surface the CLI drives —
 as herdr's CLI and socket API are one surface. Requests and responses are
 newline-delimited JSON with a published schema (`file-peeker api schema`), so a
 script or another tool can drive File Peeker without linking it.
@@ -999,7 +999,7 @@ section describes; nothing else about the server or the machines changes.
   `/tmp/fpk-<uid>/`. `FILE_PEEKER_HOME` overrides both, the connections going
   in its `run/`.
 - **The machine ID** is read once at start, as Linux's `machine-id` or macOS's
-  `gethostuuid(2)`, in 32 lowercase hex digits, and a machine without one
+  `IOPlatformUUID` through `ioreg`, as the shell reads it, in 32 lowercase hex digits, and a machine without one
   refuses to start. The server links `by-name/<hostname>` to its directory.
 - **Both directories are checked**: owned by this uid and mode `0700`, or
   refused, saying which and why.
@@ -1022,6 +1022,16 @@ refuse a directory with the wrong owner or mode; that replace a renamed machine'
 `by-name/` link; that rebind a removed socket;
 and that two homes with different IDs under one `HOME` run two servers side by
 side.
+
+Built in [`home`](../../src/home.rs) and the server's
+[`listener`](../../src/server/listener.rs). Every remote command runs under
+`sh -c`, whatever the login shell, after the snippet that sets
+`FPK_HOST_DIR`. The snippet honours `FILE_PEEKER_HOME` as `Home` does, which is
+how the end-to-end tests' stand-in host is placed, so the machine-ID path is
+proven by the test that holds the snippet to the Rust, under `sh` and `dash`.
+Upgrading needs one manual step: a server started before this step holds the
+old lock under the old sockets, and a new client neither sees nor replaces it,
+so stop it with the old binary first.
 
 ### Step 7: tabs and trees
 

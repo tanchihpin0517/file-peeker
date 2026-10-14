@@ -8,28 +8,25 @@
 mod api;
 mod attach;
 mod demo;
+mod listener;
 mod tasks;
 
 use std::{
     fs::{self, File, TryLockError},
     io,
-    os::unix::fs::PermissionsExt as _,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::ExitCode,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use thiserror::Error;
-use tokio::{
-    net::UnixListener,
-    signal::unix::{SignalKind, signal},
-};
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use self::listener::Listener;
 use crate::{
     home::Home,
     protocol::{
@@ -40,7 +37,6 @@ use crate::{
     task::{self, Runtime},
 };
 
-const SOCKET_MODE: u32 = 0o600;
 /// How long a stop waits for attached clients to let go before closing anyway.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a starting server waits on a lock held by a server with no socket.
@@ -53,6 +49,16 @@ const LOG_ENV: &str = "FILE_PEEKER_LOG";
 pub(crate) enum ServerError {
     #[error("a server is already running for {}", .0.display())]
     AlreadyRunning(PathBuf),
+    /// The lock is held, but its server's socket is not there: a session with a
+    /// `/tmp` of its own — a container, `PrivateTmp`, a per-session namespace —
+    /// cannot see the socket the server bound in another.
+    #[error(
+        "a server is already running for {}, but its socket {} cannot be seen from here; \
+         this session has a /tmp of its own, as a container or a per-session namespace gives",
+        .dir.display(),
+        .socket.display()
+    )]
+    SocketUnseen { dir: PathBuf, socket: PathBuf },
     #[error("{0}")]
     SocketPathTooLong(String),
     #[error("{context}: {source}")]
@@ -188,6 +194,9 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
     // server can take the lock.
     let _lock = acquire_lock(home).await?;
     let sockets = Sockets::claim(home)?;
+    if let Err(error) = home.name_this_machine() {
+        warn!(%error, "cannot link this machine's name to its directory");
+    }
 
     let info = Arc::new(ServerInfo::new(home));
     let runtime = Runtime::new(task::Config::default());
@@ -201,8 +210,12 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
         "server started"
     );
 
-    let api_listener = Sockets::bind(&sockets.api)?;
-    let client_listener = Sockets::bind(&sockets.client)?;
+    let api_listener = Listener::bind(&sockets.api)?;
+    let client_listener = Listener::bind(&sockets.client)?;
+    let client_incoming = Box::pin(futures_util::stream::unfold(
+        client_listener,
+        |mut listener| async move { Some((listener.accept().await, listener)) },
+    ));
 
     let api = tokio::spawn(api::serve(
         api_listener,
@@ -216,10 +229,7 @@ pub(crate) async fn serve(home: &Home, shutdown: CancellationToken) -> Result<()
             runtime.clone(),
             closing.clone(),
         )))
-        .serve_with_incoming_shutdown(
-            UnixListenerStream::new(client_listener),
-            shutdown.clone().cancelled_owned(),
-        );
+        .serve_with_incoming_shutdown(client_incoming, shutdown.clone().cancelled_owned());
     let client = tokio::spawn(client);
 
     shutdown.cancelled().await;
@@ -280,8 +290,14 @@ async fn acquire_lock(home: &Home) -> Result<File, ServerError> {
             {
                 tokio::time::sleep(LOCK_POLL).await;
             }
-            Err(TryLockError::WouldBlock) => {
+            Err(TryLockError::WouldBlock) if home.client_socket().exists() => {
                 return Err(ServerError::AlreadyRunning(home.dir().to_owned()));
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(ServerError::SocketUnseen {
+                    dir: home.dir().to_owned(),
+                    socket: home.client_socket(),
+                });
             }
             Err(TryLockError::Error(source)) => {
                 return Err(ServerError::Io {
@@ -323,14 +339,6 @@ impl Sockets {
             }
         }
         Ok(sockets)
-    }
-
-    fn bind(path: &Path) -> Result<UnixListener, ServerError> {
-        let listener = UnixListener::bind(path)
-            .map_err(io_error(format!("cannot bind {}", path.display())))?;
-        fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))
-            .map_err(io_error(format!("cannot restrict {}", path.display())))?;
-        Ok(listener)
     }
 }
 

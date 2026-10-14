@@ -21,17 +21,10 @@ pub(crate) const SSH_ENV: &str = "FILE_PEEKER_SSH";
 const CONTROL_PERSIST_SECONDS: u32 = 600;
 const CONNECT_TIMEOUT_SECONDS: u32 = 10;
 
-/// The host's directory of this build's profile, as a remote shell expands it:
-/// a dev client reaches a host's dev install and server, never its release ones.
-pub(crate) fn remote_home() -> String {
-    format!("$HOME/{}", crate::home::DIRECTORY_NAME)
-}
-
-/// The remote binary, quoted for a remote shell. Installed under the host's own
-/// directory, never on its `PATH`.
-pub(crate) fn remote_fpk() -> String {
-    format!("\"{}/bin/fpk\"", remote_home())
-}
+/// The remote binary, quoted for a remote shell. Installed in the host's own
+/// directory, never on its `PATH`; [`Ssh::command`] sets `FPK_HOST_DIR` to that
+/// directory before every command.
+pub(crate) const REMOTE_FPK: &str = "\"$FPK_HOST_DIR/bin/fpk\"";
 
 /// Whether SSH may ask the user anything.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,18 +86,21 @@ impl Ssh {
         &self.target
     }
 
-    /// `ssh <options> -T <target> <remote>`. `remote` is one shell command line
-    /// for the host's shell; quote what goes into it with [`quote`].
+    /// `ssh <options> -T <target> sh -c <script>`, where the script finds this
+    /// build's directory on the host as `FPK_HOST_DIR` and then runs `remote`.
+    /// `remote` is POSIX shell; quote what goes into it with [`quote`]. It runs
+    /// under `sh` whatever the user's login shell is.
     ///
     /// Standard input is closed unless the caller says otherwise; standard
     /// output and error are inherited.
     pub(crate) fn command(&self, remote: &str) -> Command {
+        let script = format!("{}\n{remote}", crate::home::host_dir_script());
         let mut command = Command::new(&self.program);
         command
             .args(&self.options)
             .arg("-T")
             .arg(&self.target)
-            .arg(remote)
+            .arg(format!("sh -c {}", quote(&script)))
             .stdin(Stdio::null())
             .kill_on_drop(true);
         command
@@ -178,7 +174,10 @@ mod tests {
         let args = args(&ssh, "true");
         assert!(args.contains(&"ControlMaster=auto".to_owned()), "{args:?}");
         assert!(args.contains(&"BatchMode=yes".to_owned()), "{args:?}");
-        assert_eq!(&args[args.len() - 3..], ["-T", "me@box", "true"]);
+        assert_eq!(&args[args.len() - 3..args.len() - 1], ["-T", "me@box"]);
+        let remote = args.last().unwrap();
+        assert!(remote.starts_with("sh -c '"), "{remote}");
+        assert!(remote.ends_with("\ntrue'"), "{remote}");
         let mode = fs::metadata(home.ssh_dir()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
     }

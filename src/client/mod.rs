@@ -133,20 +133,23 @@ fn start(home: &Home) -> Result<(), ClientError> {
         context: "cannot find this executable".to_owned(),
         source,
     })?;
-    std::os::unix::process::CommandExt::process_group(
-        Command::new(executable)
-            .arg("server")
-            .env(HOME_ENV, home.dir())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(log),
-        0,
-    )
-    .spawn()
-    .map_err(|source| ClientError::Io {
-        context: "cannot start the server".to_owned(),
-        source,
-    })?;
+    let mut server = Command::new(executable);
+    server
+        .arg("server")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log);
+    // A directory resolved from `HOME` resolves the same way in the server; one
+    // an override placed has to be passed on.
+    if home.is_overridden() {
+        server.env(HOME_ENV, home.dir());
+    }
+    std::os::unix::process::CommandExt::process_group(&mut server, 0)
+        .spawn()
+        .map_err(|source| ClientError::Io {
+            context: "cannot start the server".to_owned(),
+            source,
+        })?;
     Ok(())
 }
 

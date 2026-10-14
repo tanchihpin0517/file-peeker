@@ -5,12 +5,12 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
-    net::{UnixListener, UnixStream},
+    net::UnixStream,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, warn};
 
-use super::{ServerInfo, demo::Demo};
+use super::{ServerInfo, demo::Demo, listener::Listener};
 use crate::{
     protocol::api::{
         DemoParams, ERROR_INVALID_REQUEST, ERROR_UNKNOWN_METHOD, METHOD_STATUS, METHOD_STOP,
@@ -22,7 +22,7 @@ use crate::{
 /// Accepts API connections until `shutdown`, then waits for the open ones to
 /// finish the request they are on.
 pub(super) async fn serve(
-    listener: UnixListener,
+    mut listener: Listener,
     info: Arc<ServerInfo>,
     runtime: Runtime,
     shutdown: CancellationToken,
@@ -32,7 +32,7 @@ pub(super) async fn serve(
         tokio::select! {
             () = shutdown.cancelled() => break,
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     connections.spawn(connection(
                         stream,
                         Arc::clone(&info),
