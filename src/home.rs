@@ -329,7 +329,7 @@ fn hostname() -> std::ffi::OsString {
 /// Returns an error saying where it looked when there is none to read; a
 /// machine without one does not fall back to another key.
 pub(crate) fn machine_id() -> io::Result<String> {
-    platform_machine_id()?.ok_or_else(|| {
+    platform_machine_id().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!("cannot read this machine's ID from {MACHINE_ID_SOURCES}"),
@@ -343,25 +343,26 @@ const MACHINE_ID_SOURCES: &str = "/etc/machine-id or /var/lib/dbus/machine-id";
 const MACHINE_ID_SOURCES: &str = "IOPlatformUUID";
 
 #[cfg(target_os = "linux")]
-fn platform_machine_id() -> io::Result<Option<String>> {
-    Ok(["/etc/machine-id", "/var/lib/dbus/machine-id"]
+fn platform_machine_id() -> Option<String> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
         .into_iter()
         .filter_map(|path| fs::read_to_string(path).ok())
-        .find_map(|raw| normalize_machine_id(&raw)))
+        .find_map(|raw| normalize_machine_id(&raw))
 }
 
 /// Read as the shell reads it, through `ioreg`, so the two cannot disagree on
 /// how to ask.
 #[cfg(target_os = "macos")]
-fn platform_machine_id() -> io::Result<Option<String>> {
+fn platform_machine_id() -> Option<String> {
     let output = std::process::Command::new("ioreg")
         .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-        .output()?;
-    Ok(String::from_utf8_lossy(&output.stdout)
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
         .lines()
         .find(|line| line.contains("\"IOPlatformUUID\""))
         .and_then(|line| line.rsplit('"').nth(1))
-        .and_then(normalize_machine_id))
+        .and_then(normalize_machine_id)
 }
 
 /// 32 hex digits, lowercased, any dashes and surrounding whitespace dropped; an
