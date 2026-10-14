@@ -110,14 +110,14 @@ after.
 - [~] **8. Rewrite as v2: a persistent server per machine, run by tasks.**
   Proposed in [v2 architecture](docs/design/v2-architecture.md), with every
   decision defaulting to how [herdr](https://herdr.dev) does it. Each machine runs
-  one persistent server that owns its tasks and its browsing sessions — tabs,
-  trees, selection — and keeps running with no client attached; front ends attach
+  one persistent server that owns its tasks and its browsing state — tabs,
+  trees, selection, with the server itself as the session, as herdr's is — and keeps running with no client attached; front ends attach
   over a unix socket or an SSH bridge, render views the server supplies, and send
   actions. Servers never talk to each other; the client aggregates them. The
   server's top layer is a task runtime: every asynchronous, fallible operation is
   a task kind in a structured tree, and filesystem access is one family of kinds.
   A public JSON API sits beside the private client protocol, and the CLI is a
-  client of the API. Built at the repository root in fifteen steps, 0 to 14,
+  client of the API. Built at the repository root in fourteen steps, 0 to 13,
   ending in cutover. Step 1 is an empty server — started, found, answering and stopped,
   with nothing inside — step 2 an empty TUI client attached to it, step 4 several
   machines in one client, and step 8 a local walking skeleton. The binary is
@@ -143,7 +143,9 @@ after.
   any name or path as a string without losing a byte. Step 6 is done: `fs`
   lists, walks, reads and writes this host's files over `PathString`, cancelled
   by being dropped, and opens absolute paths exactly as given: `~`, `..` and
-  relative paths are left to whatever took the path in.
+  relative paths are left to whatever took the path in. Step 6b is next: one
+  home per machine, `~/.file-peeker/hosts/<machine-id>/`, with sockets in
+  `/tmp/fpk-<uid>/`, so nodes sharing a home each run their own server.
 
 ### Tier 3 — states the proposals draw
 
@@ -226,15 +228,15 @@ items is now built in v2 rather than against the current crate.
    | Item | v2 step |
    | --- | --- |
    | 9 — several connections | 4, machines |
-   | 4 and 5 — sorting and segmented rows | 7, sessions on the server |
+   | 4 and 5 — sorting and segmented rows | 7, tabs on the server |
    | 7 — configuration | 4 reads `config.toml` first, for `[remote]`; 8 adds the UI's settings; the server reads none |
-   | 10 — transfer progress and queue | 11, copies |
-   | 11, 12, 13 — preview read, refresh, directory sizes | 12 |
-   | 6 — desktop keyboard and focus | 13, the desktop client |
+   | 10 — transfer progress and queue | 10, copies |
+   | 11, 12, 13 — preview read, refresh, directory sizes | 11 |
+   | 6 — desktop keyboard and focus | 12, the desktop client |
    | 18 — the collapse leak | 7, by construction: a collapse cancels on the server |
 
 4. The palette and drawing items — 14 to 17 and 19 — belong to the desktop client,
-   step 13. The current GUI is replaced rather than ported, so work on them there
+   step 12. The current GUI is replaced rather than ported, so work on them there
    would be thrown away.
-5. Item 13's treemap decision, and items 14 and 15, answered before step 13 builds
+5. Item 13's treemap decision, and items 14 and 15, answered before step 12 builds
    the desktop client's layouts.

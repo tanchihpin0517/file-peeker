@@ -4,7 +4,7 @@ File Peeker is a file browser for local and remote hosts. This repository is in
 the middle of a rewrite.
 
 - **v2**, at the repository root, is the rewrite: a persistent server on every
-  machine that owns the tasks and the browsing session, with front ends as
+  machine that owns the tasks and the tabs being browsed, with front ends as
   clients that attach, render and detach. Its design is
   [v2 architecture](docs/design/v2-architecture.md); every decision defaults to
   how [herdr](https://herdr.dev) does it. It is being built one step at a time and

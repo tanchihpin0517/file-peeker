@@ -219,7 +219,7 @@ run the real binary on both sides.
 ## Not built yet
 
 - Closing an idle bridge after a minute.
-- Named sessions per machine.
+- A second server per machine for a named session, as herdr runs one per session.
 - herdr's version negotiation: a host whose protocol differs is updated, not
   negotiated with.
 - Enabling and disabling a saved machine from the command line; `enabled` is

@@ -156,7 +156,7 @@ observable or retryable; children are for steps that are.
 ## Resources
 
 A resource is something tasks wait for — on the client an attached machine, on
-the server later a session tab. The runtime knows only its state and an
+the server later a tab. The runtime knows only its state and an
 optional typed value.
 
 | State | A task requiring it |
@@ -286,7 +286,7 @@ at the head of a queue; multi-threaded, they found both.
 
 ## Not built yet
 
-- **Summing children's progress into the parent's.** Deferred to step 11, where
+- **Summing children's progress into the parent's.** Deferred to step 10, where
   copies are its first consumer.
 - **Configurable caps.** Hard-coded defaults until configuration exists; the
   proposal reloads them with `fpk server reload-config`.

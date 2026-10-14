@@ -64,7 +64,7 @@ two frontends would have forced one of the two to render a compromise.
 
 [v2 architecture](v2-architecture.md) is a proposal for rebuilding the whole
 application rather than for a frontend's appearance: a persistent server on every
-machine owns the tasks and the browsing session, a task runtime is that server's
+machine owns the tasks and the tabs being browsed, a task runtime is that server's
 top layer, and front ends become clients that attach, render and detach. It
 shares this directory because it is a proposal, not because it shares the
 galleries' seam.

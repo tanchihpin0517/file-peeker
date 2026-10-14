@@ -3,7 +3,7 @@
 A proposal for rebuilding File Peeker from scratch around two ideas:
 
 1. **Every machine runs a persistent File Peeker server.** It owns everything on
-   its host — the tasks, the browsing session, the filesystem access — and keeps
+   its host — the tasks, the tabs being browsed, the filesystem access — and keeps
    running when no front end is attached. A front end is a client that attaches,
    renders and detaches.
 2. **Task management is the top layer of that server.** Every unit of
@@ -65,19 +65,22 @@ incremental step can do cheaply.
 │ TUI · GUI · CLI   (clients)          │          │                           │
 │   │ attach              │ api        │   SSH    │ file-peeker server        │
 │   │                     │            │ ───────> │   task runtime            │
-│   v                     v            │  bridge  │   sessions (tabs, trees)  │
-│ file-peeker server  (default session)│          │   fs                      │
+│   v                     v            │  bridge  │   tabs, trees             │
+│ file-peeker server                   │          │   fs                      │
 │   task runtime                       │          │                           │
-│   sessions (tabs, trees)             │          └───────────────────────────┘
+│   tabs, trees                        │          └───────────────────────────┘
 │   fs                                 │
 └──────────────────────────────────────┘
 ```
 
-- **One server per machine per session name**, as herdr does. It is started on
-  demand, runs detached, and serves only its own host's filesystem.
+- **One server per machine, and the server is the session**, as herdr runs one
+  server per session. It is started on demand, runs detached, serves only its
+  own host's filesystem, and holds the tabs being browsed directly: there is no
+  session object inside it to hold them, because a server would only ever hold
+  one.
 - **Servers never talk to each other.** The client aggregates them, as herdr's
   0.9 does: the local server is one machine among several, not a hub.
-- **The client renders the UI.** A server supplies views of its sessions; the
+- **The client renders the UI.** A server supplies views of its tabs; the
   client draws the chrome, holds the keybindings and theme, and turns input into
   actions sent to the selected server.
 
@@ -90,21 +93,20 @@ machines; the invocations below are written with the final name.
 | Invocation | Does |
 | --- | --- |
 | `file-peeker` | Attach the TUI to the local server, starting one if none runs |
-| `file-peeker --session <name>` | The same, for a named session |
 | `file-peeker gui` | Attach the desktop front end the same way |
 | `file-peeker server` | Run headless as the server; what auto-start spawns |
 | `file-peeker server stop` | Stop the running server through its API socket |
 | `file-peeker status` | Client version, server status, protocol compatibility |
 | `file-peeker machine add\|list\|remove …` | Manage saved SSH machines |
 | `file-peeker --machine <label> <command>` | Run an API command against a saved machine |
-| `file-peeker api schema\|snapshot` | Print the API schema, or the live session snapshot |
+| `file-peeker api schema\|snapshot` | Print the API schema, or a snapshot of the server's tabs |
 | `file-peeker tab …`, `file-peeker task …`, `file-peeker ls …` | API commands over the socket |
 | `file-peeker bridge` | Relay stdio to the local client socket; what SSH runs on a remote host |
 
 Auto-start: the client connects to the socket; if nothing answers, it spawns
 `file-peeker server` detached in its own session and process group, and waits for
-the socket. A lock file beside the socket makes a second concurrent start lose
-rather than run two servers.
+the socket. A lock file in the machine's home directory makes a second
+concurrent start lose rather than run two servers.
 
 The desktop front end stays behind a cargo feature because `eframe` brings a
 window system and a GPU backend. A remote install builds without it.
@@ -113,24 +115,85 @@ window system and a GPU backend. A remote install builds without it.
 
 ### Files
 
-Per user, in one directory, `~/.file-peeker/`, mode `0700`:
+Per user and **per machine**: nothing is shared between two machines, even
+when they share one home directory, as a cluster's nodes do over NFS. Two
+places, both private:
 
 ```text
-~/.file-peeker/
-├── config.toml              client settings
-├── machines.toml            saved SSH machines
-├── server.lock              single-instance lock
-├── file-peeker.sock         the public API socket
-├── file-peeker-client.sock  the private client protocol socket
-├── logs/
-│   ├── server.log           structured
-│   └── client.log
-└── sessions/
-    ├── default.json         the default session's saved shape
-    ├── <name>.json          a named session's
-    ├── snapshots/           recovery snapshots
-    └── backups/             unreadable session files, preserved
+~/.file-peeker/hosts/<machine-id>/   this machine's lasting state, mode 0700
+├── config.toml                      client settings
+├── machines.toml                    saved SSH machines
+├── server.lock                      single-instance lock
+├── bin/fpk                          the installed binary, on a remote host
+└── logs/
+    ├── server.log                   structured
+    └── client.log
+
+~/.file-peeker/by-name/<hostname>    -> ../hosts/<machine-id>, for a person reading the tree
+
+/tmp/fpk-<uid>/                      this machine's connections, mode 0700
+├── api.sock                         the public API socket
+├── client.sock                      the private client protocol socket
+└── ssh/%C                           shared SSH connections' control sockets
 ```
+
+Nothing records the tabs: see [Lifetime](#lifetime).
+
+**Nothing is shared between machines.** A shared home would otherwise break
+the server it is meant to find. A unix socket connects only on the machine that
+bound it, though every node sees its file; and `flock` on NFS either reaches
+across machines — so a second node's server loses the lock to a server it
+cannot connect to, and that node can never start one — or does not, so the
+second node takes the lock, removes the first node's socket as stale, and binds
+its own. One machine's list of SSH machines is not another's either: from a
+compute node the jump hosts and addresses differ. And nodes need not share an
+architecture or a C library, so neither a binary nor a dev build's target
+directory can be shared.
+
+**The machine ID** names the directory: `/etc/machine-id` on Linux, falling back
+to `/var/lib/dbus/machine-id`, and `IOPlatformUUID` on macOS (`gethostuuid(2)`),
+written as 32 lowercase hex digits. Not the hostname: macOS changes its
+hostname with the network, and a key that moves would silently start this
+machine over in an empty directory. A machine with no readable ID refuses to
+start, saying why, rather than falling back to another key. The probe, the
+install scripts and the bridge command are shell run over SSH; each computes the
+same key with one shared snippet, tested against the Rust that computes it, and
+computes it on every command, since one SSH target may reach a different node
+each time.
+
+**`by-name/` is for people.** An ID says nothing to a person looking for a
+node's log, so the server links its hostname to its directory as it starts, as
+`/dev/disk/by-id` names disks. Nothing in File Peeker follows these links, so a
+stale or colliding one costs nothing:
+
+- **Relative**, `../hosts/<machine-id>`, since nodes may mount one home at
+  different paths.
+- **Replaced atomically**: written under a temporary name and renamed over.
+- **A renamed machine leaves no trail**: the server removes every other link to
+  its own ID as it writes its current one.
+- **Two machines with one hostname**: the later to start holds the link.
+
+**Connections live in `/tmp`, everything else in home.** A unix socket's path is
+at most 103 bytes on macOS and 107 on Linux, and OpenSSH needs 17 more while it
+binds a new master; under a home directory and a machine ID, `ssh/%C` alone does
+not fit. `/tmp/fpk-<uid>/` is short, local to the machine, and resolved from
+`getuid()` rather than a variable, as tmux places `/tmp/tmux-<uid>/`. `/tmp` is
+shared with every user, so the directory is refused unless this uid owns it and
+its mode is `0700`; the host directory is checked the same way, which also
+stops a `sudo` that kept `HOME` from writing root-owned files into it.
+
+**The lock stays in home**, because it is what makes one server per machine,
+and `/tmp` may be cleaned or split:
+
+- **A cleaner removes a socket.** systemd-tmpfiles and its like delete what has
+  not been touched. The server checks its sockets periodically and binds again
+  when one is gone, as tmux recreates its own. The lock, in home, is never
+  cleaned, so the next client cannot start a second server meanwhile.
+- **A session has a `/tmp` of its own** — a container, a systemd service with
+  `PrivateTmp`, `pam_namespace` set per session. A client there finds no socket
+  and starts a server, which waits out the startup grace on the held lock and
+  then says a server already runs on this machine but its socket is not visible
+  from this session, rather than running a second one.
 
 **This is where File Peeker departs from herdr**, which splits its files between
 `~/.config/herdr/` and `~/.local/state/herdr/`. The XDG variables that would
@@ -138,12 +201,15 @@ place a split are often set only in an interactive shell's startup files, and a
 remote server is reached by `ssh host fpk bridge`, a non-interactive command
 that may not read them. A server started from a login shell and a bridge started
 over SSH would then resolve different directories, and the client would start a
-second server rather than find the first. One directory resolved from `HOME`
-alone resolves the same way from a login shell, a cron job and an SSH command.
-`FILE_PEEKER_HOME` overrides it outright, for tests and development. A dev
-build uses `~/.file-peeker-dev/` instead, on the client and on every host, so a
-build run from a checkout never shares a binary, a server or a socket with a
-release install.
+second server rather than find the first. `HOME`, the machine ID and the uid
+resolve the same way from a login shell, a cron job and an SSH command; for the
+same reason `/tmp/fpk-<uid>/` is not `$XDG_RUNTIME_DIR`.
+
+`FILE_PEEKER_HOME` overrides both outright, for tests and development: the host
+directory is that directory, and the connections are in its `run/`. A dev build
+uses `~/.file-peeker-dev/` and `/tmp/fpk-dev-<uid>/` instead, on the client and
+on every host, so a build run from a checkout never shares a binary, a server or
+a socket with a release install.
 
 Both sockets are mode `0600`. That replaces the current crate's bearer token: a
 unix socket in a private directory is reachable only by its user, and a remote
@@ -154,35 +220,28 @@ socket is reached only through that user's SSH session.
 Everything about its own host:
 
 - **The task runtime** and every task on this machine.
-- **Sessions.** A session holds tabs; a tab holds a root path, its tree of
-  listed directories, which are expanded, the selected path, the filter query
-  and the sort. This is the browsing state the current crate keeps in each front
-  end.
+- **Tabs.** A tab holds a root path, its tree of listed directories, which are
+  expanded, the selected path, the filter query and the sort. This is the
+  browsing state the current crate keeps in each front end; here the server
+  holds it directly, as herdr's server holds its workspaces and tabs.
 - **Filesystem access**, through `fs`, for this host only.
 
 It owns no UI: no layout, palette, keybindings or viewport size beyond what a
 client tells it it is showing.
 
-### Lifetime and persistence
+### Lifetime
 
-As herdr does, persistence has two strengths:
+Everything the server owns lives as long as the server, and no longer:
 
-| Event | Tasks | Session shape | Listed contents |
-| --- | --- | --- | --- |
-| Client detaches and reattaches | keep running | kept | kept, live |
-| Server restarts | lost | restored from `sessions/default.json` | re-listed on restore |
-| Machine restarts | lost | restored from `sessions/default.json` or a snapshot | re-listed on restore |
+| Event | Tasks | Tabs and their trees |
+| --- | --- | --- |
+| Client detaches and reattaches | keep running | kept, live |
+| Server or machine restarts | lost | lost: the server starts with none |
 
-- **The session shape is saved, the contents are not.** A session file holds
-  tabs, root paths, expanded paths, the selection, filter and sort — never
-  directory entries. Restoring re-lists what was expanded, so a restored tab
-  shows the filesystem as it is now. A path that no longer exists restores as
-  that tab's error, not as a silent move to the home directory, as herdr keeps a
-  pane whose directory is gone.
-- **Saves are debounced** on change and on shutdown.
-- **Snapshots**: up to 48 in `sessions/snapshots/`, at most one per 15 minutes. An
-  unreadable session file is moved to `sessions/backups/`, keeping three, and is
-  never restored automatically.
+- **Nothing is saved.** Unlike herdr, which restores its sessions from a state
+  file, a restarted server starts empty, and a client opens tabs again. Saving
+  the tabs' shape — and re-listing what was expanded on restore — can come back
+  later as a step of its own if restarts turn out to cost too much.
 - **Tasks do not survive a server restart.** A copy that was in flight is gone;
   its destination was a hidden partial file published atomically, so nothing
   half-written remains under the real name.
@@ -194,15 +253,15 @@ started from a laptop finishes after the lid closes.
 
 > **Nothing asynchronous happens except as a task.**
 
-The runtime is the top of the server: a client's action becomes a session
-change, a session change starts tasks, and tasks use the filesystem. The client
+The runtime is the top of the server: a client's action becomes a change to a
+tab, a tab's change starts tasks, and tasks use the filesystem. The client
 runs the same runtime for the little work that is genuinely its own — reaching a
 machine, and transfers that span two.
 
 > **Only asynchronous, fallible work is a task.**
 
 Moving the selection, expanding a row whose children are already listed,
-typing into a filter and switching tabs are synchronous session changes. Making
+typing into a filter and switching tabs are synchronous changes to the tabs. Making
 every keystroke a task would buy a lifecycle for work with no duration that
 cannot fail.
 
@@ -275,7 +334,7 @@ knowing it.
 
 | Runs on | Kinds |
 | --- | --- |
-| Server | `ListDir`, `WalkDir`, `ReadFile`, `WriteFile`, `LocalCopy`, `DirSize`, `Preview`, `Refresh`, `Restore`, later `Watch` |
+| Server | `ListDir`, `WalkDir`, `ReadFile`, `WriteFile`, `LocalCopy`, `DirSize`, `Preview`, `Refresh`, later `Watch` |
 | Client | `AttachMachine` (SSH, bridge, install with approval), `Transfer` (a copy between two machines) |
 
 ### The task context
@@ -307,7 +366,6 @@ parent's progress may be declared as the sum of its children's.
 | Copy between machines | client `Transfer` → server `ReadFile` on the source, server `WriteFile` on the destination |
 | Copy a selection | a parent per batch, one child per entry, admitted under `Transfer` |
 | Directory size | server `DirSize` → `WalkDir`, aggregated on the server |
-| Restore a session | server `Restore` → one `ListDir` per expanded path |
 | Attach a machine | client `AttachMachine`, with phases connect → probe → install → start rather than children |
 
 A step that is not independently cancellable, observable or retryable is a
@@ -325,7 +383,7 @@ How a task ends, as step 3 built it:
 - **A body that panics** settles `Failed`. Each body runs as a tokio task of its
   own, so a panic reaches the driver as a join error rather than leaving a task
   `Running` forever.
-- **Summing children's progress into the parent's** is deferred to step 11,
+- **Summing children's progress into the parent's** is deferred to step 10,
   where copies are its first consumer.
 
 A copy between machines is the one place bytes pass through a client. Servers do
@@ -335,7 +393,7 @@ aggregates and servers stay independent.
 
 ### Resources and admission
 
-A resource is something tasks wait for. On the server, a session tab is one; on
+A resource is something tasks wait for. On the server, a tab is one; on
 the client, an attached machine is one, with the states
 `Pending → Ready → Closing → Gone`. A task that requires a `Pending` resource is
 `Queued` with `waiting_on` set, so a client can submit work against a machine
@@ -384,16 +442,17 @@ ring of recently settled roots, which answers "which failed" without becoming a
 log.
 
 **The runtime owns lifecycle, never payload.** It stores what a task is and how
-it is going, never what it produced. A `ListDir`'s entries go to the session that
+it is going, never what it produced. A `ListDir`'s entries go to the tab that
 submitted it, which is what owns the tree; the runtime does not keep them.
 
-## Sessions and views
+## Tabs and views
 
-A session is the server's model of what a person is browsing, the equivalent of
-herdr's workspaces, tabs and panes.
+The server's tabs are its model of what a person is browsing, the equivalent of
+herdr's workspaces, tabs and panes. They hang off the server itself: the server
+is the session, as herdr's is, so nothing sits between it and its tabs.
 
 ```text
-Session
+Server
 └── Tab
     ├── root: PathString
     ├── tree: rows, expansions, the ListDir task each loading row waits on
@@ -407,7 +466,7 @@ Session
   Collapsing a row cancels that task in the same place it was started, so the
   current crate's collapse leak has no place to exist.
 - **Selection is a path.** An index would be invalidated by every sort and every
-  insertion above it, and the session outlives any one client's view of it.
+  insertion above it, and a tab outlives any one client's view of it.
 - **Sorting and segmented storage are designed in** (TODO items 4 and 5): a
   listing appends while it streams and sorts when it settles, and rows are stored
   so that an expansion does not move the rows below it on every group.
@@ -443,10 +502,10 @@ Input becomes semantic actions, not keystrokes: `SelectNext`, `SelectPath`,
 `Toggle`, `Enter`, `Up`, `SetFilter`, `SetSort`, `OpenTab`, `CloseTab`,
 `Refresh`, `Copy`, `Cancel(TaskId)`. The client owns the keybindings, as herdr's
 client does, and maps keys to actions; the server owns what an action does to the
-session. Two front ends with different keys therefore share one behavior.
+tabs. Two front ends with different keys therefore share one behavior.
 
-Several clients may attach to one session at once and see the same selection,
-as two herdr clients share one focus.
+Several clients may attach to one server at once and see the same tabs and
+selection, as two herdr clients share one focus.
 
 ## Machines
 
@@ -458,7 +517,6 @@ A machine is a saved SSH target with a server, as in herdr.
 id = "m-7f3a"
 label = "workbox"
 ssh = "tanch@workbox"
-session = "default"
 enabled = true
 ```
 
@@ -518,9 +576,8 @@ script or another tool can drive File Peeker without linking it.
 | Area | Operations |
 | --- | --- |
 | `server` | status, stop, reload-config |
-| `session` | list, snapshot, stop |
-| `tab` | list, open, close, select, navigate |
-| `ls` / `walk` | list a path once and print it, without touching a session |
+| `tab` | list, snapshot, open, close, select, navigate |
+| `ls` / `walk` | list a path once and print it, without touching a tab |
 | `task` | list, show, cancel, wait |
 | `machine` | through `--machine <label>`, any of the above on a saved machine |
 
@@ -537,7 +594,7 @@ one stays stable.
 Client-side only, in `config.toml`: theme and palette, layout, keybindings,
 `[ui]` options such as `mouse_capture`, `[remote]` options. The server reads no UI configuration; it has none. That
 answers TODO item 7 by construction. `file-peeker server reload-config` exists for
-the few server settings there are — admission caps and the save debounce.
+the few server settings there are, such as admission caps.
 
 ## Module structure
 
@@ -549,8 +606,8 @@ src/
 ├── task/          the runtime: ids, kinds, lifecycle, tree, admission, resources, events
 ├── fs/            host-local filesystem work; task-agnostic, cancelled by being dropped
 ├── path_string.rs lossless names and paths
-├── home.rs        where a server's files live: sockets, lock, log
-├── session/       tabs, trees, sorting, selection, filter, views, actions, persistence
+├── home.rs        where a machine's files live: its home directory, its connections, its ID
+├── browse/        tabs, trees, sorting, selection, filter, typed paths, views, actions
 ├── server/        the daemon: sockets, lock, auto-start, server kinds, API, client protocol service
 ├── protocol/      the client protocol schema and the API schema
 ├── client/        attaching, machines, SSH and the bridge, reconnects, aggregation, client kinds
@@ -564,13 +621,13 @@ src/
 | `task`, `path_string`, `home` | nothing else in the crate |
 | `fs` | `path_string` |
 | `protocol` | `task`, `path_string` |
-| `session` | `task`, `fs`, `path_string` |
-| `server` | `task`, `fs`, `session`, `protocol`, `path_string`, `home` |
-| `client` | `task`, `protocol`, `path_string`, `home` — never `server` or `session` |
+| `browse` | `task`, `fs`, `path_string` |
+| `server` | `task`, `fs`, `browse`, `protocol`, `path_string`, `home` |
+| `client` | `task`, `protocol`, `path_string`, `home` — never `server` or `browse` |
 | `cli`, `tui`, `gui` | `client`, `protocol`, `home`, `task`'s observer types |
 
-`client` never naming `server` is the structural form of "the server owns the
-session": a front end can only reach browsing state through a view.
+`client` never naming `server` or `browse` is the structural form of "the server
+owns the tabs": a front end can only reach browsing state through a view.
 
 ## Decisions
 
@@ -578,16 +635,16 @@ session": a front end can only reach browsing state through a view.
 | --- | --- | --- |
 | Approach | Rewrite as a new crate; no compatibility with the current one | A persistent server inverts where state lives, which no incremental step does cheaply |
 | Reference | herdr, for every decision, until File Peeker needs otherwise | The same shape, already worked through |
-| Servers | One per machine per session name, persistent, auto-started | Work and state outlive the front end |
+| Servers | One per machine, persistent, auto-started; the server is the session | Work and state outlive the front end; as herdr, one server per session, so no session object inside it |
 | Server-to-server | Never; the client aggregates | herdr 0.9's rule; machines stay independent and a dropped one affects no other |
-| Browsing state | Owned by the server's session | Reattach returns to the same place; front ends stop owning the tree |
+| Browsing state | The server's tabs, held directly | Reattach returns to the same place; front ends stop owning the tree |
 | Rendering | On the client, from server-supplied views | UI settings stay local; the server stays UI-free |
 | Input | Semantic actions, keys mapped on the client | Two front ends, one behavior |
-| What is a task | Asynchronous, fallible work only | Synchronous session changes have no duration and cannot fail |
+| What is a task | Asynchronous, fallible work only | Synchronous changes to the tabs have no duration and cannot fail |
 | Kind set | Open trait, closed descriptor | Filesystem work is one family among others |
-| Composition | Structured task tree, phases for non-independent steps | Batches, transfers, sizes and restore need children |
-| Persistence | Session shape saved, contents and tasks not | Restores reflect the filesystem as it is now |
-| Files | One directory, `~/.file-peeker/`, from `HOME` alone | A server and an SSH bridge must resolve the same place; XDG variables may differ between them |
+| Composition | Structured task tree, phases for non-independent steps | Batches, transfers and sizes need children |
+| Persistence | None: tabs and tasks live as long as the server | Simplest; herdr restores its sessions, and saving can come back if restarts cost too much |
+| Files | Per machine: `~/.file-peeker/hosts/<machine-id>/`, and sockets in `/tmp/fpk-<uid>/` | Machines sharing a home must not meet; a server and an SSH bridge must resolve the same place, which XDG variables may not; socket paths are short |
 | Local transport | Unix sockets, mode `0600` | Replaces the bearer token with the filesystem's own access control |
 | Remote transport | SSH, ControlMaster, a stdio bridge | No listening port, no socket forwarding to configure |
 | Remote install | With approval only; background reconnects never install | A server on someone's host is theirs to agree to |
@@ -601,9 +658,21 @@ session": a front end can only reach browsing state through a view.
 - **Latency of round-tripped input.** Selection movement goes to the server and
   back. On a local socket that is negligible; on a slow SSH link it may need the
   client to move the cursor optimistically and reconcile.
-- **Shared selection.** Two clients on one session share one selection, as herdr
+- **Shared selection.** Two clients on one server share one selection, as herdr
   shares focus. If that proves wrong for File Peeker, a per-client cursor over a
   shared tree is the alternative.
+- **Named sessions.** herdr runs a second server for a second session name. If
+  File Peeker wants one, it is the same: another server with its own sockets,
+  lock and state, never a second session inside one server.
+- **Machines with one ID.** A VM or container image cloned with its
+  `/etc/machine-id` gives two machines one home directory, which is the shared
+  case all over again. Left until it is met; regenerating the ID is the fix.
+- **Bringing a machine's settings to another.** A new node starts with no
+  configuration and no saved machines. A command to import them from another
+  machine's directory can come if setting nodes up proves tedious.
+- **Copies within one filesystem.** Two nodes sharing a filesystem copy between
+  each other through the client, though the bytes never needed to leave it.
+  Step 10 may detect it and copy on one side.
 - **Task identity across a retry.** The leaning is a new task with
   `retry_of: TaskId`.
 - **Servers that talk to each other.** Later operations will have one server
@@ -628,15 +697,15 @@ crate changes along the way.
 | 4 | **Machines** — see below: releases, approval-based install, the bridge, ControlMaster, several machines in the TUI, `--machine` | **Several machines in one client** |
 | 4b | The mouse in the TUI, as herdr's — see after step 4 | Clicks land on what was drawn |
 | 5 | `PathString`: a name or path held as a string without losing a byte, `%`-escaped, with no `Display` | Any Unix name survives the wire and still opens its file |
-| 6 | `fs` over `PathString`, cancelled by a token | The filesystem core, with its own tests |
-| 7 | Sessions: tabs and trees fed by server `ListDir`, sorting and segmented rows | Browsing state on the server |
+| 6 | `fs` over `PathString`, cancelled by being dropped | The filesystem core, with its own tests |
+| 6b | One home per machine — see after step 6: machine IDs, sockets in `/tmp`, the host-keyed install | Two nodes sharing a home each run their own server |
+| 7 | Tabs and trees on the server, fed by `fs` task kinds, sorting and segmented rows, typed paths | Browsing state on the server |
 | 8 | Views and actions in the client protocol; the TUI renders a tab through them | **Local walking skeleton** |
-| 9 | Persistence: `sessions/default.json`, snapshots, backups, restore | Reattach and restart |
-| 10 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
-| 11 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
-| 12 | `Preview`, `DirSize`, `Refresh` | TODO items 11, 12 and 13 |
-| 13 | The desktop front end, as a second client | TODO items 6 and 9 |
-| 14 | Cutover: `fpk` becomes `file-peeker`, and `old/` is deleted | One crate again |
+| 9 | The full API beyond `status` and `stop`, its schema, and the CLI over it | Scriptable, as herdr is |
+| 10 | Copies: `LocalCopy`, client `Transfer`, batches, byte progress, the transfer admission class | TODO item 10 |
+| 11 | `Preview`, `DirSize`, `Refresh` | TODO items 11, 12 and 13 |
+| 12 | The desktop front end, as a second client | TODO items 6 and 9 |
+| 13 | Cutover: `fpk` becomes `file-peeker`, and `old/` is deleted | One crate again |
 
 Step 8 is the first one a person can use to browse. Machines come before
 browsing so that everything after them is built against several machines from
@@ -645,7 +714,7 @@ the start, rather than against one and widened later.
 ### Step 1: an empty server
 
 The first milestone is the process model with nothing inside it: a server that
-starts, is found, answers, and stops, holding no tasks and no sessions. Everything
+starts, is found, answers, and stops, holding no tasks and no tabs. Everything
 after it is a feature added to a server that already runs.
 
 - `file-peeker server` runs headless: takes `server.lock`, creates
@@ -816,8 +885,8 @@ the connection, the reconnects and the aggregation everything later rides on.
   workbox task demo` runs `~/.file-peeker/bin/fpk task demo` there over the
   shared connection and passes its output through.
 
-Left for later: closing an idle bridge, named sessions, and herdr's version
-negotiation — here a host whose protocol differs is updated, not negotiated
+Left for later: closing an idle bridge, a second server for a named session,
+and herdr's version negotiation — here a host whose protocol differs is updated, not negotiated
 with.
 
 After step 4, the TUI took the mouse, as herdr's is mouse-first:
@@ -892,17 +961,17 @@ crate's `fs`, over `PathString`.
   itself cancelled — not left to a spawned cleanup, as the shipping crate did.
 - **A path is absolute and opened exactly as given; nothing is interpreted.**
   Reading what a person typed is the job of whatever took it in, as step 7's
-  session does for a tab:
+  `browse` does for a tab:
   - **Relative paths are refused.** They are relative to something only the
     caller knows, such as a tab's directory, and the server's working
     directory is wherever the client that started it happened to be.
-  - **`~` is a name like any other.** Expanding it moves to the session, on
+  - **`~` is a name like any other.** Expanding it moves to `browse`, on
     the same server with the same `HOME`, so `~` typed in a remote machine's
     tab is that machine's.
   - **`.` and `..` go to the kernel**, which follows symlinks on the way:
     `/a/link/..` is the parent of where `link` points, which folding the text
     — as the shipping crate did — gets wrong.
-  - **No `$VARIABLE`**, here or in the session: it would read the server's
+  - **No `$VARIABLE`**, here or in `browse`: it would read the server's
     environment, the starting client's, not the user's, and it broke real
     names holding a `$`, such as `Foo$Inner.class`. If typing one is wanted,
     the client expands it from its own environment before sending.
@@ -919,9 +988,57 @@ Ported with its tests in [`fs`](../../src/fs/mod.rs). Names outside UTF-8 are
 tested where the filesystem holds them; APFS refuses them, so on macOS only the
 literal-marker round trip runs, and Linux CI covers the rest.
 
+### Step 6b: one home per machine
+
+Steps 1 and 4 kept everything in one `~/.file-peeker/`, which machines sharing
+a home directory break. This step moves to the [files](#files) the server
+section describes; nothing else about the server or the machines changes.
+
+- **`Home` becomes two places**: the host directory,
+  `~/.file-peeker/hosts/<machine-id>/`, and the connections directory,
+  `/tmp/fpk-<uid>/`. `FILE_PEEKER_HOME` overrides both, the connections going
+  in its `run/`.
+- **The machine ID** is read once at start, as Linux's `machine-id` or macOS's
+  `gethostuuid(2)`, in 32 lowercase hex digits, and a machine without one
+  refuses to start. The server links `by-name/<hostname>` to its directory.
+- **Both directories are checked**: owned by this uid and mode `0700`, or
+  refused, saying which and why.
+- **Sockets are renamed** `api.sock` and `client.sock`, and the ControlMaster
+  sockets move to `ssh/` beside them. The path-length checks stay, now against
+  the shorter paths.
+- **The server binds a socket again** when a cleaner removes it, checked
+  periodically. A start that loses the lock to a server whose socket this
+  session cannot see says so.
+- **The host side keys by machine**: the probe, both install scripts and the
+  bridge and `--machine` commands compute the ID in shell before naming
+  `hosts/<machine-id>/bin/fpk`, with one snippet tested against the Rust. A dev
+  install's `src/`, `build/` and `cargo/` move under the host directory too, so
+  nodes with different C libraries never share a build. Installs write a
+  partial file named for their process and rename it in place.
+- `docs/machines.md`, the README and `home.rs`'s documentation follow.
+
+Proven by tests that resolve both places from a given `HOME`, ID and uid; that
+refuse a directory with the wrong owner or mode; that replace a renamed machine's
+`by-name/` link; that rebind a removed socket;
+and that two homes with different IDs under one `HOME` run two servers side by
+side.
+
+### Step 7: tabs and trees
+
+The browsing state, on the server and held by it directly, in `browse`. Three
+parts, each tested and committed on its own:
+
+| Part | Lands | Proven by |
+| --- | --- | --- |
+| 7a | `fs` task kinds — `fs.list_dir` first — replacing `demo.count` | A real listing task in the sidebar, started through the API |
+| 7b | The tree: the shipping crate's `browser::Tree`, a flat pre-order list grown in place as listings stream in | Unit tests: streamed insertion, collapse cancelling, stale results dropped |
+| 7c | Tabs: root, selection by path, filter, sort, and typed paths — `~` and a relative path joined to the tab's directory before `fs` sees them | Unit tests, and a tab driven through the API |
+
+Nothing is drawn yet: step 8's views carry the rows to a client.
+
 ## What this replaces at cutover
 
 Every document under `old/docs/` describes the current crate and is replaced,
 not amended. v2 grows its own documents as each step lands: architecture, the
-task runtime, sessions and views, machines, the client protocol and the API
+task runtime, tabs and views, machines, the client protocol and the API
 reference.
