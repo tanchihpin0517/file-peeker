@@ -79,7 +79,8 @@ mod tests {
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap()
-                .is_empty()
+                .is_empty(),
+            "an empty file read as chunks"
         );
     }
 

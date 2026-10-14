@@ -114,7 +114,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(items.is_empty());
+        assert!(items.is_empty(), "{items:?}");
     }
 
     #[tokio::test]

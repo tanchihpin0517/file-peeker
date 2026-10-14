@@ -131,7 +131,7 @@ fn a_host_without_fpk_is_not_saved_unless_the_user_agrees() {
     let said = String::from_utf8_lossy(&output.stdout);
     assert!(said.contains("nothing is installed"), "{said}");
     assert!(said.contains("pass --yes"), "{said}");
-    assert!(saved(&world.client).is_empty());
+    assert_eq!(saved(&world.client), "");
     assert!(!world.host_dir().join("bin/fpk").exists());
 }
 

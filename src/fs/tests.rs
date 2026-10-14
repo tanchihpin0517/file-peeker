@@ -79,7 +79,7 @@ async fn lists_every_entry_once() {
     }
     assert_eq!(list(fixture.path()).await.len(), 1025);
     let empty = TempDir::new().unwrap();
-    assert!(list(empty.path()).await.is_empty());
+    assert_eq!(list(empty.path()).await, Vec::new());
 }
 
 #[tokio::test]
@@ -408,7 +408,7 @@ async fn reads_a_file_in_non_empty_chunks() {
 
     let empty = fixture.path().join("empty");
     std::fs::write(&empty, b"").unwrap();
-    assert!(read(&at(&empty)).await.is_empty());
+    assert_eq!(read(&at(&empty)).await, b"");
 }
 
 #[tokio::test]
@@ -476,7 +476,7 @@ async fn writes_an_empty_file_and_one_of_several_chunks() {
         assert_eq!(written.path, at(&fixture.path().join(name)));
         assert_eq!(read(&written.path).await, expected);
     }
-    assert!(partials(fixture.path()).is_empty());
+    assert_eq!(partials(fixture.path()), Vec::<PathBuf>::new());
 }
 
 #[tokio::test]
@@ -510,7 +510,7 @@ async fn an_existing_file_stays_unless_replace_is_asked_for() {
 
     write(WriteConflict::Replace).await.unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), b"new");
-    assert!(partials(fixture.path()).is_empty());
+    assert_eq!(partials(fixture.path()), Vec::<PathBuf>::new());
 }
 
 #[tokio::test]
@@ -529,7 +529,7 @@ async fn a_failing_source_publishes_nothing() {
     .unwrap_err();
     assert_eq!(error.message(), "source failed");
     assert!(!fixture.path().join("target").exists());
-    assert!(partials(fixture.path()).is_empty());
+    assert_eq!(partials(fixture.path()), Vec::<PathBuf>::new());
 }
 
 #[tokio::test]
@@ -562,7 +562,7 @@ async fn a_file_that_appears_mid_write_is_not_overwritten() {
         std::fs::read(fixture.path().join("target")).unwrap(),
         b"winner"
     );
-    assert!(partials(fixture.path()).is_empty());
+    assert_eq!(partials(fixture.path()), Vec::<PathBuf>::new());
 }
 
 /// Cancelling is dropping. The partial file is gone the moment the write is,
@@ -592,7 +592,7 @@ async fn dropping_a_write_removes_its_partial_file_at_once() {
     assert_eq!(partials(fixture.path()).len(), 1);
 
     drop(write);
-    assert!(partials(fixture.path()).is_empty());
+    assert_eq!(partials(fixture.path()), Vec::<PathBuf>::new());
     assert!(!fixture.path().join("target").exists());
     drop(sender);
 }

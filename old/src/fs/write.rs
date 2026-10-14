@@ -402,7 +402,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), FsErrorKind::Internal);
         assert!(!fixture.path().join("target").exists());
-        assert!(partials(fixture.path()).is_empty());
+        assert!(
+            partials(fixture.path()).is_empty(),
+            "a partial file was left"
+        );
     }
 
     #[tokio::test]
@@ -426,7 +429,10 @@ mod tests {
         let _ = task.await;
         tokio::task::yield_now().await;
         assert!(!fixture.path().join("target").exists());
-        assert!(partials(fixture.path()).is_empty());
+        assert!(
+            partials(fixture.path()).is_empty(),
+            "a partial file was left"
+        );
     }
 
     #[tokio::test]
@@ -455,7 +461,10 @@ mod tests {
         let error = task.await.unwrap().unwrap_err();
         assert_eq!(error.kind(), FsErrorKind::Cancelled);
         assert!(!fixture.path().join("target").exists());
-        assert!(partials(fixture.path()).is_empty());
+        assert!(
+            partials(fixture.path()).is_empty(),
+            "a partial file was left"
+        );
     }
 
     #[tokio::test]
@@ -495,6 +504,9 @@ mod tests {
                 .unwrap(),
             b"winner"
         );
-        assert!(partials(fixture.path()).is_empty());
+        assert!(
+            partials(fixture.path()).is_empty(),
+            "a partial file was left"
+        );
     }
 }

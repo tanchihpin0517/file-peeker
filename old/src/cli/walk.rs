@@ -176,7 +176,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(output.is_empty());
+        assert!(output.is_empty(), "{output:?}");
         assert_eq!(stats, WalkStats { entries: 0 });
     }
 
@@ -199,7 +199,7 @@ mod tests {
             }
         );
         assert_eq!(output.flushes, 1);
-        assert!(!output.bytes.is_empty());
+        assert!(!output.bytes.is_empty(), "nothing was written");
     }
 
     #[tokio::test]

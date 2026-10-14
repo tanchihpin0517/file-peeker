@@ -728,6 +728,6 @@ mod tests {
     /// draws is what goes back to it.
     #[test]
     fn the_root_has_no_segments() {
-        assert!(crumbs(&"/".into()).is_empty());
+        assert!(crumbs(&"/".into()).is_empty(), "the root has crumbs");
     }
 }

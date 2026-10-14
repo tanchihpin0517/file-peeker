@@ -1233,7 +1233,7 @@ mod tests {
 
         // A zero-height body has nothing to show and no selection to place.
         let viewport = context.viewport(0);
-        assert!(viewport.rows.is_empty());
+        assert!(viewport.rows.is_empty(), "rows were drawn");
         assert_eq!(viewport.selected, None);
 
         // A single-row body still tracks the selection.
@@ -1309,7 +1309,7 @@ mod tests {
 
         context.refresh();
         context.apply(stale);
-        assert!(context.entries().is_empty());
+        assert!(context.entries().is_empty(), "entries remain");
 
         while context.status() != &ListingStatus::Complete {
             let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
@@ -1337,7 +1337,7 @@ mod tests {
         context.move_selection(true);
 
         context.refresh();
-        assert!(context.entries().is_empty());
+        assert!(context.entries().is_empty(), "entries remain");
         assert_eq!(
             context.tree.selected_index(),
             Some(2),
@@ -1375,7 +1375,7 @@ mod tests {
 
         context.enter_selected();
         assert_eq!(context.root_path(), "/home/reports");
-        assert!(context.entries().is_empty());
+        assert!(context.entries().is_empty(), "entries remain");
         assert_eq!(context.effective_selection(), None);
         assert_eq!(context.status(), &ListingStatus::Loading);
 
@@ -2454,7 +2454,7 @@ mod tests {
             context.extend_filter(character);
         }
         assert_eq!(context.filter_matches(), Some(0));
-        assert!(context.visible_names(8).is_empty());
+        assert!(context.visible_names(8).is_empty(), "names are visible");
         assert_eq!(context.viewport(8).selected, None);
         assert_eq!(context.effective_selection(), Some(1));
 

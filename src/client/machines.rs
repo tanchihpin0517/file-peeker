@@ -100,7 +100,7 @@ mod tests {
     fn saved_machines_load_back_in_order() {
         let root = tempfile::tempdir().unwrap();
         let home = Home::at(root.path().join("home"));
-        assert!(load(&home).unwrap().is_empty());
+        assert_eq!(load(&home).unwrap(), Vec::new());
         let machines = vec![
             Machine::new("workbox", "me@workbox"),
             Machine::new("nano4", "nano4"),

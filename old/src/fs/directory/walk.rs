@@ -165,7 +165,7 @@ mod tests {
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
-        assert!(entries.is_empty());
+        assert!(entries.is_empty(), "{entries:?}");
     }
 
     #[tokio::test]

@@ -524,7 +524,7 @@ mod tests {
             ConnectionEvent::Tasks(TaskUpdate::Snapshot(Vec::new())),
             now,
         );
-        assert!(app.selected_machine().tasks.is_empty());
+        assert_eq!(app.selected_machine().tasks, Vec::new());
     }
 
     #[test]
@@ -547,7 +547,7 @@ mod tests {
         app.expire(start + SETTLED_LINGER);
         assert_eq!(ids(&app), ["b"]);
         app.expire(later + SETTLED_LINGER);
-        assert!(ids(&app).is_empty());
+        assert_eq!(ids(&app), Vec::<String>::new());
     }
 
     #[test]
@@ -601,7 +601,7 @@ mod tests {
         app.expire(start + SETTLED_LINGER);
         assert_eq!(ids(&app), ["running"]);
         app.expire(back + SETTLED_LINGER);
-        assert!(ids(&app).is_empty());
+        assert_eq!(ids(&app), Vec::<String>::new());
     }
 
     #[test]

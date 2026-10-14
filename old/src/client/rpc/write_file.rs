@@ -150,12 +150,14 @@ fn request_stream(
                     let mut bytes = pending.expect("pending data was populated");
                     let chunk = bytes.split_to(bytes.len().min(FILE_DATA_CHUNK_MAX_BYTES));
                     let chunk_len = u64::try_from(chunk.len()).expect("chunk limit fits u64");
-                    if bytes_sent
+                    // `try_update`, its newer name, is past this crate's MSRV.
+                    #[allow(deprecated)]
+                    let overflowed = bytes_sent
                         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                             value.checked_add(chunk_len)
                         })
-                        .is_err()
-                    {
+                        .is_err();
+                    if overflowed {
                         *source_error.lock().unwrap() =
                             Some(io::Error::other("source byte count overflowed"));
                         return None;
